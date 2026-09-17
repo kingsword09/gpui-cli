@@ -51,16 +51,51 @@ gpui build android --release
 | Android | Android SDK/NDK, cargo-ndk, an Android Rust target and JDK 21 |
 
 For Android, set `ANDROID_HOME` and `ANDROID_NDK_HOME` to the SDK and NDK
-directories. Start an emulator or connect a device before running the app.
-The tested emulator configuration on Apple Silicon uses host GPU rendering:
+directories.
+
+## Devices and emulators
+
+List what is installed, then pick one explicitly:
 
 ```bash
-emulator -avd <avd-name> -gpu host
+gpui device list                 # simulators, emulators and physical devices
+gpui device list --all           # include ones that cannot currently be used
+gpui device list --json
+
+gpui device boot Pixel_9_Pro     # boot and wait until it is ready
+gpui device boot --last          # boot the most recently used
+gpui device shutdown Pixel_9_Pro
+gpui device shutdown --all
+
+gpui device create --platform ios --name Test --type "iPhone 17"
+gpui device create --platform android --name Test \
+  --image "system-images;android-36;google_apis_playstore;arm64-v8a" --device pixel_9_pro
+gpui device remove Test --yes
+```
+
+`gpui run` and `gpui build` accept the selection directly:
+
+```bash
+gpui run ios --sim "iPhone 17 Pro@26.2"
+gpui run ios --device-only        # require a physical iOS device
+gpui run android --avd Pixel_9a
+gpui run android --device <serial>
+```
+
+Selection is resolved in this order: CLI flags, then the `[run]` section of
+`gpui.toml`, then the environment variables below, then an interactive prompt
+(when stdin and stdout are a terminal), then a documented default. Pin devices
+per project so runs are reproducible:
+
+```toml
+[run]
+ios_simulator = "iPhone 17 Pro@26.2"   # name@runtime; runtime optional
+android_avd = "Pixel_9a"
 ```
 
 | Environment variable | Purpose |
 | --- | --- |
-| `GPUI_IOS_DEVICE` | iOS simulator name |
+| `GPUI_IOS_DEVICE` | iOS simulator name (or `name@runtime`) |
 | `GPUI_IOS_DEVICE_ID` | Connected iOS device identifier |
 | `GPUI_ANDROID_ABIS` | Android ABIs, comma separated; default `arm64-v8a` |
 | `ANDROID_SERIAL` | Select the adb device |

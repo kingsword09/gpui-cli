@@ -28,6 +28,10 @@ pub fn handle_doctor() -> Result<()> {
         check_command("xcodegen", &["--version"], true, &mut missing);
         check_rust_target("aarch64-apple-ios", true, &mut missing);
         check_rust_target("aarch64-apple-ios-sim", true, &mut missing);
+        // Device discovery and launching go through these.
+        check_command("xcrun", &["--version"], true, &mut missing);
+        check_xcrun_subcommand("simctl", &mut missing);
+        check_xcrun_subcommand("devicectl", &mut missing);
     } else {
         println!("  {} not available off macOS", "–".dimmed());
     }
@@ -36,7 +40,8 @@ pub fn handle_doctor() -> Result<()> {
     check_command("cargo-ndk", &["--version"], true, &mut missing);
     check_rust_target("aarch64-linux-android", true, &mut missing);
 
-    match android_sdk() {
+    let sdk = android_sdk();
+    match &sdk {
         Some(path) => println!("  {} ANDROID_HOME: {}", "✓".green(), path),
         None => {
             println!("  {} ANDROID_HOME / ANDROID_SDK_ROOT is not set", "✗".red());
@@ -54,6 +59,24 @@ pub fn handle_doctor() -> Result<()> {
         }
     }
     check_command("adb", &["version"], true, &mut missing);
+
+    // These live inside the SDK and are frequently absent from PATH, so they
+    // are resolved by path. They are only needed to manage devices.
+    check_sdk_tool(&sdk, "emulator/emulator", "emulator", &mut missing);
+    check_sdk_tool(
+        &sdk,
+        "cmdline-tools/latest/bin/avdmanager",
+        "avdmanager",
+        &mut missing,
+    );
+    check_sdk_tool(
+        &sdk,
+        "cmdline-tools/latest/bin/sdkmanager",
+        "sdkmanager",
+        &mut missing,
+    );
+    // The first-party `android` CLI is optional; `gpui device boot` prefers it.
+    check_command("android", &["info"], false, &mut missing);
 
     println!();
     if missing.is_empty() {
@@ -141,6 +164,50 @@ fn check_command(cmd: &str, args: &[&str], required: bool, missing: &mut Vec<Str
             println!("  {} {}  not found on PATH", tag, cmd.bold());
             if required {
                 missing.push(format!("{cmd} (not on PATH)"));
+            }
+        }
+    }
+}
+
+/// Checks an `xcrun` subcommand, which is how `simctl` and `devicectl` are
+/// invoked (they are not standalone binaries). `help` is used rather than
+/// `--help` because `simctl --help` exits non-zero.
+fn check_xcrun_subcommand(subcommand: &str, missing: &mut Vec<String>) {
+    let output = Command::new("xcrun").args([subcommand, "help"]).output();
+    let ok = output.map(|out| out.status.success()).unwrap_or(false);
+    if ok {
+        println!("  {} xcrun {}", "✓".green(), subcommand.bold());
+    } else {
+        println!(
+            "  {} xcrun {}  not available (update Xcode)",
+            "✗".red(),
+            subcommand.bold()
+        );
+        missing.push(format!("xcrun {subcommand}"));
+    }
+}
+
+/// Reports an executable that ships inside the Android SDK but is often not on
+/// PATH. Optional, since it is only needed to manage devices.
+fn check_sdk_tool(sdk: &Option<String>, relative: &str, label: &str, missing: &mut Vec<String>) {
+    let found = sdk
+        .as_ref()
+        .map(|sdk| std::path::Path::new(sdk).join(relative))
+        .filter(|path| path.is_file());
+
+    match found {
+        Some(path) => println!("  {} {}  {}", "✓".green(), label.bold(), path.display()),
+        None if which::which(label).is_ok() => {
+            println!("  {} {}  found on PATH", "✓".green(), label.bold())
+        }
+        None => {
+            println!(
+                "  {} {}  not found in the SDK (device management unavailable)",
+                "–".dimmed(),
+                label.bold()
+            );
+            if sdk.is_none() {
+                missing.push(format!("{label} (set ANDROID_HOME)"));
             }
         }
     }

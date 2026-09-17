@@ -3,6 +3,7 @@ use colored::*;
 use std::path::PathBuf;
 
 pub mod commands;
+pub mod device;
 pub mod template;
 
 /// Options shared by `init` and `new`.
@@ -42,6 +43,98 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+/// Device selection, shared by `run` and `build`.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct DeviceArgs {
+    /// Target a specific device: a UDID, a serial, or an AVD/simulator name
+    #[arg(long, value_name = "ID")]
+    pub device: Option<String>,
+    /// iOS simulator, by name and optional runtime, e.g. `iPhone 17 Pro@26.2`
+    #[arg(long, value_name = "NAME[@RUNTIME]")]
+    pub sim: Option<String>,
+    /// Android virtual device name
+    #[arg(long, value_name = "NAME")]
+    pub avd: Option<String>,
+    /// Require a physical iOS device
+    #[arg(long)]
+    pub device_only: bool,
+}
+
+impl From<DeviceArgs> for device::DeviceFlags {
+    fn from(args: DeviceArgs) -> Self {
+        device::DeviceFlags {
+            device: args.device,
+            sim: args.sim,
+            avd: args.avd,
+            device_only: args.device_only,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum DeviceCommands {
+    /// List installed simulators, emulators and physical devices
+    List {
+        /// Restrict to one platform
+        #[arg(long, value_name = "ios|android")]
+        platform: Option<String>,
+        /// Include devices that cannot currently be used
+        #[arg(long)]
+        all: bool,
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a new simulator or emulator
+    Create {
+        /// Platform to create for
+        #[arg(long, value_name = "ios|android")]
+        platform: String,
+        /// Name of the new device
+        #[arg(long, value_name = "NAME")]
+        name: String,
+        /// Android system image package, e.g. `system-images;android-36;google_apis_playstore;arm64-v8a`
+        #[arg(long, value_name = "PACKAGE")]
+        image: Option<String>,
+        /// Android hardware profile, e.g. `pixel_9_pro`
+        #[arg(long, value_name = "PROFILE")]
+        device: Option<String>,
+        /// Android: create from a first-party `android` CLI profile instead of an image
+        #[arg(long, value_name = "PROFILE")]
+        profile: Option<String>,
+        /// iOS device type, e.g. `iPhone 17 Pro`
+        #[arg(long = "type", value_name = "MODEL")]
+        device_type: Option<String>,
+        /// iOS runtime version, e.g. `26.2`
+        #[arg(long, value_name = "VERSION")]
+        runtime: Option<String>,
+    },
+    /// Boot a device, waiting until it is ready
+    Boot {
+        /// Device id, name or serial
+        id: Option<String>,
+        /// Boot the most recently used device
+        #[arg(long)]
+        last: bool,
+    },
+    /// Shut down a simulator or emulator
+    Shutdown {
+        /// Device id, name or serial
+        id: Option<String>,
+        /// Shut down every running simulator and emulator
+        #[arg(long)]
+        all: bool,
+    },
+    /// Delete a simulator or emulator
+    Remove {
+        /// Device id, name or serial
+        id: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Create a new GPUI project (interactive wizard)
@@ -67,6 +160,8 @@ pub enum Commands {
         /// Build in release mode
         #[arg(short, long)]
         release: bool,
+        #[command(flatten)]
+        device: DeviceArgs,
     },
     /// Build without launching: all, desktop, ios, android
     Build {
@@ -76,6 +171,13 @@ pub enum Commands {
         /// Build in release mode
         #[arg(short, long)]
         release: bool,
+        #[command(flatten)]
+        device: DeviceArgs,
+    },
+    /// Discover, create and manage simulators, emulators and devices
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommands,
     },
     /// Print the project metadata read from gpui.toml
     Info,
@@ -115,12 +217,17 @@ fn main() -> anyhow::Result<()> {
             })?
         }
         Some(Commands::Doctor) => commands::doctor::handle_doctor()?,
-        Some(Commands::Run { target, release }) => {
-            commands::run::handle_run(Some(target), release)?
-        }
-        Some(Commands::Build { target, release }) => {
-            commands::build::handle_build(Some(target), release)?
-        }
+        Some(Commands::Run {
+            target,
+            release,
+            device,
+        }) => commands::run::handle_run(Some(target), release, device.into())?,
+        Some(Commands::Build {
+            target,
+            release,
+            device,
+        }) => commands::build::handle_build(Some(target), release, device.into())?,
+        Some(Commands::Device { command }) => commands::device::handle_device(command)?,
         Some(Commands::Info) => commands::info::handle_info()?,
         Some(Commands::Completions { shell }) => commands::completions::handle_completions(shell)?,
         None => {
