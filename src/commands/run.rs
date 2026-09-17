@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::device::{self, android, inventory, ios, DeviceFlags, Kind, Platform as DevicePlatform};
 use crate::template::Platform;
 
 /// Resolved project layout, read from the current working directory.
@@ -11,6 +12,8 @@ pub struct Project {
     pub root: PathBuf,
     pub name: String,
     pub title: String,
+    /// Per-project device defaults from the `[run]` section.
+    pub defaults: inventory::Defaults,
 }
 
 impl Project {
@@ -37,7 +40,13 @@ impl Project {
         let manifest = fs::read_to_string(&manifest_path)?;
         let name = read_string(&manifest, "name").context("gpui.toml has no `name`")?;
         let title = read_string(&manifest, "title").unwrap_or_else(|| name.clone());
-        Ok(Self { root, name, title })
+        let defaults = inventory::Defaults::from_manifest(&manifest);
+        Ok(Self {
+            root,
+            name,
+            title,
+            defaults,
+        })
     }
 
     pub fn app_crate(&self) -> String {
@@ -163,61 +172,54 @@ pub fn build_desktop(project: &Project, release: bool) -> Result<()> {
 
 // ── iOS ──────────────────────────────────────────────────────────────────────
 
-/// Simulator device name, overridable with `GPUI_IOS_DEVICE`.
-fn simulator_name() -> String {
-    std::env::var("GPUI_IOS_DEVICE").unwrap_or_else(|_| "iPhone 16 Pro".to_string())
+/// Where an iOS build should be targeted.
+pub enum IosTarget {
+    Simulator(device::Device),
+    Physical(device::Device),
 }
 
-/// Resolves a simulator UDID, falling back to the first available iPhone.
-fn resolve_simulator(preferred: &str) -> Result<String> {
-    let output = Command::new("xcrun")
-        .args(["simctl", "list", "devices", "available"])
-        .output()
-        .context("failed to run `xcrun simctl list devices`")?;
-    let listing = String::from_utf8_lossy(&output.stdout);
+impl IosTarget {
+    pub fn is_device(&self) -> bool {
+        matches!(self, IosTarget::Physical(_))
+    }
 
-    // Prefer an exact name match on an available device.
-    for line in listing.lines() {
-        if line.contains(preferred) {
-            if let Some(udid) = extract_udid(line) {
-                return Ok(udid);
-            }
+    pub fn label(&self) -> String {
+        match self {
+            IosTarget::Simulator(d) | IosTarget::Physical(d) => d.label(),
         }
     }
-    for line in listing.lines() {
-        if line.contains("iPhone") {
-            if let Some(udid) = extract_udid(line) {
-                return Ok(udid);
-            }
-        }
-    }
-    bail!(
-        "No available iOS simulator found. Open Simulator.app once, or set GPUI_IOS_DEVICE \
-         to an installed device name."
-    )
 }
 
-fn extract_udid(line: &str) -> Option<String> {
-    let open = line.find('(')?;
-    let close = line[open..].find(')')? + open;
-    let candidate = &line[open + 1..close];
-    let looks_like_udid =
-        candidate.len() >= 8 && candidate.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
-    if looks_like_udid {
-        Some(candidate.to_string())
-    } else {
-        None
+/// Resolves the iOS destination: a physical device (`--device-only`,
+/// `GPUI_IOS_DEVICE_ID`, or a `--device` naming one), otherwise a simulator.
+pub fn resolve_ios_target(project: &Project, flags: &DeviceFlags) -> Result<IosTarget> {
+    let device = inventory::resolve_device(DevicePlatform::Ios, flags, &project.defaults, None)?;
+    match device.kind {
+        Kind::Physical => Ok(IosTarget::Physical(device)),
+        Kind::Emulator => Ok(IosTarget::Simulator(device)),
+    }
+}
+
+/// The `-destination` value `xcodebuild` needs. A concrete UDID avoids the
+/// ambiguity of matching a simulator by name, which several runtimes share.
+fn xcode_destination(target: &IosTarget) -> String {
+    match target {
+        IosTarget::Physical(_) => "generic/platform=iOS".to_string(),
+        IosTarget::Simulator(device) => {
+            format!("platform=iOS Simulator,id={}", device.id)
+        }
     }
 }
 
 /// Builds the Rust staticlib, generates the Xcode project, then builds the app.
 /// Returns the path of the produced `.app` bundle.
-pub fn build_ios_app(project: &Project, device: bool, release: bool) -> Result<PathBuf> {
+pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Result<PathBuf> {
     if !project.ios_dir().exists() {
         bail!("This project has no iOS target. Add one with `gpui init --add`.");
     }
     ensure_tool("xcodegen", "Install it with `brew install xcodegen`.")?;
 
+    let device = target.is_device();
     let rust_target = if device {
         "aarch64-apple-ios"
     } else {
@@ -259,14 +261,7 @@ pub fn build_ios_app(project: &Project, device: bool, release: bool) -> Result<P
 
     // Resolve to a concrete UDID: matching a simulator by name is ambiguous
     // once several runtimes are installed, and xcodebuild then refuses to pick.
-    let destination = if device {
-        "generic/platform=iOS".to_string()
-    } else {
-        format!(
-            "platform=iOS Simulator,id={}",
-            resolve_simulator(&simulator_name())?
-        )
-    };
+    let destination = xcode_destination(target);
 
     let mut xcodebuild = Command::new("xcodebuild");
     xcodebuild
@@ -301,60 +296,28 @@ pub fn build_ios_app(project: &Project, device: bool, release: bool) -> Result<P
     Ok(app_path)
 }
 
-pub fn run_ios(project: &Project, release: bool) -> Result<()> {
-    // `GPUI_IOS_DEVICE_ID` switches to a connected physical device.
-    match std::env::var("GPUI_IOS_DEVICE_ID") {
-        Ok(device_id) if !device_id.trim().is_empty() => {
-            let app = build_ios_app(project, true, release)?;
-            run_step(
-                "devicectl install + launch",
-                Command::new("xcrun")
-                    .args(["devicectl", "device", "install", "app"])
-                    .arg(&app)
-                    .arg("--device")
-                    .arg(device_id.trim()),
-            )?;
-            run_step(
-                "devicectl launch",
-                Command::new("xcrun")
-                    .args(["devicectl", "device", "process", "launch"])
-                    .arg("--device")
-                    .arg(device_id.trim())
-                    .arg(bundle_id_of(project)),
-            )
-        }
-        _ => {
-            let app = build_ios_app(project, false, release)?;
-            let udid = resolve_simulator(&simulator_name())?;
+pub fn run_ios(project: &Project, flags: &DeviceFlags, release: bool) -> Result<()> {
+    let target = resolve_ios_target(project, flags)?;
 
-            println!("  {} booting simulator {}", "→".blue(), udid);
-            // Already-booted simulators make `boot` fail; that is fine.
-            let _ = Command::new("xcrun")
-                .args(["simctl", "boot", &udid])
-                .status();
-            let _ = Command::new("open").args(["-a", "Simulator"]).status();
-            run_step(
-                "waiting for simulator",
-                Command::new("xcrun").args(["simctl", "bootstatus", &udid, "-b"]),
-            )?;
-            run_step(
-                "simctl install",
-                Command::new("xcrun")
-                    .args(["simctl", "install", &udid])
-                    .arg(&app),
-            )?;
-            let bundle_id = bundle_id_of(project);
-            run_step(
-                "simctl launch",
-                Command::new("xcrun").args([
-                    "simctl",
-                    "launch",
-                    "--terminate-running-process",
-                    &udid,
-                    &bundle_id,
-                ]),
-            )?;
-            println!("\n{}", "🚀 Launched on the iOS Simulator.".green());
+    match target {
+        IosTarget::Physical(device) => {
+            println!("  {} targeting {}", "→".blue(), device.label());
+            let app = build_ios_app(project, &IosTarget::Physical(device.clone()), release)?;
+            ios::install_and_launch_device(&device.id, &app, &bundle_id_of(project))?;
+            println!(
+                "\n{}",
+                format!("🚀 Launched on {}.", device.label()).green()
+            );
+            Ok(())
+        }
+        IosTarget::Simulator(device) => {
+            // Boot before building: xcodebuild needs a booted destination to
+            // install onto, and this keeps failures early.
+            let ready = device::inventory::ensure_running(device)?;
+            let app = build_ios_app(project, &IosTarget::Simulator(ready.clone()), release)?;
+            println!("  {} installing on {}", "→".blue(), ready.label());
+            ios::install_and_launch(&ready.id, &app, &bundle_id_of(project))?;
+            println!("\n{}", format!("🚀 Launched on {}.", ready.label()).green());
             Ok(())
         }
     }
@@ -461,89 +424,25 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     Ok(apk)
 }
 
-pub fn run_android(project: &Project, release: bool) -> Result<()> {
-    ensure_tool(
-        "adb",
-        "Install the Android platform tools and put `adb` on PATH.",
+pub fn run_android(project: &Project, flags: &DeviceFlags, release: bool) -> Result<()> {
+    let chosen =
+        device::inventory::resolve_device(DevicePlatform::Android, flags, &project.defaults, None)?;
+
+    let target = device::inventory::ensure_running(chosen)?;
+    let serial = target.serial().context(
+        "The selected Android device has no adb serial; re-run `gpui device list` to check it.",
     )?;
 
-    // Host rendering is the tested emulator configuration. SurfaceFlinger's
-    // renderer is a useful hint, but does not prove which adapter GPUI uses or
-    // whether the application's shaders can compile.
-    if let Some(("emulator", _)) = adb_target_kind() {
-        let cpu_only = emulator_reports_cpu_only_gpu();
-        if cpu_only {
-            println!(
-                "  {} emulator reports software rendering; this configuration is not yet verified.\n\
-                   {} use the tested host mode: emulator -avd <name> -gpu host",
-                "⚠".yellow(),
-                " ".repeat(9)
-            );
-        }
-    }
     let apk = build_android_apk(project, release)?;
     let bundle_id = bundle_id_of_android(project);
 
-    run_step(
-        "adb install -r",
-        Command::new("adb").args(["install", "-r"]).arg(&apk),
-    )?;
-
-    // Prefer an explicit launcher activity from the manifest; the generated
-    // host uses the gpui-mobile activity.
-    run_step(
-        "adb shell am start",
-        Command::new("adb").args([
-            "shell",
-            "am",
-            "start",
-            "-n",
-            &format!("{bundle_id}/dev.gpui.mobile.GpuiActivity"),
-        ]),
-    )?;
+    println!("  {} installing on {}", "→".blue(), target.label());
+    android::install_and_launch(serial, &apk, &bundle_id)?;
     println!(
         "\n{}",
-        "🚀 Launched on the Android device/emulator.".green()
+        format!("🚀 Launched on {}.", target.label()).green()
     );
     Ok(())
-}
-
-/// Returns the connected target's kind and serial, if a device is attached.
-fn adb_target_kind() -> Option<(&'static str, String)> {
-    let output = Command::new("adb").args(["devices"]).output().ok()?;
-    let listing = String::from_utf8_lossy(&output.stdout);
-    for line in listing.lines().skip(1) {
-        let mut parts = line.split_whitespace();
-        let serial = parts.next()?;
-        let state = parts.next().unwrap_or("");
-        if state != "device" {
-            continue;
-        }
-        let kind = if serial.starts_with("emulator-") {
-            "emulator"
-        } else {
-            "device"
-        };
-        return Some((kind, serial.to_string()));
-    }
-    None
-}
-
-/// Asks the emulator whether any non-CPU GPU adapter is present.
-fn emulator_reports_cpu_only_gpu() -> bool {
-    let output = Command::new("adb")
-        .args(["shell", "dumpsys", "SurfaceFlinger"])
-        .output();
-    let Ok(output) = output else { return false };
-    let text = String::from_utf8_lossy(&output.stdout);
-    // SurfaceFlinger lists the GLES renderer it is using.
-    let gl = text
-        .lines()
-        .find(|l| l.contains("GLES:") || l.contains("GLES renderer"))
-        .unwrap_or("");
-    gl.contains("SwiftShader")
-        || gl.contains("llvmpipe")
-        || gl.contains("ANGLE (Google, Vulkan 1.3.0 (SwiftShader")
 }
 
 /// Reads `applicationId` from the Gradle app module.
@@ -563,21 +462,21 @@ fn bundle_id_of_android(project: &Project) -> String {
 }
 
 /// Dispatches `gpui run <target>`.
-pub fn handle_run(target: Option<String>, release: bool) -> Result<()> {
+pub fn handle_run(target: Option<String>, release: bool, flags: DeviceFlags) -> Result<()> {
     let project = Project::load(None)?;
     let target = target.unwrap_or_else(|| "desktop".to_string());
 
     println!(
         "{}",
-        format!("🚀 Running '{}' for target: {}\n", project.title, target)
+        format!(" Running '{}' for target: {}\n", project.title, target)
             .bold()
             .cyan()
     );
 
     match target.to_ascii_lowercase().as_str() {
         "desktop" | "macos" | "windows" | "linux" => run_desktop(&project, release),
-        "ios" => run_ios(&project, release),
-        "android" => run_android(&project, release),
+        "ios" => run_ios(&project, &flags, release),
+        "android" => run_android(&project, &flags, release),
         other => bail!(
             "Unknown target '{other}'. Valid targets: desktop, ios, android.{}",
             match Platform::parse(other) {

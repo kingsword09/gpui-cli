@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["gpui", "gui", "cli", "mobile", "desktop"]
 categories = ["command-line-utilities", "gui"]
-include = ["/src/**", "/templates/**", "/assets/**", "/scripts/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/CONTRIBUTING.md", "/LICENSE-*", "/THIRD_PARTY_NOTICES.md"]
+include = ["/src/**", "/templates/**", "/assets/**", "/scripts/**", "/docs/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/CONTRIBUTING.md", "/LICENSE-*", "/THIRD_PARTY_NOTICES.md"]
 
 [[bin]]
 name = "gpui"
@@ -24,3 +24,5 @@ anyhow = "1.0"
 include_dir = "0.7"
 which = "8.0"
 tempfile = "3.23"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

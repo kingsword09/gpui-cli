@@ -1,10 +1,11 @@
 use anyhow::{bail, Result};
 use colored::*;
 
-use super::run::{build_android_apk, build_desktop, build_ios_app, Project};
+use super::run::{build_android_apk, build_desktop, build_ios_app, resolve_ios_target, Project};
+use crate::device::DeviceFlags;
 
 /// Dispatches `gpui build <target>`.
-pub fn handle_build(target: Option<String>, release: bool) -> Result<()> {
+pub fn handle_build(target: Option<String>, release: bool, flags: DeviceFlags) -> Result<()> {
     let project = Project::load(None)?;
     let target = target
         .unwrap_or_else(|| "all".to_string())
@@ -18,8 +19,12 @@ pub fn handle_build(target: Option<String>, release: bool) -> Result<()> {
         }
         "ios" => {
             banner(&project.title, "ios");
-            let app = build_ios_app(&project, false, release)?;
-            println!("  {} simulator bundle: {}", "✓".green(), app.display());
+            // The destination determines which Rust target is compiled, so the
+            // device has to be resolved even for a build-only run.
+            let ios_target = resolve_ios_target(&project, &flags)?;
+            println!("  {} targeting {}", "→".blue(), ios_target.label());
+            let app = build_ios_app(&project, &ios_target, release)?;
+            println!("  {} bundle: {}", "✓".green(), app.display());
             Ok(())
         }
         "android" => {
@@ -44,7 +49,8 @@ fn build_all(project: &Project, release: bool) -> Result<()> {
 
     if project.ios_dir().exists() {
         banner(&project.title, "ios (simulator)");
-        let app = build_ios_app(project, false, release)?;
+        let ios_target = resolve_ios_target(project, &DeviceFlags::default())?;
+        let app = build_ios_app(project, &ios_target, release)?;
         println!("  {} {}", "✓".green(), app.display());
         built += 1;
     }

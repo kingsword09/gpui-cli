@@ -12,3 +12,10 @@ framework = "{{UI_FRAMEWORK}}"
 # Pins used by the generated Cargo manifest. Keep these in sync with the
 # `gpui-pre-*` family version if you upgrade GPUI by hand.
 gpui_version = "{{GPUI_PRE_VERSION}}"
+
+[run]
+# Default devices for `gpui run`, so it does not prompt every time.
+# List what is installed with `gpui device list`.
+#
+# ios_simulator = "iPhone 17 Pro@26.2"   # name@runtime; runtime optional
+# android_avd = "Pixel_9_Pro"

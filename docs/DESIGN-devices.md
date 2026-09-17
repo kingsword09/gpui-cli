@@ -1,6 +1,6 @@
 # 设计：模拟器与真机的发现、选择、启动（`gpui device`）
 
-状态：草案（待评审）
+状态：已实现（2026-09-17）
 日期：2026-09-17
 相关文件：`src/commands/run.rs`、`src/commands/build.rs`、`src/commands/doctor.rs`、`src/main.rs`
 
@@ -31,7 +31,7 @@
 | `resolve_simulator()` | 用 `line.contains(preferred)` 做文本匹配；名称在不同 runtime 间会重复，命中结果取决于输出顺序 |
 | `extract_udid()` | 靠括号内字符集"猜"UDID，非结构化解析 |
 | `adb_target_kind()` | 只取 `adb devices` 第一个 `device` 行；后续 adb 命令从不传 `-s`，多设备在线时不可控 |
-| `run_android()` | 只对模拟器打印一条渲染警告就继续，不会启动模拟器，也不会创建 AVD |
+| `run_android()` | 假设设备已就绪，不会启动模拟器，也不会创建 AVD |
 | `doctor.rs:56` | 只检查 `adb`；`emulator`、`avdmanager`、`sdkmanager` 未检查，`xcrun simctl`/`devicectl` 未检查 |
 
 `src/main.rs` 的 `Commands` 枚举（第 45 行起）目前只有 `Init` / `New` / `Doctor` / `Run` / `Build` / `Info` / `Completions`，没有设备相关子命令，`Run`/`Build` 也没有 `--device` 一类的标志。
@@ -220,11 +220,12 @@ gpui device create --platform ios --name <n>
 
 gpui device boot <id> | --last
 gpui device shutdown <id> | --all
-gpui device remove <id>
+gpui device remove <id> [--yes]
 ```
 
 - `--json` 直接序列化 `Vec<Device>`，供脚本与 CI 使用。
 - 人类可读输出用 `colored` 渲染为按平台分组的表；默认隐藏 `Unavailable`，`--all` 才显示。
+- `remove` 不可逆：交互式下确认，非交互式下必须显式传 `--yes`，避免脚本里无声删除。
 
 ### 6.2 `gpui run` / `gpui build` 新增标志
 
@@ -233,7 +234,6 @@ gpui device remove <id>
 --sim <机型[@运行时]>   iOS 模拟器专用简写
 --avd <name>           Android 专用
 --device-only          强制使用真机（沿用现有 GPUI_IOS_DEVICE_ID 逻辑）
---allow-emulator       放行已知渲染有问题的 Android 模拟器（见 §8）
 ```
 
 `build` 需要具体 UDID 才能生成正确的 `-destination`，因此 `--sim` / `--avd` / `--device` 必须在 `src/commands/build.rs` 同步接线。
@@ -271,8 +271,8 @@ BnTest1 · iOS 18.3.2 · 不可用（已配对，隧道不可用）
 
 ### Android AVD（按可用性降级）
 
-1. `android emulator start <avd>` —— 阻塞到 ready，首选
-2. `$ANDROID_HOME/emulator/emulator -avd <avd> -gpu host` —— 需自行后台化
+1. `android emulator start <avd>` —— 阻塞到 ready，首选。该 CLI 不接受 `-gpu` 参数，走 AVD 自身的 `hw.gpu.mode`（实测默认 `auto` 可正常渲染，此时 guest 侧 Vulkan 为 SwiftShader 软件实现）
+2. `$ANDROID_HOME/emulator/emulator -avd <avd> -gpu host` —— `android` CLI 缺失时的回退，需自行后台化。`-gpu host` 让 wgpu 拿到硬件 `Apple M2 (Vulkan, IntegratedGpu)`，比软件 Vulkan 快，故保留
 3. 以上两种都必须随后 `adb wait-for-device` + 轮询 `getprop sys.boot_completed`
 4. 最后 `adb -s <serial> install -r <apk>` → `adb -s <serial> shell am start -n <bundle_id>/dev.gpui.mobile.GpuiActivity`
 
@@ -288,15 +288,24 @@ BnTest1 · iOS 18.3.2 · 不可用（已配对，隧道不可用）
 
 ---
 
-## 9. Android 模拟器渲染限制（头等警告）
+## 9. Android 模拟器渲染：结论已被推翻（2026-09-17 复测）
 
-既有的实测结论：在 Apple Silicon 上 Android 模拟器**无法渲染 GPUI**，即使加 `-gpu host` 也不可行（无 `-gpu host` 时 wgpu 只能枚举到 `type=Cpu`；加了之后得到 `wgpu device lost: reason=Unknown` 与 `Surface texture validation error`）。需要真机，或具备原生 GPU 直通能力的宿主。
+本节初稿基于一条旧结论"Apple Silicon 上 Android 模拟器无法渲染 GPUI，需真机"。**该结论现已被实测推翻**，实现中相应的警告与拦截逻辑已全部移除。
 
-这条必须在设计里被显式处理，否则用户会在此环境浪费大量时间：
+复测（Pixel_9a / Android 15 / arm64-v8a，本机 M2）两种 GPU 模式**都能正常渲染**，画面为模板默认欢迎页：
 
-1. `gpui device list` 对 Android 模拟器打 `⚠ 可能无法渲染` 标记。
-2. `gpui run android` 选中模拟器时**要求确认**（`inquire::Confirm`）；非 TTY 下必须显式传 `--allow-emulator` 才继续，文案指向使用真机。
-3. 运行时二次校验：保留现有 `emulator_reports_cpu_only_gpu()`（解析 `adb shell dumpsys SurfaceFlinger` 的 GLES 渲染器，匹配 `SwiftShader` / `llvmpipe` / `ANGLE (Google, Vulkan 1.3.0 (SwiftShader`），把静态警告升级为实测确认。
+| 模式 | wgpu 选中的适配器 | 结果 |
+|---|---|---|
+| `-gpu host` | `Apple M2 (Vulkan, IntegratedGpu)` | 渲染正常，无错误 |
+| 默认（`hw.gpu.mode=auto`） | `SwiftShader Device (LLVM 10.0.0) (Vulkan)` | 渲染正常，无错误 |
+
+两种模式下均观察到位：`finish_launching` 回调执行、`NATIVE_INITIALIZED = true`、事件循环 heartbeat 持续推进、logcat 中 `device lost` / `validation error` / `panic` 计数为 0。截图确认 UI 实际可见。
+
+也就是说，旧结论中"软件渲染下初始化卡在 `Selected GPU adapter` 之后、`NATIVE_INITIALIZED` 永不置位"以及"`-gpu host` 下必然 `device lost`"这两个失败点都不再复现。最可能的原因是模板内 vendored 的 `gpui-pre-wgpu 0.3.5` 补丁——见 `templates/android-compat/gpui-pre-wgpu-0.3.5/PATCHES.md`，其中明确写着为「Android 模拟器的 Metal 翻译」调整了 `shaders.wgsl` 的渐变参数传递，并在 Android 上关闭 wgpu 的 shader DEBUG 信息（`wgpu_context.rs`，仅 `target_os = "android"`）。
+
+因此本设计中**不再需要**：设备列表里的渲染警告标记、`gpui run android` 的模拟器确认拦截、`--allow-emulator` 标志，以及 `emulator_reports_cpu_only_gpu()` 的运行时二次校验。全部已删除。
+
+**遗留提醒**：该补丁同时说明 "Revalidate native rendering before upgrading or removing the override"——升级 `gpui-pre-wgpu` 时需重新验证模拟器渲染，这两处针对性修改是模拟器可用性的依赖。
 
 ---
 
@@ -308,28 +317,44 @@ BnTest1 · iOS 18.3.2 · 不可用（已配对，隧道不可用）
 
 | 文件 | 改动 |
 |---|---|
-| `src/device/mod.rs`、`src/device/inventory.rs` | 新增：模型、发现编排、选择链 |
-| `src/device/ios.rs`、`src/device/android.rs` | 新增：平台实现 |
+| `src/device/mod.rs` | 新增：模型（`Device`/`State`/`Kind`）、工具路径解析、`last_used` 时间戳解析 |
+| `src/device/inventory.rs` | 新增：`Defaults`、规格匹配、选择链、交互选择器、启动编排 |
+| `src/device/ios.rs` | 新增：`simctl` / `devicectl` 发现与生命周期 |
+| `src/device/android.rs` | 新增：AVD `config.ini` 解析、`adb` 发现、`avdmanager`/`android` CLI 生命周期 |
 | `src/commands/device.rs` | 新增：`gpui device` 子命令 |
-| `src/main.rs:45` | `Commands` 增加 `Device { .. }`；`Run`/`Build` 增加 §6.2 的标志 |
+| `src/main.rs` | `Commands` 增加 `Device { .. }`；`Run`/`Build` 增加 `[DeviceArgs]`（§6.2 的标志） |
 | `src/commands/run.rs` | 删除 `simulator_name` / `resolve_simulator` / `extract_udid` / `adb_target_kind`；改接设备层；所有 adb 命令带 `-s` |
 | `src/commands/build.rs` | 接 `--sim` / `--avd` / `--device` 以生成 `-destination` |
 | `src/commands/doctor.rs` | 新增 `xcrun simctl` / `xcrun devicectl` / `$ANDROID_HOME` 下的 `emulator`+`avdmanager`+`sdkmanager` / `android` CLI 检查（后者标为可选） |
-| `src/template.rs` | `gpui.toml` 模板增加 `[run]` 段 |
+| `templates/gpui.toml` | 增加 `[run]` 段（默认注释掉，附示例） |
+| `Cargo.toml` | 增加 `serde` + `serde_json` |
 
 注意：**模板是编译期通过 `include_dir!` 嵌入的**，修改 `templates/` 后必须重建 CLI，否则旧的嵌入副本仍会生效。
 
+### 与初版设计的偏差
+
+- `gpui.toml` 的 `[run]` 键带行内注释（模板里如此），因此值解析必须剥离 `#` 之后的内容，否则 `"iPhone 16e@18.4"   # ...` 会被当成完整规格导致匹配失败。已有回归测试覆盖。
+- `Device` 增加了 `last_used` 字段：`--last` 需要真实的最近使用时间，来源为 `simctl` 的 `lastBootedAt`、`devicectl` 的 `lastConnectionDate`、AVD 目录 mtime。该字段同时用于默认排序。
+- `gpui device remove` 增加了 `--yes`：删除不可逆，非交互式下强制显式确认。
+- `gpui device create --platform ios` 在未给 `--runtime` 时默认取最新运行时，使候选机型列表与 `simctl create` 的默认行为一致。
+- `check_xcrun_subcommand` 用 `xcrun <tool> help` 而非 `--help`：`simctl --help` 退出码为 1。
+- **渲染警告与 `--allow-emulator` 已全部删除**：初稿基于的"模拟器无法渲染"结论经复测被推翻，详见 §9。
+
 ---
 
-## 11. 分期实施
+## 11. 实施状态
 
-| 阶段 | 内容 | 风险 |
+P0–P4 均已实现，`cargo fmt --check` / `cargo clippy --all-targets --locked -- -D warnings` / `cargo test --locked`（28 项）全部通过。
+
+| 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 统一清单 + `gpui device list`（含 `--json`） | 纯只读，零风险；直接解决"如何获取已安装的模拟器与真机" |
-| P1 | `run`/`build` 的 `--device`/`--sim`/`--avd` + `gpui.toml` 默认值 + 交互选择器 | 解决"在命令行选择哪个启动" |
-| P2 | `gpui device boot` / `shutdown` | 开始有状态变更 |
-| P3 | `gpui device create` / `remove` + 镜像选择 | 解决"是否用新模拟器" |
-| P4 | `doctor` 扩展 | 低 |
+| P0 | 统一清单 + `gpui device list`（含 `--json`） | 已完成 |
+| P1 | `run`/`build` 的 `--device`/`--sim`/`--avd` + `gpui.toml` 默认值 + 交互选择器 | 已完成 |
+| P2 | `gpui device boot` / `shutdown` | 已完成 |
+| P3 | `gpui device create` / `remove` + 镜像选择 | 已完成 |
+| P4 | `doctor` 扩展 | 已完成 |
+
+本机实测通过：`gpui device list`（22 台模拟器 + 1 台不可用真机 + 2 个 AVD）、`gpui run ios` 全流程（boot → build → install → launch）、`gpui device create`/`remove` 往返、`gpui run android`（经 `android` CLI 启动 AVD、解析回 AVD 名、安装并启动 Activity）。
 
 ---
 
@@ -352,4 +377,4 @@ BnTest1 · iOS 18.3.2 · 不可用（已配对，隧道不可用）
 
 ## 附录 B：已知不一致
 
-记忆中引用了仓库内的 `docs/TROUBLESHOOTING.md` 作为 §9 渲染问题的出处，但该文件既不在已跟踪文件列表中，`docs/` 目录此前也不存在。需补上该文档，或把引用改到实际位置。
+有一条旧记忆把 §9 的渲染结论归因到仓库内的 `docs/TROUBLESHOOTING.md`，但该文件从未存在，且该结论本身已被推翻（见 §9）。相关记忆已更新。
