@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="GpuiTheme" parent="@android:style/Theme.NoTitleBar">
+        <item name="android:windowBackground">@color/gpui_surface</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:hardwareAccelerated">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">false</item>
+        <item name="android:statusBarColor">@color/gpui_surface</item>
+        <item name="android:navigationBarColor">@color/gpui_surface</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowContentTransitions">false</item>
+    </style>
+
+    <style name="GpuiSplashTheme" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/gpui_surface</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/GpuiTheme</item>
+    </style>
+</resources>

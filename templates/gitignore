@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+.DS_Store
+.idea/
+.vscode/
+
+# iOS
+mobile/ios/build/
+mobile/ios/*.xcodeproj/
+mobile/ios/*.xcworkspace/
+
+# Android
+mobile/android/gradle/.gradle/
+mobile/android/gradle/build/
+mobile/android/gradle/app/build/
+mobile/android/gradle/local.properties
+# Rust .so files are produced by `gpui build android`, never committed.
+mobile/android/gradle/app/src/main/jniLibs/

@@ -1,0 +1,16 @@
+[package]
+name = "{{APP_CRATE}}"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "{{APP_LIB_NAME}}"
+# `staticlib` is what Xcode links on iOS; `cdylib` is what Android loads.
+# The plain `lib` target keeps the crate usable from the desktop binary.
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+gpui.workspace = true
+gpui-kit.workspace = true
+log.workspace = true
+{{MOBILE_DEP}}{{ANDROID_SECTION}}

@@ -1,0 +1,14 @@
+[app]
+name = "{{PROJECT_NAME}}"
+title = "{{APP_TITLE}}"
+bundle_id = "{{BUNDLE_ID}}"
+version = "0.1.0"
+targets = [{{TARGETS}}]
+
+[ui]
+framework = "{{UI_FRAMEWORK}}"
+
+[build]
+# Pins used by the generated Cargo manifest. Keep these in sync with the
+# `gpui-pre-*` family version if you upgrade GPUI by hand.
+gpui_version = "{{GPUI_PRE_VERSION}}"

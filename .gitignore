@@ -1,0 +1,13 @@
+/target/
+/artifacts/
+.zcode/
+.codex/
+.impeccable/
+.idea/
+.vscode/
+__pycache__/
+.venv/
+.env
+.env.*
+!.env.example
+.DS_Store
