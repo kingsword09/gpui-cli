@@ -50,6 +50,19 @@ emulator), and compile errors are shown with file, line and snippet while the
 previous app keeps running until the fix lands. `--live` is debug-only; type
 `r` + Enter to force a rebuild and `q` + Enter to quit.
 
+The generated apps come with a dev channel wired in (debug builds only, no
+extra dependencies):
+
+- **Logs and panics** are forwarded to the CLI, so desktop and iOS-simulator
+  output lands in one place with panic locations and backtraces.
+- **Assets hot-reload**: images under `assets/` update in the running app
+  without a rebuild (desktop, Android; iOS picks them up on the next rebuild).
+- **State survives restarts**: the generated click counter demonstrates the
+  snapshot protocol — call `live::publish_state` from your render and read
+  `live::take_restored_state()` when constructing your view to keep any
+  JSON-serializable state across rebuilds. Every failure degrades to an
+  announced cold start.
+
 | Target | Prerequisites |
 | --- | --- |
 | Desktop | Rust and the host platform's native build dependencies |
