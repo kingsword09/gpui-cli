@@ -39,6 +39,11 @@ static OUTBOUND: Mutex<Option<mpsc::SyncSender<String>>> = Mutex::new(None);
 /// Asset paths the CLI reported as changed, drained by the UI loop.
 static ASSET_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Set by `dev_asset_source()`: only then does the hello advertise the
+/// asset-reload capability, so the CLI can skip rebuilds for asset changes.
+static ASSET_SOURCE_INSTALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Resolves the dev-server credentials, or `None` when not run under
 /// `gpui run --live`.
 fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
@@ -109,6 +114,74 @@ pub fn take_asset_events() -> Vec<String> {
     std::mem::take(&mut ASSET_EVENTS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// A file-backed asset source for live development.
+///
+/// `img("assets/foo.png")` resolves through this source, reading straight from
+/// disk every time so the CLI can evict GPUI's cache entry on change and the
+/// next render picks the new bytes up without a rebuild.
+///
+/// Roots are tried in order: the `GPUI_LIVE_ASSETS` directory the CLI exports
+/// (desktop and iOS simulator), the process working directory's `assets/`
+/// (desktop), and finally `extra_root` (the app files dir on Android, where
+/// the CLI pushes changed assets over adb).
+pub struct DevAssetSource {
+    roots: Vec<std::path::PathBuf>,
+}
+
+pub fn dev_asset_source(extra_root: Option<std::path::PathBuf>) -> DevAssetSource {
+    ASSET_SOURCE_INSTALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut roots = Vec::new();
+    if let Ok(dir) = std::env::var("GPUI_LIVE_ASSETS") {
+        roots.push(std::path::PathBuf::from(dir));
+    }
+    roots.push(std::path::PathBuf::from("assets"));
+    if let Some(root) = extra_root {
+        roots.push(root);
+    }
+    DevAssetSource { roots }
+}
+
+impl DevAssetSource {
+    /// `img("assets/x.png")` keys carry the `assets/` prefix, but every root
+    /// already *is* the assets dir — strip it before joining.
+    fn relative(path: &str) -> &str {
+        path.strip_prefix("assets/").unwrap_or(path)
+    }
+}
+
+impl gpui::AssetSource for DevAssetSource {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        for root in &self.roots {
+            if let Ok(bytes) = std::fs::read(root.join(Self::relative(path))) {
+                return Ok(Some(std::borrow::Cow::Owned(bytes)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
+        let mut out = Vec::new();
+        for root in &self.roots {
+            let dir = root.join(Self::relative(path));
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    let prefix = if path.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{path}/")
+                    };
+                    out.push(gpui::SharedString::from(format!("{prefix}{name}")));
+                }
+            }
+            break; // first root that exists wins; list is a dev convenience
+        }
+        Ok(out)
+    }
+}
+
 fn client_loop(config: LiveConfig, platform: &'static str) {
     loop {
         run_connection(&config, platform);
@@ -127,10 +200,11 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
     };
 
     let hello = format!(
-        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\"}}",
+        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{}}}",
         json_escape(&config.token),
         json_escape(&config.project),
         std::process::id(),
+        ASSET_SOURCE_INSTALLED.load(std::sync::atomic::Ordering::SeqCst),
     );
     if write_frame(&mut stream, hello.as_bytes()).is_err() {
         return;
@@ -249,14 +323,17 @@ impl log::Log for LiveLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        eprintln!("[{}] {}", record.level(), record.args());
         let payload = format!(
             "{{\"type\":\"log\",\"level\":\"{}\",\"target\":\"{}\",\"message\":\"{}\"}}",
             record.level().to_string().to_lowercase(),
             json_escape(record.target()),
             json_escape(&record.args().to_string()),
         );
-        send(payload);
+        // While the CLI is attached it prints forwarded logs itself — writing
+        // them here as well would show every line twice.
+        if !send(payload) {
+            eprintln!("[{}] {}", record.level(), record.args());
+        }
     }
 
     fn flush(&self) {}
@@ -270,11 +347,15 @@ fn install_log_forwarder() {
     }
 }
 
-fn send(payload: String) {
-    if let Ok(guard) = OUTBOUND.lock() {
-        if let Some(sender) = guard.as_ref() {
-            let _ = sender.try_send(payload);
-        }
+/// Queues a payload for the CLI; returns false when there is no connection
+/// (or the queue is full), so callers can fall back to local output.
+fn send(payload: String) -> bool {
+    let Ok(guard) = OUTBOUND.lock() else {
+        return false;
+    };
+    match guard.as_ref() {
+        Some(sender) => sender.try_send(payload).is_ok(),
+        None => false,
     }
 }
 

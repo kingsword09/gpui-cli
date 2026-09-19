@@ -19,10 +19,17 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// One connected app.
+struct ClientConn {
+    sender: mpsc::Sender<Vec<u8>>,
+    asset_reload: bool,
+}
+
 /// Loopback dev channel shared between the accept loop and connections.
 struct Shared {
     token: String,
-    clients: Mutex<HashMap<u64, mpsc::Sender<Vec<u8>>>>,
+    clients: Mutex<HashMap<u64, ClientConn>>,
     next_id: AtomicU64,
     events_tx: mpsc::Sender<ClientMessage>,
     shutdown: AtomicBool,
@@ -76,8 +83,8 @@ impl DevServer {
         let Ok(clients) = self.shared.clients.lock() else {
             return;
         };
-        for sender in clients.values() {
-            let _ = sender.send(payload.clone());
+        for conn in clients.values() {
+            let _ = conn.sender.send(payload.clone());
         }
     }
 
@@ -108,6 +115,17 @@ impl DevServer {
             .clients
             .lock()
             .map(|clients| !clients.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Whether every connected app can hot-reload assets. Only then may the
+    /// live loop skip a rebuild for asset-only changes; with no clients this
+    /// is false so the change falls back to a rebuild.
+    pub fn all_clients_support_asset_reload(&self) -> bool {
+        self.shared
+            .clients
+            .lock()
+            .map(|clients| !clients.is_empty() && clients.values().all(|c| c.asset_reload))
             .unwrap_or(false)
     }
 
@@ -171,7 +189,10 @@ fn handle_connection(mut stream: std::net::TcpStream, shared: Arc<Shared>) {
             project,
             pid,
             platform,
-        }) if proto == PROTO_VERSION && token == shared.token => (project, pid, platform),
+            asset_reload,
+        }) if proto == PROTO_VERSION && token == shared.token => {
+            (project, pid, platform, asset_reload)
+        }
         _ => return,
     };
     if protocol::write_frame(
@@ -185,7 +206,7 @@ fn handle_connection(mut stream: std::net::TcpStream, shared: Arc<Shared>) {
     {
         return;
     }
-    let (project, pid, platform) = hello;
+    let (project, pid, platform, asset_reload) = hello;
     println!(
         "{}",
         format!("[live] app connected: {project} ({platform}, pid {pid})").dimmed()
@@ -194,7 +215,13 @@ fn handle_connection(mut stream: std::net::TcpStream, shared: Arc<Shared>) {
     let id = shared.next_id.fetch_add(1, Ordering::SeqCst);
     let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>();
     if let Ok(mut clients) = shared.clients.lock() {
-        clients.insert(id, outbound_tx);
+        clients.insert(
+            id,
+            ClientConn {
+                sender: outbound_tx,
+                asset_reload,
+            },
+        );
     }
 
     // Writer half: drains broadcast messages into the socket.
@@ -305,6 +332,7 @@ mod tests {
             project: "test".to_string(),
             pid: 1,
             platform: "test".to_string(),
+            asset_reload: true,
         })
         .unwrap();
         protocol::write_frame(&mut stream, &hello).unwrap();
@@ -330,6 +358,7 @@ mod tests {
             project: "test".to_string(),
             pid: 1,
             platform: "test".to_string(),
+            asset_reload: false,
         })
         .unwrap();
         protocol::write_frame(&mut bad, &hello).unwrap();

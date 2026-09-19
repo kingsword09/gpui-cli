@@ -617,17 +617,13 @@ pub fn reverse_port(serial: &str, port: u16) -> Result<()> {
     super::run(&adb, &["-s", serial, "reverse", &spec, &spec])
 }
 
-/// Writes a small config file into the app's internal files dir.
+/// Writes a file into the app's internal files dir (subdirectories allowed).
 ///
-/// Android apps have no host environment to inherit, so live mode delivers its
-/// connection credentials as a file staged through `/data/local/tmp` and
-/// copied in with `run-as` (debug builds only, which live mode requires).
-pub fn write_device_config(
-    serial: &str,
-    package: &str,
-    name: &str,
-    content: &str,
-) -> Result<()> {
+/// Android apps have no host environment to inherit, so live mode delivers
+/// its connection credentials (and hot-reloadable assets) as files staged
+/// through `/data/local/tmp` and copied in with `run-as` (debug builds only,
+/// which live mode requires).
+pub fn write_device_config(serial: &str, package: &str, name: &str, content: &[u8]) -> Result<()> {
     let adb = adb().context("`adb` was not found")?;
     let staged = format!("/data/local/tmp/{name}");
 
@@ -638,7 +634,7 @@ pub fn write_device_config(
         .with_context(|| format!("failed to stage {staged}"))?;
     if let Some(mut stdin) = stage.stdin.take() {
         stdin
-            .write_all(content.as_bytes())
+            .write_all(content)
             .with_context(|| format!("failed to write {staged}"))?;
     }
     let status = stage.wait().with_context(|| format!("staging {staged}"))?;
@@ -646,22 +642,15 @@ pub fn write_device_config(
         bail!("staging {staged} failed");
     }
 
+    let target = format!("files/{name}");
+    let parent = match target.rsplit_once('/') {
+        Some((dir, _)) => dir.to_string(),
+        None => "files".to_string(),
+    };
+    super::run(&adb, &["-s", serial, "shell", "run-as", package, "mkdir", "-p", &parent])?;
     super::run(
         &adb,
-        &["-s", serial, "shell", "run-as", package, "mkdir", "-p", "files"],
-    )?;
-    super::run(
-        &adb,
-        &[
-            "-s",
-            serial,
-            "shell",
-            "run-as",
-            package,
-            "cp",
-            &staged,
-            &format!("files/{name}"),
-        ],
+        &["-s", serial, "shell", "run-as", package, "cp", &staged, &target],
     )
 }
 
