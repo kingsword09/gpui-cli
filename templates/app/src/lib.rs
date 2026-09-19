@@ -53,11 +53,27 @@ pub fn pump_live_assets(cx: &mut App) {
 }
 
 /// Root view of the application.
-pub struct MainView;
+///
+/// The click counter exists to demonstrate the live-mode state snapshot: with
+/// `gpui run --live`, rebuilding keeps this number across restarts instead of
+/// dropping back to zero. Replace it with whatever state your app persists.
+pub struct MainView {
+    clicks: usize,
+}
 
 impl MainView {
     pub fn new() -> Self {
-        Self
+        // Live mode: restore the snapshot the previous process published.
+        // Unparseable data means a cold start — never a boot failure.
+        let clicks = crate::live::take_restored_state()
+            .and_then(|json| {
+                json.split("\"clicks\":")
+                    .nth(1)
+                    .and_then(|rest| rest.split('}').next())
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        Self { clicks }
     }
 }
 
@@ -68,7 +84,12 @@ impl Default for MainView {
 }
 
 impl Render for MainView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Live mode: publish the latest state so `prepare_restart` can
+        // snapshot it before the CLI relaunches the app.
+        #[cfg(debug_assertions)]
+        crate::live::publish_state(&crate::live::snapshot_json_number("clicks", self.clicks));
+
         div()
             .flex()
             .flex_col()
@@ -86,6 +107,23 @@ impl Render for MainView {
                 div()
                     .text_sm()
                     .child("Cross-platform Desktop & Mobile app powered by GPUI"),
+            )
+            .child(div().text_lg().child(format!("Clicked {} times", self.clicks)))
+            .child(
+                div()
+                    .id("increment")
+                    .px_4()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(0x2563eb))
+                    .text_color(rgb(0xffffff))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(0x1d4ed8)))
+                    .child("Click me")
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.clicks += 1;
+                        cx.notify();
+                    })),
             )
     }
 }

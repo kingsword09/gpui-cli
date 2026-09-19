@@ -306,7 +306,8 @@ fn print_app_message(message: &ClientMessage) {
                 "[live] the process is unhealthy; the next rebuild launches a fresh one".yellow()
             );
         }
-        _ => {}
+        // Handled by the snapshot flow; never printed.
+        ClientMessage::Hello { .. } | ClientMessage::StateSaved { .. } => {}
     }
 }
 
