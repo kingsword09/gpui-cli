@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 pub mod commands;
 pub mod device;
+pub mod devserver;
 pub mod template;
 
 /// Options shared by `init` and `new`.

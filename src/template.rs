@@ -214,6 +214,9 @@ fn open_main_window(cx: &mut App) {
 #[cfg(target_os = "ios")]
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_register_app() {
+    // Debug builds connect back to `gpui run --live` for logs and panics.
+    crate::init_live(None);
+
     gpui_mobile::ios::ffi::set_app_callback(Box::new(|cx: &mut App| {
         open_main_window(cx);
     }));
@@ -233,6 +236,10 @@ pub fn android_main(app: android_activity::AndroidApp) {{
             .with_max_level(log::LevelFilter::Info)
             .with_tag("{}"),
     );
+
+    // Debug builds connect back to `gpui run --live`; the CLI stages its
+    // dev-channel credentials into `gpui_live.txt` before launching.
+    crate::init_live(app.internal_data_path().as_deref());
 
     gpui_mobile::android::jni::install_panic_hook();
 
@@ -493,6 +500,11 @@ pub fn scaffold(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
     render_file(
         "app/src/lib.rs",
         &target_dir.join("crates/app/src/lib.rs"),
+        &vars,
+    )?;
+    render_file(
+        "app/src/live.rs",
+        &target_dir.join("crates/app/src/live.rs"),
         &vars,
     )?;
 

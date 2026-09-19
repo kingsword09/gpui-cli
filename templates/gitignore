@@ -4,6 +4,9 @@
 .idea/
 .vscode/
 
+# Live-mode dev channel credentials (`gpui run --live`)
+.gpui/
+
 # iOS
 mobile/ios/build/
 mobile/ios/*.xcodeproj/

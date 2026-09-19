@@ -11,6 +11,9 @@ use gpui_kit::*;
 use {{APP_LIB_NAME}}::MainView;
 
 fn main() {
+    // Debug builds connect back to `gpui run --live` for logs and panics.
+    {{APP_LIB_NAME}}::init_live(None);
+
     gpui_kit::application().run(|cx: &mut App| {
         // Installs the theme and global state that `Root` needs to paint a
         // background; must run before any view is created.
