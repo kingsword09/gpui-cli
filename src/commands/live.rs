@@ -1,0 +1,476 @@
+//! `gpui run --live`: watch the project, rebuild on change, relaunch.
+//!
+//! The loop is a single-flight pipeline: one build/install at a time, changes
+//! arriving mid-build are coalesced into one pending rebuild. A failed build
+//! keeps the previously launched app running (mobile) or the previous process
+//! alive (desktop); the loop just keeps watching until the fix lands.
+
+use anyhow::{bail, Context, Result};
+use colored::Colorize;
+use notify_debouncer_full::notify::{EventKind, RecursiveMode};
+use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+use std::io::BufRead;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use super::error;
+use super::run::{
+    apk_path, android_abis, bundle_id_of, bundle_id_of_android, ensure_rust_target, ensure_tool,
+    gradle_task, resolve_ios_target, xcode_app_path, xcode_destination, IosTarget, Project,
+};
+use crate::device::{self, android, inventory, ios, DeviceFlags};
+
+/// Editors fire several events per save; this absorbs the burst.
+const DEBOUNCE_MS: u64 = 400;
+/// How many trailing lines of a failed external command to show.
+const OUTPUT_TAIL_LINES: usize = 40;
+
+/// Directory names that hold build outputs or VCS noise. Watching them would
+/// re-trigger the build that just wrote them, so they are filtered out.
+const IGNORED_DIRS: &[&str] = &[
+    "target",
+    ".git",
+    ".gpui",
+    ".gradle",
+    "build",
+    "jniLibs",
+    "node_modules",
+    "Pods",
+];
+
+enum Event {
+    Change,
+    Force,
+    Quit,
+}
+
+enum Iteration {
+    Rebuilt,
+    BuildFailed,
+}
+
+/// The resolved launch plan; device selection happens once, up front.
+enum Plan {
+    Desktop,
+    Ios {
+        physical: bool,
+        id: String,
+        label: String,
+    },
+    Android {
+        serial: String,
+        label: String,
+    },
+}
+
+/// Directory name components that would re-trigger the build that wrote them.
+fn should_trigger(path: &Path) -> bool {
+    path.components().all(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        !IGNORED_DIRS.contains(&name.as_ref()) && !name.ends_with(".xcodeproj")
+    })
+}
+
+/// Runs one build + (re)launch cycle. `Ok(BuildFailed)` means a compile failure
+/// was already rendered; infrastructure errors come back as `Err`.
+fn run_iteration(project: &Project, plan: &Plan, child: &mut Option<Child>) -> Result<Iteration> {
+    match plan {
+        Plan::Desktop => {
+            let mut cmd = Command::new("cargo");
+            cmd.current_dir(&project.root)
+                .args(["build", "-p", &project.desktop_crate()]);
+            let outcome = error::run_cargo_json(&mut cmd)?;
+            if !outcome.success {
+                error::render_errors(&outcome.errors);
+                println!("{}", "✗ build failed — keeping the current app running".yellow());
+                return Ok(Iteration::BuildFailed);
+            }
+            let executable = outcome
+                .executable
+                .context("cargo succeeded but reported no binary path")?;
+            // Killing an already-exited child is a harmless no-op.
+            if let Some(mut old) = child.take() {
+                let _ = old.kill();
+                let _ = old.wait();
+            }
+            let new_child = Command::new(&executable)
+                .current_dir(&project.root)
+                .stdin(Stdio::null())
+                .spawn()
+                .with_context(|| format!("failed to launch {}", executable.display()))?;
+            *child = Some(new_child);
+            println!("{}", "✓ restarted".green());
+            Ok(Iteration::Rebuilt)
+        }
+        Plan::Ios {
+            physical,
+            id,
+            label,
+        } => {
+            let bundle_id = bundle_id_of(project);
+            let app = match build_ios_app_live(project, *physical, id)? {
+                Some(app) => app,
+                None => return Ok(Iteration::BuildFailed),
+            };
+            println!("  {} installing on {}", "→".blue(), label);
+            if *physical {
+                ios::install_and_launch_device(id, &app, &bundle_id)?;
+            } else {
+                ios::install_and_launch(id, &app, &bundle_id)?;
+            }
+            println!("{}", format!("✓ relaunched on {label}").green());
+            Ok(Iteration::Rebuilt)
+        }
+        Plan::Android { serial, label } => {
+            let bundle_id = bundle_id_of_android(project);
+            let apk = match build_android_apk_live(project)? {
+                Some(apk) => apk,
+                None => return Ok(Iteration::BuildFailed),
+            };
+            println!("  {} installing on {}", "→".blue(), label);
+            android::install_and_launch(serial, &apk, &bundle_id)?;
+            println!("{}", format!("✓ relaunched on {label}").green());
+            Ok(Iteration::Rebuilt)
+        }
+    }
+}
+
+/// iOS build for the live loop: structured cargo diagnostics, captured output
+/// for xcodegen/xcodebuild (a tail on failure). `Ok(None)` = build failed.
+fn build_ios_app_live(project: &Project, physical: bool, udid: &str) -> Result<Option<std::path::PathBuf>> {
+    let rust_target = if physical {
+        "aarch64-apple-ios"
+    } else {
+        "aarch64-apple-ios-sim"
+    };
+    ensure_rust_target(rust_target)?;
+
+    let mut cargo = Command::new("cargo");
+    cargo
+        .current_dir(&project.root)
+        .args(["build", "--lib", "-p", &project.app_crate(), "--target", rust_target]);
+    let outcome = error::run_cargo_json(&mut cargo)?;
+    if !outcome.success {
+        error::render_errors(&outcome.errors);
+        println!("{}", "✗ build failed — keeping the current app running".yellow());
+        return Ok(None);
+    }
+
+    ensure_tool("xcodegen", "Install it with `brew install xcodegen`.")?;
+    let ios_dir = project.ios_dir();
+    run_quiet(
+        "xcodegen generate",
+        Command::new("xcodegen")
+            .current_dir(&ios_dir)
+            .args(["generate", "--spec", "project.yml"]),
+    )?;
+
+    let scheme = project.xcode_target();
+    let derived_dir = ios_dir.join("build");
+
+    let mut xcodebuild = Command::new("xcodebuild");
+    xcodebuild
+        .current_dir(&ios_dir)
+        .arg("-project")
+        .arg(ios_dir.join(format!("{scheme}.xcodeproj")))
+        .arg("-scheme")
+        .arg(&scheme)
+        .arg("-configuration")
+        .arg("Debug")
+        .arg("-destination")
+        .arg(xcode_destination(physical, udid))
+        .arg("-derivedDataPath")
+        .arg(&derived_dir)
+        .arg("-allowProvisioningUpdates")
+        .arg("build");
+    run_quiet("xcodebuild (Debug)", &mut xcodebuild)?;
+
+    let app_path = xcode_app_path(&derived_dir, &scheme, physical, false);
+    if !app_path.exists() {
+        bail!(
+            "xcodebuild finished but no app bundle was found at '{}'.",
+            app_path.display()
+        );
+    }
+    println!("  {} {}", "✓".green(), app_path.display());
+    Ok(Some(app_path))
+}
+
+/// Android build for the live loop: cargo-ndk and gradle output is captured and
+/// only a tail is shown on failure. `Ok(None)` = build failed.
+fn build_android_apk_live(project: &Project) -> Result<Option<std::path::PathBuf>> {
+    ensure_tool(
+        "cargo-ndk",
+        "Install it with `cargo install cargo-ndk`, then set ANDROID_NDK_HOME.",
+    )?;
+    ensure_rust_target("aarch64-linux-android")?;
+
+    let abis = android_abis();
+    let mut ndk = Command::new("cargo");
+    ndk.current_dir(&project.root).args(["ndk"]);
+    for abi in &abis {
+        ndk.args(["-t", abi]);
+    }
+    ndk.arg("-o")
+        .arg(project.android_jni_libs_dir())
+        .args(["--platform", "31", "build", "-p", &project.app_crate()]);
+    run_quiet(&format!("cargo ndk ({})", abis.join(", ")), &mut ndk)?;
+
+    let expected = project
+        .android_jni_libs_dir()
+        .join(&abis[0])
+        .join(format!("lib{}.so", project.app_lib_name()));
+    if !expected.exists() {
+        bail!(
+            "cargo-ndk finished but '{}' is missing. Check the `[lib] name` in crates/app/Cargo.toml.",
+            expected.display()
+        );
+    }
+
+    run_quiet(
+        &format!("gradlew {}", gradle_task(false)),
+        Command::new("./gradlew")
+            .current_dir(project.android_gradle_dir())
+            .arg(gradle_task(false)),
+    )?;
+
+    let apk = apk_path(project, false);
+    if !apk.exists() {
+        bail!("Gradle finished but no APK was found at '{}'.", apk.display());
+    }
+    println!("  {} {}", "✓".green(), apk.display());
+    Ok(Some(apk))
+}
+
+/// Runs an external command with its output captured; on failure prints a tail
+/// instead of streaming everything.
+fn run_quiet(label: &str, cmd: &mut Command) -> Result<()> {
+    println!("  {} {}", "→".blue(), label);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to spawn: {label}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(OUTPUT_TAIL_LINES);
+    println!(
+        "  {} {label} failed; last {} line(s):",
+        "✗".red(),
+        lines.len() - start
+    );
+    for line in &lines[start..] {
+        println!("    {line}");
+    }
+    bail!("{label} failed");
+}
+
+/// One build cycle plus coalescing of everything that arrived during it.
+/// Returns `true` when the user asked to quit.
+fn run_cycles(
+    project: &Project,
+    plan: &Plan,
+    child: &mut Option<Child>,
+    rx: &mpsc::Receiver<Event>,
+    last_failed: &mut bool,
+) -> Result<bool> {
+    loop {
+        let failed = match run_iteration(project, plan, child) {
+            Ok(Iteration::Rebuilt) => {
+                if *last_failed {
+                    println!("{}", "✓ build recovered".green());
+                }
+                false
+            }
+            Ok(Iteration::BuildFailed) => true,
+            Err(err) => {
+                println!("{}", format!("✗ {err:#}").red());
+                true
+            }
+        };
+        *last_failed = failed;
+
+        let mut again = false;
+        let mut quit = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                Event::Quit => quit = true,
+                Event::Change | Event::Force => again = true,
+            }
+        }
+        if quit {
+            return Ok(true);
+        }
+        if !again {
+            return Ok(false);
+        }
+        // Changes landed while building: fall through and rebuild once more.
+    }
+}
+
+/// Sets up the launch plan for the chosen target (device selection up front,
+/// reused across iterations).
+fn resolve_plan(project: &Project, target: &str, flags: &DeviceFlags) -> Result<Plan> {
+    match target.to_ascii_lowercase().as_str() {
+        "desktop" | "macos" | "windows" | "linux" => {
+            if !project.has_desktop() {
+                bail!("This project has no desktop target. Add one with `gpui init --add`.");
+            }
+            Ok(Plan::Desktop)
+        }
+        "ios" => {
+            if !project.ios_dir().exists() {
+                bail!("This project has no iOS target. Add one with `gpui init --add`.");
+            }
+            let target = resolve_ios_target(project, flags)?;
+            Ok(match target {
+                IosTarget::Simulator(device) => {
+                    let ready = inventory::ensure_running(device)?;
+                    Plan::Ios {
+                        physical: false,
+                        id: ready.id.clone(),
+                        label: ready.label(),
+                    }
+                }
+                IosTarget::Physical(device) => Plan::Ios {
+                    physical: true,
+                    id: device.id.clone(),
+                    label: device.label(),
+                },
+            })
+        }
+        "android" => {
+            if !project.android_gradle_dir().exists() {
+                bail!("This project has no Android target. Add one with `gpui init --add`.");
+            }
+            let chosen = inventory::resolve_device(
+                device::Platform::Android,
+                flags,
+                &project.defaults,
+                None,
+            )?;
+            let ready = inventory::ensure_running(chosen)?;
+            let serial = ready.serial().context(
+                "The selected Android device has no adb serial; re-run `gpui device list` to check it.",
+            )?;
+            Ok(Plan::Android {
+                serial: serial.to_string(),
+                label: ready.label(),
+            })
+        }
+        other => bail!("Unknown target '{other}'. Valid targets: desktop, ios, android."),
+    }
+}
+
+pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Result<()> {
+    let plan = resolve_plan(project, target, flags)?;
+
+    let (tx, rx) = mpsc::channel::<Event>();
+
+    // Key commands come in as lines: the terminal buffers input until Enter,
+    // so 'r' and 'q' are documented as "press + Enter" rather than raw keys.
+    let keys_tx = tx.clone();
+    thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            match line.trim() {
+                "r" | "R" => {
+                    if keys_tx.send(Event::Force).is_err() {
+                        break;
+                    }
+                }
+                "q" | "Q" | "quit" | "exit" => {
+                    let _ = keys_tx.send(Event::Quit);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(DEBOUNCE_MS),
+        None,
+        move |result: DebounceEventResult| {
+            let Ok(events) = result else { return };
+            for event in events {
+                // Access events (reads, open/close) never change source code.
+                if matches!(event.kind, EventKind::Access(_)) {
+                    continue;
+                }
+                if event.paths.iter().any(|p| should_trigger(p)) {
+                    let _ = tx.send(Event::Change);
+                    return;
+                }
+            }
+        },
+    )
+    .context("failed to create the file watcher")?;
+    debouncer
+        .watch(&project.root, RecursiveMode::Recursive)
+        .with_context(|| format!("failed to watch '{}'", project.root.display()))?;
+
+    println!(
+        "\n{}",
+        format!("[live] watching {} (debug builds)", project.root.display()).bold()
+    );
+    println!(
+        "{}",
+        "[live] type 'r' + Enter to force rebuild, 'q' + Enter to quit\n".dimmed()
+    );
+
+    let mut child: Option<Child> = None;
+    let mut last_failed = false;
+
+    // The first call builds and launches immediately, then the loop waits.
+    let mut quit_requested = run_cycles(project, &plan, &mut child, &rx, &mut last_failed)?;
+    while !quit_requested {
+        match rx.recv() {
+            Ok(Event::Quit) => break,
+            Ok(Event::Change) | Ok(Event::Force) => {
+                quit_requested = run_cycles(project, &plan, &mut child, &rx, &mut last_failed)?;
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Live mode leaves nothing running behind the CLI.
+    if let Some(mut child) = child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    println!("{}", "\n[live] stopped".dimmed());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_build_output_and_generated_dirs() {
+        let root = std::path::Path::new("/proj");
+        assert!(should_trigger(&root.join("crates/app/src/lib.rs")));
+        assert!(should_trigger(&root.join("Cargo.toml")));
+        assert!(should_trigger(&root.join("gpui.toml")));
+        assert!(should_trigger(
+            &root.join("mobile/android/gradle/app/src/main/java/dev/gpui/mobile/GpuiActivity.kt")
+        ));
+        assert!(should_trigger(&root.join("mobile/ios/App.swift")));
+        assert!(!should_trigger(&root.join("target/debug/app")));
+        assert!(!should_trigger(&root.join("mobile/ios/build/Build/Products/app")));
+        assert!(!should_trigger(
+            &root.join("mobile/android/gradle/app/build/outputs/apk/app-debug.apk")
+        ));
+        assert!(!should_trigger(
+            &root.join("mobile/android/gradle/app/src/main/jniLibs/arm64-v8a/libapp.so")
+        ));
+        assert!(!should_trigger(&root.join("mobile/ios/App.xcodeproj/project.pbxproj")));
+        assert!(!should_trigger(&root.join(".git/index")));
+    }
+}

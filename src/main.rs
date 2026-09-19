@@ -160,6 +160,9 @@ pub enum Commands {
         /// Build in release mode
         #[arg(short, long)]
         release: bool,
+        /// Watch sources, rebuild and relaunch on every save (debug only)
+        #[arg(long)]
+        live: bool,
         #[command(flatten)]
         device: DeviceArgs,
     },
@@ -220,8 +223,9 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Run {
             target,
             release,
+            live,
             device,
-        }) => commands::run::handle_run(Some(target), release, device.into())?,
+        }) => commands::run::handle_run(Some(target), release, live, device.into())?,
         Some(Commands::Build {
             target,
             release,
