@@ -25,6 +25,10 @@ pub enum ClientMessage {
         project: String,
         pid: u32,
         platform: String,
+        /// The app installed a dev asset source, so asset changes can be
+        /// hot-reloaded without a rebuild.
+        #[serde(default)]
+        asset_reload: bool,
     },
     /// A log record forwarded from the app.
     Log {

@@ -197,6 +197,11 @@ fn open_main_window(cx: &mut App) {
     gpui_kit::init(cx);
     Theme::change(ThemeMode::Light, None, cx);
 
+    // Hot-reloads images changed under `assets/` while `gpui run --live` is
+    // running (Android; the iOS runner cannot install a dev asset source).
+    #[cfg(all(debug_assertions, target_os = "android"))]
+    crate::pump_live_assets(cx);
+
     cx.open_window(WindowOptions::default(), |window, cx| {
         let view = cx.new(|_| MainView::new());
         cx.new(|cx| Root::new(view, window, cx))
@@ -238,9 +243,9 @@ pub fn android_main(app: android_activity::AndroidApp) {{
     );
 
     // Debug builds connect back to `gpui run --live`; the CLI stages its
-    // dev-channel credentials into `gpui_live.txt` before launching.
-    crate::init_live(app.internal_data_path().as_deref());
-
+    // dev-channel credentials into `gpui_live.txt` before launching. The
+    // connection happens below, after the asset source is installed, so the
+    // hello carries the asset-reload capability.
     gpui_mobile::android::jni::install_panic_hook();
 
     let _platform = gpui_mobile::android::jni::init_platform(&app);
@@ -249,7 +254,18 @@ pub fn android_main(app: android_activity::AndroidApp) {{
         return;
     }};
 
-    Application::with_platform(shared.into_rc()).run(|cx: &mut App| {{
+    // Live development reads assets pushed into the app's files dir by the
+    // CLI; release builds keep the default asset source.
+    #[cfg(debug_assertions)]
+    let application = Application::with_platform(shared.into_rc()).with_assets(
+        crate::live::dev_asset_source(app.internal_data_path().map(|p| p.join("assets"))),
+    );
+    #[cfg(not(debug_assertions))]
+    let application = Application::with_platform(shared.into_rc());
+
+    crate::init_live(app.internal_data_path().as_deref());
+
+    application.run(|cx: &mut App| {{
         open_main_window(cx);
     }});
 }}
@@ -507,6 +523,7 @@ pub fn scaffold(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
         &target_dir.join("crates/app/src/live.rs"),
         &vars,
     )?;
+    render_subtree("assets", &target_dir.join("assets"), &HashMap::new())?;
 
     if config.has_desktop() {
         render_file(

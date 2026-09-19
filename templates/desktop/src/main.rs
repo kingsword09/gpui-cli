@@ -11,14 +11,25 @@ use gpui_kit::*;
 use {{APP_LIB_NAME}}::MainView;
 
 fn main() {
+    // Live development reads assets straight from `<project>/assets` so the
+    // CLI can hot-reload them; release builds keep the default source. The
+    // asset source must exist before `init_live` connects: the hello carries
+    // the asset-reload capability the CLI relies on.
+    #[cfg(debug_assertions)]
+    let application = gpui_kit::application()
+        .with_assets({{APP_LIB_NAME}}::live::dev_asset_source(None));
+    #[cfg(not(debug_assertions))]
+    let application = gpui_kit::application();
+
     // Debug builds connect back to `gpui run --live` for logs and panics.
     {{APP_LIB_NAME}}::init_live(None);
 
-    gpui_kit::application().run(|cx: &mut App| {
+    application.run(|cx: &mut App| {
         // Installs the theme and global state that `Root` needs to paint a
         // background; must run before any view is created.
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Light, None, cx);
+        {{APP_LIB_NAME}}::pump_live_assets(cx);
 
         cx.open_window(WindowOptions::default(), |window, cx| {
             let view = cx.new(|_| MainView::new());

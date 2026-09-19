@@ -21,6 +21,37 @@ pub fn init_live(config_file: Option<&std::path::Path>) {
     let _ = config_file;
 }
 
+/// Under `gpui run --live`, drains asset changes the dev channel received and
+/// evicts the affected images from GPUI's cache so the next render reloads
+/// them from disk without a rebuild. Call once from the app's run closure.
+pub fn pump_live_assets(cx: &mut App) {
+    #[cfg(debug_assertions)]
+    {
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                let paths = crate::live::take_asset_events();
+                if paths.is_empty() {
+                    continue;
+                }
+                cx.update(|cx| {
+                    for path in paths {
+                        cx.remove_asset::<gpui::ImgResourceLoader>(&gpui::Resource::Embedded(
+                            path.into(),
+                        ));
+                    }
+                    cx.refresh_windows();
+                });
+            }
+        })
+        .detach();
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = cx;
+}
+
 /// Root view of the application.
 pub struct MainView;
 

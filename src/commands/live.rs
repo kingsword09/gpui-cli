@@ -11,7 +11,7 @@ use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use std::fs;
 use std::io::BufRead;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -23,7 +23,11 @@ use super::run::{
     gradle_task, resolve_ios_target, xcode_app_path, xcode_destination, IosTarget, Project,
 };
 use crate::device::{self, android, inventory, ios, DeviceFlags};
-use crate::devserver::DevServer;
+use crate::devserver::{protocol::ServerMessage, DevServer};
+
+/// Source files watch out for asset-only changes under this directory; they
+/// can reload in the running app instead of triggering a rebuild.
+const ASSETS_DIR: &str = "assets";
 
 /// Editors fire several events per save; this absorbs the burst.
 const DEBOUNCE_MS: u64 = 400;
@@ -45,6 +49,9 @@ const IGNORED_DIRS: &[&str] = &[
 
 enum Event {
     Change,
+    /// Asset-only changes under `assets/`, as slash-separated paths relative
+    /// to the project root.
+    Assets(Vec<String>),
     Force,
     Quit,
 }
@@ -73,6 +80,7 @@ struct Channel {
     project: String,
     port: u16,
     token: String,
+    assets_dir: PathBuf,
 }
 
 impl Channel {
@@ -87,6 +95,10 @@ impl Channel {
             ("GPUI_LIVE_PROJECT".to_string(), self.project.clone()),
             ("GPUI_LIVE_ADDR".to_string(), self.addr()),
             ("GPUI_LIVE_TOKEN".to_string(), self.token.clone()),
+            (
+                "GPUI_LIVE_ASSETS".to_string(),
+                self.assets_dir.to_string_lossy().into_owned(),
+            ),
         ]
     }
 
@@ -107,6 +119,15 @@ fn should_trigger(path: &Path) -> bool {
         let name = component.as_os_str().to_string_lossy();
         !IGNORED_DIRS.contains(&name.as_ref()) && !name.ends_with(".xcodeproj")
     })
+}
+
+/// Slash-relative path of an asset change under `<root>/assets/`, if it is one.
+fn asset_rel_path(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    if rel.components().next()?.as_os_str() != ASSETS_DIR {
+        return None;
+    }
+    Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
 /// Runs one build + (re)launch cycle. `Ok(BuildFailed)` means a compile failure
@@ -179,11 +200,59 @@ fn run_iteration(
             android::install_apk(serial, &apk)?;
             // adb reverse works on emulators and USB devices alike, so the app
             // always reaches the dev server at 127.0.0.1:<port>.
-            android::write_device_config(serial, &bundle_id, "gpui_live.txt", &channel.device_config())?;
+            push_android_assets(project, serial, &bundle_id, &all_asset_paths(project));
+            android::write_device_config(
+                serial,
+                &bundle_id,
+                "gpui_live.txt",
+                channel.device_config().as_bytes(),
+            )?;
             android::reverse_port(serial, channel.port)?;
             android::launch_app(serial, &bundle_id)?;
             println!("{}", format!("✓ relaunched on {label}").green());
             Ok(Iteration::Rebuilt)
+        }
+    }
+}
+
+/// Every file under `<project>/assets`, as slash-separated relative paths.
+fn all_asset_paths(project: &Project) -> Vec<String> {
+    let assets_dir = project.root.join(ASSETS_DIR);
+    let mut out = Vec::new();
+    let mut stack = vec![assets_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Some(rel) = asset_rel_path(&project.root, &path) {
+                out.push(rel);
+            }
+        }
+    }
+    out
+}
+
+/// Copies the given assets (relative to `<project>/assets`) into the app's
+/// files dir on the device; failures are reported but never fatal.
+fn push_android_assets(project: &Project, serial: &str, package: &str, paths: &[String]) {
+    for rel in paths {
+        let source = project.root.join(rel);
+        match fs::read(&source) {
+            Ok(bytes) => {
+                if let Err(err) = android::write_device_config(serial, package, rel, &bytes) {
+                    println!(
+                        "{}",
+                        format!("⚠ failed to sync asset {rel}: {err:#}").yellow()
+                    );
+                }
+            }
+            Err(err) => {
+                println!("{}", format!("⚠ failed to read {rel}: {err}").yellow());
+            }
         }
     }
 }
@@ -326,6 +395,7 @@ fn run_cycles(
     project: &Project,
     plan: &Plan,
     channel: &Channel,
+    server: &DevServer,
     child: &mut Option<Child>,
     rx: &mpsc::Receiver<Event>,
     last_failed: &mut bool,
@@ -352,6 +422,14 @@ fn run_cycles(
             match event {
                 Event::Quit => quit = true,
                 Event::Change | Event::Force => again = true,
+                Event::Assets(paths) => {
+                    // The relaunch above already picked up fresh assets when a
+                    // rebuild happened; only fall back to another rebuild when
+                    // no capable client can hot-reload them.
+                    if !reload_assets(project, plan, server, &paths) {
+                        again = true;
+                    }
+                }
             }
         }
         if quit {
@@ -362,6 +440,29 @@ fn run_cycles(
         }
         // Changes landed while building: fall through and rebuild once more.
     }
+}
+
+/// Pushes + broadcasts an asset-only change to the running app. Returns false
+/// when no capable client is attached and the caller must fall back to a full
+/// rebuild (the app then reads the fresh files at startup).
+fn reload_assets(project: &Project, plan: &Plan, server: &DevServer, paths: &[String]) -> bool {
+    if !(server.has_clients() && server.all_clients_support_asset_reload()) {
+        return false;
+    }
+    if let Plan::Android { serial, .. } = plan {
+        let package = bundle_id_of_android(project);
+        push_android_assets(project, serial, &package, paths);
+    }
+    for path in paths {
+        server.broadcast(&ServerMessage::AssetChanged {
+            path: path.clone(),
+        });
+    }
+    println!(
+        "{}",
+        format!("[live] reloaded asset(s): {}", paths.join(", ")).green()
+    );
+    true
 }
 
 /// Sets up the launch plan for the chosen target (device selection up front,
@@ -432,6 +533,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         project: project.name.clone(),
         port: server.port,
         token: server.token.clone(),
+        assets_dir: project.root.join(ASSETS_DIR),
     };
 
     let (tx, rx) = mpsc::channel::<Event>();
@@ -457,20 +559,34 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         }
     });
 
+    let watch_root = project.root.clone();
     let mut debouncer = new_debouncer(
         Duration::from_millis(DEBOUNCE_MS),
         None,
         move |result: DebounceEventResult| {
             let Ok(events) = result else { return };
+            let mut assets: Vec<String> = Vec::new();
+            let mut code_change = false;
             for event in events {
                 // Access events (reads, open/close) never change source code.
                 if matches!(event.kind, EventKind::Access(_)) {
                     continue;
                 }
-                if event.paths.iter().any(|p| should_trigger(p)) {
-                    let _ = tx.send(Event::Change);
-                    return;
+                for path in &event.paths {
+                    if !should_trigger(path) {
+                        continue;
+                    }
+                    if let Some(rel) = asset_rel_path(&watch_root, path) {
+                        assets.push(rel);
+                    } else {
+                        code_change = true;
+                    }
                 }
+            }
+            if code_change {
+                let _ = tx.send(Event::Change);
+            } else if !assets.is_empty() {
+                let _ = tx.send(Event::Assets(assets));
             }
         },
     )
@@ -496,14 +612,41 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     let mut last_failed = false;
 
     // The first call builds and launches immediately, then the loop waits.
-    let mut quit_requested =
-        run_cycles(project, &plan, &channel, &mut child, &rx, &mut last_failed)?;
+    let mut quit_requested = run_cycles(
+        project,
+        &plan,
+        &channel,
+        &server,
+        &mut child,
+        &rx,
+        &mut last_failed,
+    )?;
     while !quit_requested {
         match rx.recv_timeout(Duration::from_millis(300)) {
             Ok(Event::Quit) => break,
             Ok(Event::Change) | Ok(Event::Force) => {
-                quit_requested =
-                    run_cycles(project, &plan, &channel, &mut child, &rx, &mut last_failed)?;
+                quit_requested = run_cycles(
+                    project,
+                    &plan,
+                    &channel,
+                    &server,
+                    &mut child,
+                    &rx,
+                    &mut last_failed,
+                )?;
+            }
+            Ok(Event::Assets(paths)) => {
+                if !reload_assets(project, &plan, &server, &paths) {
+                    quit_requested = run_cycles(
+                        project,
+                        &plan,
+                        &channel,
+                        &server,
+                        &mut child,
+                        &rx,
+                        &mut last_failed,
+                    )?;
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => report_exited_child(&mut child),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -567,5 +710,21 @@ mod tests {
         ));
         assert!(!should_trigger(&root.join("mobile/ios/App.xcodeproj/project.pbxproj")));
         assert!(!should_trigger(&root.join(".git/index")));
+    }
+
+    #[test]
+    fn classifies_asset_paths_under_the_assets_dir() {
+        let root = std::path::Path::new("/proj");
+        assert_eq!(
+            asset_rel_path(root, &root.join("assets/logo.png")).as_deref(),
+            Some("assets/logo.png")
+        );
+        assert_eq!(
+            asset_rel_path(root, &root.join("assets/icons/x.svg")).as_deref(),
+            Some("assets/icons/x.svg")
+        );
+        assert_eq!(asset_rel_path(root, &root.join("crates/app/src/lib.rs")), None);
+        assert_eq!(asset_rel_path(root, &root.join("assets_mine/x.png")), None);
+        assert_eq!(asset_rel_path(root, &root.join("/other/assets/x.png")), None);
     }
 }
