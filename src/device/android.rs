@@ -591,6 +591,14 @@ pub fn install_apk(serial: &str, apk: &Path) -> Result<()> {
     super::run(&adb, &["-s", serial, "install", "-r", &apk])
 }
 
+/// Kills the app process so the next `am start` is a cold launch. Without
+/// this, reinstalling under live mode would leave the old process running
+/// with stale dev-channel credentials.
+pub fn force_stop(serial: &str, bundle_id: &str) -> Result<()> {
+    let adb = adb().context("`adb` was not found")?;
+    super::run(&adb, &["-s", serial, "shell", "am", "force-stop", bundle_id])
+}
+
 /// Starts the app's activity.
 pub fn launch_app(serial: &str, bundle_id: &str) -> Result<()> {
     let adb = adb().context("`adb` was not found")?;
@@ -626,6 +634,13 @@ pub fn reverse_port(serial: &str, port: u16) -> Result<()> {
 pub fn write_device_config(serial: &str, package: &str, name: &str, content: &[u8]) -> Result<()> {
     let adb = adb().context("`adb` was not found")?;
     let staged = format!("/data/local/tmp/{name}");
+    // Sub-path assets need the staging directory to exist first.
+    if let Some((dir, _)) = name.rsplit_once('/') {
+        super::run(
+            &adb,
+            &["-s", serial, "shell", "mkdir", "-p", &format!("/data/local/tmp/{dir}")],
+        )?;
+    }
 
     let mut stage = Command::new(&adb)
         .args(["-s", serial, "shell", "sh", "-c", &format!("cat > {staged}")])

@@ -263,7 +263,12 @@ pub fn android_main(app: android_activity::AndroidApp) {{
     #[cfg(not(debug_assertions))]
     let application = Application::with_platform(shared.into_rc());
 
-    crate::init_live(app.internal_data_path().as_deref());
+    // The dev client reads `gpui_live.txt` from the app files dir; resolve
+    // the concrete file path here (internal_data_path is the directory).
+    let live_config = app
+        .internal_data_path()
+        .map(|dir| dir.join("gpui_live.txt"));
+    crate::init_live(live_config.as_deref());
 
     application.run(|cx: &mut App| {{
         open_main_window(cx);

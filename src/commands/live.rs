@@ -252,6 +252,9 @@ fn run_iteration(
                 "gpui_live.txt",
                 channel.device_config().as_bytes(),
             )?;
+            // Cold launch: `am start` on a live process would reuse stale
+            // dev-channel credentials read at startup.
+            android::force_stop(serial, &bundle_id)?;
             android::reverse_port(serial, channel.port)?;
             android::launch_app(serial, &bundle_id)?;
             println!("{}", format!("✓ relaunched on {label}").green());
