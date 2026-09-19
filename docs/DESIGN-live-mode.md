@@ -1,6 +1,6 @@
 # 设计：Live 模式（改代码实时刷新运行中的应用）
 
-状态：设计稿；P0（`--live` 快速重启循环 + 编译错误处理）已实现
+状态：P0–P3 已实现（#4、#5、#6、#7）；P4 PoC 已执行——未通过，L2 不实现（见附录 C）
 日期：2026-09-18
 相关文件：`src/commands/run.rs`、`src/commands/build.rs`、`src/main.rs`、`src/template.rs`、`templates/app/src/lib.rs`、`templates/desktop/src/main.rs`
 
@@ -465,3 +465,20 @@ P1 可先用 `std::net::TcpListener` + 长度前缀 JSON 协议，避免为 L0/L
 - **资源热重载（L1）被提升为独立阶段**：它性价比高于 subsecond 且零崩溃风险，不应被当作 subsecond 的附属。
 - **cargo-hot / Iced 的分工启示**：真正的工作量在框架侧（`gpui-kit`），CLI 侧只是命令包装——这使 live 模式成为跨仓库项目（§4、§8 风险 6）。
 - **错误可见性是生态公认的最难部分**（§3.7），因此本设计把它当一等公民而非附属功能（§7.3、§7.4）。
+
+## 附录 C：P4 PoC 执行记录（2026-09-19，未通过）
+
+按 §7.6 的要求在实现前先做 PoC。环境：dx 0.7.10（dioxus-cli，本机源码安装）+ subsecond 0.7.10，在一个 `gpui init` 生成的三端项目（workspace：`app` lib + `desktop` bin）中，把 `MainView::render` 的函数体包进 `subsecond::call(|| ...)`，用 `dx serve --hot-patch --platform desktop --package <bin>` 驱动。
+
+**结果：在到达 tip-crate 问题（§5）之前，就已在链接阶段被阻断，两种配置同一位置失败。**
+
+1. 普通 hot-patch 构建：app 正常构建启动（`subsecond::call` 透传）。对 `crates/app`（lib，非 tip crate）做一次纯函数体编辑后，dx 正确检测到变更并进入 patch 流程，但 patch dylib 的部分链接失败——`libdeps-*.a` 中 `io_surface` crate 的目标码引用 `_IOSurfaceCreate/_IOSurfaceLock/...`，ld 报 `Undefined symbols for architecture arm64`。**app 进程存活、未重启**，dx 有明确错误输出（符合「不静默」要求，但功能不可用）。
+2. `--fat-binary`（hotpatch 的官方前置要求）：dx 在生成 fat binary 时于同一位置失败（同一组 IOSurface 符号），app 从未被启动。
+
+**根因**：dx 的部分链接步骤没有把 GPUI 依赖树的 framework 链接参数（`-framework IOSurface`，来自 `io_surface`/wgpu 一系）传递到 `libdeps` 归档的链接命令。GPUI 自身的正常构建完全不受影响——这是 dx patcher 与 GPUI 依赖树的兼容性问题，CLI 侧无法绕过。
+
+**决策（按 §10 关卡逻辑）**：
+
+- PoC 未通过 → **不实现 P5**。L2 记录为「实验性受阻」，`gpui run --live` 交付 L0、L1、L0.5。
+- §5 的 tip-crate 问题（lib 能否被 patch、移动端无 main.rs）保持未决——在 dx 的 macOS 部分链接能处理框架依赖之前没有意义。
+- 复现：任意生成项目 → `cargo add subsecond@0.7` → render 包 `subsecond::call` → `dx serve --hot-patch --fat-binary --platform desktop --package <name>-desktop` → 编辑 render 函数体。待 dioxus-cli 修复部分链接后可重跑此步骤作为关卡重测。
