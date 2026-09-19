@@ -44,6 +44,12 @@ gpui build all
 gpui build android --release
 ```
 
+Use `gpui run --live` to keep the loop open: sources are watched, every save
+triggers an incremental rebuild and relaunch (desktop, iOS simulator or Android
+emulator), and compile errors are shown with file, line and snippet while the
+previous app keeps running until the fix lands. `--live` is debug-only; type
+`r` + Enter to force a rebuild and `q` + Enter to quit.
+
 | Target | Prerequisites |
 | --- | --- |
 | Desktop | Rust and the host platform's native build dependencies |

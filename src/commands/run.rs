@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use colored::*;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::device::{self, android, inventory, ios, DeviceFlags, Kind, Platform as DevicePlatform};
@@ -118,14 +118,14 @@ fn run_step(label: &str, cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-fn ensure_tool(tool: &str, hint: &str) -> Result<()> {
+pub(crate) fn ensure_tool(tool: &str, hint: &str) -> Result<()> {
     if which::which(tool).is_err() {
         bail!("`{tool}` was not found on PATH.\n  {hint}");
     }
     Ok(())
 }
 
-fn ensure_rust_target(target: &str) -> Result<()> {
+pub(crate) fn ensure_rust_target(target: &str) -> Result<()> {
     println!("  {} ensuring Rust target {}", "→".blue(), target);
     let status = Command::new("rustup")
         .args(["target", "add", target])
@@ -202,13 +202,24 @@ pub fn resolve_ios_target(project: &Project, flags: &DeviceFlags) -> Result<IosT
 
 /// The `-destination` value `xcodebuild` needs. A concrete UDID avoids the
 /// ambiguity of matching a simulator by name, which several runtimes share.
-fn xcode_destination(target: &IosTarget) -> String {
-    match target {
-        IosTarget::Physical(_) => "generic/platform=iOS".to_string(),
-        IosTarget::Simulator(device) => {
-            format!("platform=iOS Simulator,id={}", device.id)
-        }
+pub(crate) fn xcode_destination(physical: bool, id: &str) -> String {
+    if physical {
+        "generic/platform=iOS".to_string()
+    } else {
+        format!("platform=iOS Simulator,id={id}")
     }
+}
+
+/// Where xcodebuild drops the built bundle for this configuration.
+pub(crate) fn xcode_app_path(
+    derived_dir: &Path,
+    scheme: &str,
+    physical: bool,
+    release: bool,
+) -> PathBuf {
+    let config = if release { "Release" } else { "Debug" };
+    let sdk_dir = if physical { "iphoneos" } else { "iphonesimulator" };
+    derived_dir.join(format!("Build/Products/{config}-{sdk_dir}/{scheme}.app"))
 }
 
 /// Builds the Rust staticlib, generates the Xcode project, then builds the app.
@@ -261,7 +272,10 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
 
     // Resolve to a concrete UDID: matching a simulator by name is ambiguous
     // once several runtimes are installed, and xcodebuild then refuses to pick.
-    let destination = xcode_destination(target);
+    let udid = match target {
+        IosTarget::Simulator(device) | IosTarget::Physical(device) => device.id.clone(),
+    };
+    let destination = xcode_destination(device, &udid);
 
     let mut xcodebuild = Command::new("xcodebuild");
     xcodebuild
@@ -280,12 +294,7 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         .arg("build");
     run_step(&format!("xcodebuild ({config})"), &mut xcodebuild)?;
 
-    let sdk_dir = if device {
-        "iphoneos"
-    } else {
-        "iphonesimulator"
-    };
-    let app_path = derived_dir.join(format!("Build/Products/{config}-{sdk_dir}/{scheme}.app"));
+    let app_path = xcode_app_path(&derived_dir, &scheme, device, release);
     if !app_path.exists() {
         bail!(
             "Xcode reported success but no app bundle was found at '{}'.",
@@ -324,7 +333,7 @@ pub fn run_ios(project: &Project, flags: &DeviceFlags, release: bool) -> Result<
 }
 
 /// Reads the bundle id from `mobile/ios/project.yml`.
-fn bundle_id_of(project: &Project) -> String {
+pub(crate) fn bundle_id_of(project: &Project) -> String {
     if let Ok(yml) = fs::read_to_string(project.ios_dir().join("project.yml")) {
         for line in yml.lines() {
             let line = line.trim();
@@ -339,7 +348,7 @@ fn bundle_id_of(project: &Project) -> String {
 // ── Android ──────────────────────────────────────────────────────────────────
 
 /// ABIs to build, overridable with `GPUI_ANDROID_ABIS` (comma separated).
-fn android_abis() -> Vec<String> {
+pub(crate) fn android_abis() -> Vec<String> {
     std::env::var("GPUI_ANDROID_ABIS")
         .unwrap_or_else(|_| "arm64-v8a".to_string())
         .split(',')
@@ -348,7 +357,7 @@ fn android_abis() -> Vec<String> {
         .collect()
 }
 
-fn gradle_task(release: bool) -> &'static str {
+pub(crate) fn gradle_task(release: bool) -> &'static str {
     if release {
         "assembleRelease"
     } else {
@@ -356,7 +365,7 @@ fn gradle_task(release: bool) -> &'static str {
     }
 }
 
-fn apk_path(project: &Project, release: bool) -> PathBuf {
+pub(crate) fn apk_path(project: &Project, release: bool) -> PathBuf {
     let variant = if release { "release" } else { "debug" };
     project
         .android_gradle_dir()
@@ -446,7 +455,7 @@ pub fn run_android(project: &Project, flags: &DeviceFlags, release: bool) -> Res
 }
 
 /// Reads `applicationId` from the Gradle app module.
-fn bundle_id_of_android(project: &Project) -> String {
+pub(crate) fn bundle_id_of_android(project: &Project) -> String {
     let gradle = project.android_gradle_dir().join("app/build.gradle.kts");
     if let Ok(contents) = fs::read_to_string(gradle) {
         for line in contents.lines() {
@@ -462,9 +471,18 @@ fn bundle_id_of_android(project: &Project) -> String {
 }
 
 /// Dispatches `gpui run <target>`.
-pub fn handle_run(target: Option<String>, release: bool, flags: DeviceFlags) -> Result<()> {
+pub fn handle_run(
+    target: Option<String>,
+    release: bool,
+    live: bool,
+    flags: DeviceFlags,
+) -> Result<()> {
     let project = Project::load(None)?;
     let target = target.unwrap_or_else(|| "desktop".to_string());
+
+    if live && release {
+        bail!("--live rebuilds on every save and only supports debug builds; drop --release.");
+    }
 
     println!(
         "{}",
@@ -472,6 +490,10 @@ pub fn handle_run(target: Option<String>, release: bool, flags: DeviceFlags) -> 
             .bold()
             .cyan()
     );
+
+    if live {
+        return super::live::handle_live(&project, &target, &flags);
+    }
 
     match target.to_ascii_lowercase().as_str() {
         "desktop" | "macos" | "windows" | "linux" => run_desktop(&project, release),
