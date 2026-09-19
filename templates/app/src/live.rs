@@ -27,6 +27,9 @@ struct LiveConfig {
     addr: String,
     token: String,
     project: String,
+    /// Snapshot session to restore, injected by the CLI on relaunch
+    /// (state snapshots). Unused until a snapshot provider registers.
+    #[allow(dead_code)]
     session: Option<String>,
 }
 
