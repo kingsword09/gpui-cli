@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+use std::fs;
 use std::io::BufRead;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -22,6 +23,7 @@ use super::run::{
     gradle_task, resolve_ios_target, xcode_app_path, xcode_destination, IosTarget, Project,
 };
 use crate::device::{self, android, inventory, ios, DeviceFlags};
+use crate::devserver::DevServer;
 
 /// Editors fire several events per save; this absorbs the burst.
 const DEBOUNCE_MS: u64 = 400;
@@ -66,6 +68,39 @@ enum Plan {
     },
 }
 
+/// Dev-channel credentials handed to the app at every launch.
+struct Channel {
+    project: String,
+    port: u16,
+    token: String,
+}
+
+impl Channel {
+    fn addr(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
+    /// Environment variables the app reads (desktop directly, iOS simulator
+    /// via the `SIMCTL_CHILD_` prefix added by `simctl launch`).
+    fn env(&self) -> Vec<(String, String)> {
+        vec![
+            ("GPUI_LIVE_PROJECT".to_string(), self.project.clone()),
+            ("GPUI_LIVE_ADDR".to_string(), self.addr()),
+            ("GPUI_LIVE_TOKEN".to_string(), self.token.clone()),
+        ]
+    }
+
+    /// File contents for platforms with no environment to inherit (Android).
+    fn device_config(&self) -> String {
+        format!(
+            "project={}\naddr={}\ntoken={}\nsession=\n",
+            self.project,
+            self.addr(),
+            self.token
+        )
+    }
+}
+
 /// Directory name components that would re-trigger the build that wrote them.
 fn should_trigger(path: &Path) -> bool {
     path.components().all(|component| {
@@ -76,7 +111,12 @@ fn should_trigger(path: &Path) -> bool {
 
 /// Runs one build + (re)launch cycle. `Ok(BuildFailed)` means a compile failure
 /// was already rendered; infrastructure errors come back as `Err`.
-fn run_iteration(project: &Project, plan: &Plan, child: &mut Option<Child>) -> Result<Iteration> {
+fn run_iteration(
+    project: &Project,
+    plan: &Plan,
+    channel: &Channel,
+    child: &mut Option<Child>,
+) -> Result<Iteration> {
     match plan {
         Plan::Desktop => {
             let mut cmd = Command::new("cargo");
@@ -96,9 +136,12 @@ fn run_iteration(project: &Project, plan: &Plan, child: &mut Option<Child>) -> R
                 let _ = old.kill();
                 let _ = old.wait();
             }
-            let new_child = Command::new(&executable)
-                .current_dir(&project.root)
-                .stdin(Stdio::null())
+            let mut spawn_cmd = Command::new(&executable);
+            spawn_cmd.current_dir(&project.root).stdin(Stdio::null());
+            for (key, value) in channel.env() {
+                spawn_cmd.env(key, value);
+            }
+            let new_child = spawn_cmd
                 .spawn()
                 .with_context(|| format!("failed to launch {}", executable.display()))?;
             *child = Some(new_child);
@@ -117,9 +160,11 @@ fn run_iteration(project: &Project, plan: &Plan, child: &mut Option<Child>) -> R
             };
             println!("  {} installing on {}", "→".blue(), label);
             if *physical {
+                // No channel on physical devices (see DESIGN-live-mode.md §7.2);
+                // launch without credentials, the app just runs detached.
                 ios::install_and_launch_device(id, &app, &bundle_id)?;
             } else {
-                ios::install_and_launch(id, &app, &bundle_id)?;
+                ios::install_and_launch_with_env(id, &app, &bundle_id, &channel.env())?;
             }
             println!("{}", format!("✓ relaunched on {label}").green());
             Ok(Iteration::Rebuilt)
@@ -131,7 +176,12 @@ fn run_iteration(project: &Project, plan: &Plan, child: &mut Option<Child>) -> R
                 None => return Ok(Iteration::BuildFailed),
             };
             println!("  {} installing on {}", "→".blue(), label);
-            android::install_and_launch(serial, &apk, &bundle_id)?;
+            android::install_apk(serial, &apk)?;
+            // adb reverse works on emulators and USB devices alike, so the app
+            // always reaches the dev server at 127.0.0.1:<port>.
+            android::write_device_config(serial, &bundle_id, "gpui_live.txt", &channel.device_config())?;
+            android::reverse_port(serial, channel.port)?;
+            android::launch_app(serial, &bundle_id)?;
             println!("{}", format!("✓ relaunched on {label}").green());
             Ok(Iteration::Rebuilt)
         }
@@ -275,12 +325,13 @@ fn run_quiet(label: &str, cmd: &mut Command) -> Result<()> {
 fn run_cycles(
     project: &Project,
     plan: &Plan,
+    channel: &Channel,
     child: &mut Option<Child>,
     rx: &mpsc::Receiver<Event>,
     last_failed: &mut bool,
 ) -> Result<bool> {
     loop {
-        let failed = match run_iteration(project, plan, child) {
+        let failed = match run_iteration(project, plan, channel, child) {
             Ok(Iteration::Rebuilt) => {
                 if *last_failed {
                     println!("{}", "✓ build recovered".green());
@@ -370,6 +421,19 @@ fn resolve_plan(project: &Project, target: &str, flags: &DeviceFlags) -> Result<
 pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Result<()> {
     let plan = resolve_plan(project, target, flags)?;
 
+    // Dev channel: a loopback server apps connect back to, for logs, panics
+    // and (in later phases) asset reloads and snapshot hand-off.
+    let server = DevServer::start().context("failed to start the live dev server")?;
+    let channel_dir = project.root.join(".gpui");
+    fs::create_dir_all(&channel_dir)?;
+    fs::write(channel_dir.join("dev-port"), server.port.to_string())?;
+    fs::write(channel_dir.join("dev-token"), &server.token)?;
+    let channel = Channel {
+        project: project.name.clone(),
+        port: server.port,
+        token: server.token.clone(),
+    };
+
     let (tx, rx) = mpsc::channel::<Event>();
 
     // Key commands come in as lines: the terminal buffers input until Enter,
@@ -421,6 +485,10 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     );
     println!(
         "{}",
+        format!("[live] dev channel on {} (credentials in .gpui/)", channel.addr()).dimmed()
+    );
+    println!(
+        "{}",
         "[live] type 'r' + Enter to force rebuild, 'q' + Enter to quit\n".dimmed()
     );
 
@@ -428,14 +496,17 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     let mut last_failed = false;
 
     // The first call builds and launches immediately, then the loop waits.
-    let mut quit_requested = run_cycles(project, &plan, &mut child, &rx, &mut last_failed)?;
+    let mut quit_requested =
+        run_cycles(project, &plan, &channel, &mut child, &rx, &mut last_failed)?;
     while !quit_requested {
-        match rx.recv() {
+        match rx.recv_timeout(Duration::from_millis(300)) {
             Ok(Event::Quit) => break,
             Ok(Event::Change) | Ok(Event::Force) => {
-                quit_requested = run_cycles(project, &plan, &mut child, &rx, &mut last_failed)?;
+                quit_requested =
+                    run_cycles(project, &plan, &channel, &mut child, &rx, &mut last_failed)?;
             }
-            Err(_) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => report_exited_child(&mut child),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
@@ -446,6 +517,30 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     }
     println!("{}", "\n[live] stopped".dimmed());
     Ok(())
+}
+
+/// Reports a desktop app that exited on its own (crash or window close) without
+/// waiting for the next rebuild to find out.
+fn report_exited_child(child: &mut Option<Child>) {
+    let Some(running) = child.as_mut() else {
+        return;
+    };
+    match running.try_wait() {
+        Ok(Some(status)) => {
+            child.take();
+            let detail = if status.success() {
+                "exited normally".to_string()
+            } else {
+                format!("exited with {status}")
+            };
+            println!(
+                "{}",
+                format!("[live] app {detail} — save a file or press 'r' to relaunch").yellow()
+            );
+        }
+        Ok(None) => {}
+        Err(_) => {}
+    }
 }
 
 #[cfg(test)]

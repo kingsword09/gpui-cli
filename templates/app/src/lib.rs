@@ -5,6 +5,22 @@
 
 use gpui::*;
 
+#[cfg(debug_assertions)]
+pub mod live;
+
+/// Connects to the `gpui run --live` dev server in debug builds and no-ops in
+/// release builds.
+///
+/// `config_file` is only used on Android, where the CLI stages its dev-channel
+/// credentials into the app's internal files dir (apps have no environment to
+/// inherit there).
+pub fn init_live(config_file: Option<&std::path::Path>) {
+    #[cfg(debug_assertions)]
+    live::init(config_file);
+    #[cfg(not(debug_assertions))]
+    let _ = config_file;
+}
+
 /// Root view of the application.
 pub struct MainView;
 

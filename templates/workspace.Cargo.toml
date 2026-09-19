@@ -10,6 +10,11 @@ edition = "2021"
 authors = ["Your Name <you@example.com>"]
 license = "MIT OR Apache-2.0"
 
+# Debug builds must stay unwindable: the live-mode panic hook reports panics
+# but does not (and cannot) keep the process alive; `gpui run --live` restarts.
+[profile.dev]
+panic = "unwind"
+
 # GPUI is published as a family of `gpui-pre-*` crates that must all share one
 # version. `gpui-kit` is pulled from git rather than crates.io because its
 # iOS/Android builds deliberately avoid the desktop-only platform crate.

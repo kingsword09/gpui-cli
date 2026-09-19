@@ -8,7 +8,9 @@
 
 use anyhow::{bail, Context, Result};
 use colored::*;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use super::{adb, emulator_binary, try_capture, Device, Kind, Platform, State};
 
@@ -578,9 +580,20 @@ pub fn remove_avd(name: &str) -> Result<()> {
 
 /// Installs and launches an APK on a specific device.
 pub fn install_and_launch(serial: &str, apk: &Path, bundle_id: &str) -> Result<()> {
+    install_apk(serial, apk)?;
+    launch_app(serial, bundle_id)
+}
+
+/// Installs an APK, replacing an existing build.
+pub fn install_apk(serial: &str, apk: &Path) -> Result<()> {
     let adb = adb().context("`adb` was not found")?;
     let apk = apk.to_string_lossy().into_owned();
-    super::run(&adb, &["-s", serial, "install", "-r", &apk])?;
+    super::run(&adb, &["-s", serial, "install", "-r", &apk])
+}
+
+/// Starts the app's activity.
+pub fn launch_app(serial: &str, bundle_id: &str) -> Result<()> {
+    let adb = adb().context("`adb` was not found")?;
     super::run(
         &adb,
         &[
@@ -591,6 +604,63 @@ pub fn install_and_launch(serial: &str, apk: &Path, bundle_id: &str) -> Result<(
             "start",
             "-n",
             &format!("{bundle_id}/dev.gpui.mobile.GpuiActivity"),
+        ],
+    )
+}
+
+/// Maps a device-side port onto the same host port over adb, so the app can
+/// reach the live dev server at `127.0.0.1:<port>` (works on emulators and
+/// devices connected over USB alike).
+pub fn reverse_port(serial: &str, port: u16) -> Result<()> {
+    let adb = adb().context("`adb` was not found")?;
+    let spec = format!("tcp:{port}");
+    super::run(&adb, &["-s", serial, "reverse", &spec, &spec])
+}
+
+/// Writes a small config file into the app's internal files dir.
+///
+/// Android apps have no host environment to inherit, so live mode delivers its
+/// connection credentials as a file staged through `/data/local/tmp` and
+/// copied in with `run-as` (debug builds only, which live mode requires).
+pub fn write_device_config(
+    serial: &str,
+    package: &str,
+    name: &str,
+    content: &str,
+) -> Result<()> {
+    let adb = adb().context("`adb` was not found")?;
+    let staged = format!("/data/local/tmp/{name}");
+
+    let mut stage = Command::new(&adb)
+        .args(["-s", serial, "shell", "sh", "-c", &format!("cat > {staged}")])
+        .stdin(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to stage {staged}"))?;
+    if let Some(mut stdin) = stage.stdin.take() {
+        stdin
+            .write_all(content.as_bytes())
+            .with_context(|| format!("failed to write {staged}"))?;
+    }
+    let status = stage.wait().with_context(|| format!("staging {staged}"))?;
+    if !status.success() {
+        bail!("staging {staged} failed");
+    }
+
+    super::run(
+        &adb,
+        &["-s", serial, "shell", "run-as", package, "mkdir", "-p", "files"],
+    )?;
+    super::run(
+        &adb,
+        &[
+            "-s",
+            serial,
+            "shell",
+            "run-as",
+            package,
+            "cp",
+            &staged,
+            &format!("files/{name}"),
         ],
     )
 }

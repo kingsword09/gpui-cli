@@ -8,6 +8,7 @@
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::process::Command;
 
 use super::{capture, try_capture, Device, Kind, Platform, State};
 
@@ -442,19 +443,41 @@ pub fn delete(udid: &str) -> Result<()> {
 
 /// Installs and launches an app bundle on a simulator.
 pub fn install_and_launch(udid: &str, app: &std::path::Path, bundle_id: &str) -> Result<()> {
+    install_and_launch_with_env(udid, app, bundle_id, &[])
+}
+
+/// Same as `install_and_launch`, but passes `env` into the launched process.
+///
+/// `simctl launch` forwards the calling process's environment to the app when
+/// the variable is prefixed with `SIMCTL_CHILD_`; this is how live mode hands
+/// the app its dev-channel credentials on the simulator.
+pub fn install_and_launch_with_env(
+    udid: &str,
+    app: &std::path::Path,
+    bundle_id: &str,
+    env: &[(String, String)],
+) -> Result<()> {
     let xcrun = xcrun()?;
     let app = app.to_string_lossy().into_owned();
     super::run(&xcrun, &["simctl", "install", udid, &app])?;
-    super::run(
-        &xcrun,
-        &[
-            "simctl",
-            "launch",
-            "--terminate-running-process",
-            udid,
-            bundle_id,
-        ],
-    )
+    let mut launch = Command::new(&xcrun);
+    launch.args([
+        "simctl",
+        "launch",
+        "--terminate-running-process",
+        udid,
+        bundle_id,
+    ]);
+    for (key, value) in env {
+        launch.env(format!("SIMCTL_CHILD_{key}"), value);
+    }
+    let status = launch
+        .status()
+        .with_context(|| "failed to spawn `simctl launch`")?;
+    if !status.success() {
+        bail!("`simctl launch` failed");
+    }
+    Ok(())
 }
 
 /// Installs and launches an app bundle on a physical device.
