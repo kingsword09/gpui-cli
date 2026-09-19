@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::error;
 use super::run::{
@@ -23,11 +23,18 @@ use super::run::{
     gradle_task, resolve_ios_target, xcode_app_path, xcode_destination, IosTarget, Project,
 };
 use crate::device::{self, android, inventory, ios, DeviceFlags};
-use crate::devserver::{protocol::ServerMessage, DevServer};
+use crate::devserver::protocol::{ClientMessage, ServerMessage};
+use crate::devserver::DevServer;
 
 /// Source files watch out for asset-only changes under this directory; they
 /// can reload in the running app instead of triggering a rebuild.
 const ASSETS_DIR: &str = "assets";
+/// How long the live loop waits for the app to hand over its snapshot.
+const SNAPSHOT_WAIT: Duration = Duration::from_millis(1500);
+/// Snapshots above this size are rejected (the frame cap is 1 MiB).
+const MAX_SNAPSHOT_BYTES: usize = 512 * 1024;
+/// Snapshots older than this are pruned on the next save.
+const SNAPSHOT_TTL: Duration = Duration::from_secs(24 * 3600);
 
 /// Editors fire several events per save; this absorbs the burst.
 const DEBOUNCE_MS: u64 = 400;
@@ -81,6 +88,9 @@ struct Channel {
     port: u16,
     token: String,
     assets_dir: PathBuf,
+    /// Snapshot session to restore in the next launch, if the previous process
+    /// saved one.
+    session: Option<String>,
 }
 
 impl Channel {
@@ -88,10 +98,14 @@ impl Channel {
         format!("127.0.0.1:{}", self.port)
     }
 
+    fn sessions_dir(project: &Project) -> PathBuf {
+        project.root.join(".gpui").join("sessions")
+    }
+
     /// Environment variables the app reads (desktop directly, iOS simulator
     /// via the `SIMCTL_CHILD_` prefix added by `simctl launch`).
-    fn env(&self) -> Vec<(String, String)> {
-        vec![
+    fn env(&self, project: &Project) -> Vec<(String, String)> {
+        let mut env = vec![
             ("GPUI_LIVE_PROJECT".to_string(), self.project.clone()),
             ("GPUI_LIVE_ADDR".to_string(), self.addr()),
             ("GPUI_LIVE_TOKEN".to_string(), self.token.clone()),
@@ -99,13 +113,25 @@ impl Channel {
                 "GPUI_LIVE_ASSETS".to_string(),
                 self.assets_dir.to_string_lossy().into_owned(),
             ),
-        ]
+        ];
+        if let Some(session) = &self.session {
+            env.push(("GPUI_LIVE_SESSION".to_string(), session.clone()));
+            env.push((
+                "GPUI_LIVE_STATE_FILE".to_string(),
+                Self::sessions_dir(project)
+                    .join(format!("{session}.state"))
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+        }
+        env
     }
 
     /// File contents for platforms with no environment to inherit (Android).
     fn device_config(&self) -> String {
+        let session = self.session.as_deref().unwrap_or_default();
         format!(
-            "project={}\naddr={}\ntoken={}\nsession=\n",
+            "project={}\naddr={}\ntoken={}\nsession={session}\n",
             self.project,
             self.addr(),
             self.token
@@ -135,7 +161,8 @@ fn asset_rel_path(root: &Path, path: &Path) -> Option<String> {
 fn run_iteration(
     project: &Project,
     plan: &Plan,
-    channel: &Channel,
+    channel: &mut Channel,
+    server: &DevServer,
     child: &mut Option<Child>,
 ) -> Result<Iteration> {
     match plan {
@@ -152,6 +179,8 @@ fn run_iteration(
             let executable = outcome
                 .executable
                 .context("cargo succeeded but reported no binary path")?;
+            // Snapshot goes to the still-running app before it is replaced.
+            prepare_restart(project, server, channel);
             // Killing an already-exited child is a harmless no-op.
             if let Some(mut old) = child.take() {
                 let _ = old.kill();
@@ -159,7 +188,7 @@ fn run_iteration(
             }
             let mut spawn_cmd = Command::new(&executable);
             spawn_cmd.current_dir(&project.root).stdin(Stdio::null());
-            for (key, value) in channel.env() {
+            for (key, value) in channel.env(project) {
                 spawn_cmd.env(key, value);
             }
             let new_child = spawn_cmd
@@ -185,7 +214,9 @@ fn run_iteration(
                 // launch without credentials, the app just runs detached.
                 ios::install_and_launch_device(id, &app, &bundle_id)?;
             } else {
-                ios::install_and_launch_with_env(id, &app, &bundle_id, &channel.env())?;
+                // Snapshot goes to the still-running app before it is replaced.
+                prepare_restart(project, server, channel);
+                ios::install_and_launch_with_env(id, &app, &bundle_id, &channel.env(project))?;
             }
             println!("{}", format!("✓ relaunched on {label}").green());
             Ok(Iteration::Rebuilt)
@@ -198,9 +229,23 @@ fn run_iteration(
             };
             println!("  {} installing on {}", "→".blue(), label);
             android::install_apk(serial, &apk)?;
+            // Snapshot goes to the still-running app before it is replaced.
+            prepare_restart(project, server, channel);
             // adb reverse works on emulators and USB devices alike, so the app
             // always reaches the dev server at 127.0.0.1:<port>.
             push_android_assets(project, serial, &bundle_id, &all_asset_paths(project));
+            if let Some(session) = &channel.session {
+                let state = Channel::sessions_dir(project).join(format!("{session}.state"));
+                match fs::read(&state) {
+                    Ok(bytes) => {
+                        let _ = android::write_device_config(serial, &bundle_id, "gpui_state", &bytes);
+                    }
+                    Err(err) => {
+                        println!("{}", format!("⚠ failed to read the snapshot: {err}").yellow());
+                        channel.session = None;
+                    }
+                }
+            }
             android::write_device_config(
                 serial,
                 &bundle_id,
@@ -211,6 +256,108 @@ fn run_iteration(
             android::launch_app(serial, &bundle_id)?;
             println!("{}", format!("✓ relaunched on {label}").green());
             Ok(Iteration::Rebuilt)
+        }
+    }
+}
+
+/// Asks the running app to save its snapshot for the next session and stores
+/// it under `.gpui/sessions/` (atomic temp-file + rename).
+///
+/// Without a connected app — or if the app cannot snapshot — the restart is a
+/// plain cold start and says so; it never blocks or fails the cycle.
+fn prepare_restart(project: &Project, server: &DevServer, channel: &mut Channel) {
+    if !server.has_clients() {
+        channel.session = None;
+        return;
+    }
+    let session = format!(
+        "s-{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    server.broadcast(&ServerMessage::PrepareRestart {
+        session: session.clone(),
+    });
+    let saved = server.wait_for(SNAPSHOT_WAIT, |message| {
+        matches!(
+            message,
+            ClientMessage::StateSaved { session: s, .. } if s == &session
+        )
+    });
+    let data = match saved {
+        Some(ClientMessage::StateSaved { data, .. }) => Some(data),
+        _ => None,
+    };
+    let Some(data) = data else {
+        channel.session = None;
+        println!(
+            "{}",
+            "[live] app did not save state (no snapshot support or busy) — restarting without state"
+                .yellow()
+        );
+        return;
+    };
+    if data.len() > MAX_SNAPSHOT_BYTES {
+        channel.session = None;
+        println!(
+            "{}",
+            format!(
+                "⚠ snapshot is {} bytes (limit {}) — restarting without state",
+                data.len(),
+                MAX_SNAPSHOT_BYTES
+            )
+            .yellow()
+        );
+        return;
+    }
+    let dir = Channel::sessions_dir(project);
+    if fs::create_dir_all(&dir).is_err() {
+        channel.session = None;
+        return;
+    }
+    prune_sessions(&dir);
+    let path = dir.join(format!("{session}.state"));
+    let tmp = dir.join(format!("{session}.state.tmp"));
+    match fs::write(&tmp, data.as_bytes()).and_then(|_| fs::rename(&tmp, &path)) {
+        Ok(()) => {
+            channel.session = Some(session);
+            println!(
+                "{}",
+                "[live] state snapshot saved — restoring after restart".dimmed()
+            );
+        }
+        Err(err) => {
+            channel.session = None;
+            println!(
+                "{}",
+                format!("⚠ failed to write the snapshot: {err} — restarting without state").yellow()
+            );
+        }
+    }
+}
+
+/// Removes snapshots older than the TTL.
+fn prune_sessions(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let cutoff = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .saturating_sub(SNAPSHOT_TTL);
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+        if meta.is_file()
+            && modified.map(|age| age < cutoff).unwrap_or(false)
+            && fs::remove_file(entry.path()).is_err()
+        {
+            // Best effort; stale snapshots only waste a little disk.
         }
     }
 }
@@ -394,14 +541,14 @@ fn run_quiet(label: &str, cmd: &mut Command) -> Result<()> {
 fn run_cycles(
     project: &Project,
     plan: &Plan,
-    channel: &Channel,
+    channel: &mut Channel,
     server: &DevServer,
     child: &mut Option<Child>,
     rx: &mpsc::Receiver<Event>,
     last_failed: &mut bool,
 ) -> Result<bool> {
     loop {
-        let failed = match run_iteration(project, plan, channel, child) {
+        let failed = match run_iteration(project, plan, channel, server, child) {
             Ok(Iteration::Rebuilt) => {
                 if *last_failed {
                     println!("{}", "✓ build recovered".green());
@@ -529,11 +676,12 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     fs::create_dir_all(&channel_dir)?;
     fs::write(channel_dir.join("dev-port"), server.port.to_string())?;
     fs::write(channel_dir.join("dev-token"), &server.token)?;
-    let channel = Channel {
+    let mut channel = Channel {
         project: project.name.clone(),
         port: server.port,
         token: server.token.clone(),
         assets_dir: project.root.join(ASSETS_DIR),
+        session: None,
     };
 
     let (tx, rx) = mpsc::channel::<Event>();
@@ -615,7 +763,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     let mut quit_requested = run_cycles(
         project,
         &plan,
-        &channel,
+        &mut channel,
         &server,
         &mut child,
         &rx,
@@ -628,7 +776,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                 quit_requested = run_cycles(
                     project,
                     &plan,
-                    &channel,
+                    &mut channel,
                     &server,
                     &mut child,
                     &rx,
@@ -640,7 +788,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     quit_requested = run_cycles(
                         project,
                         &plan,
-                        &channel,
+                        &mut channel,
                         &server,
                         &mut child,
                         &rx,

@@ -42,6 +42,8 @@ pub enum ClientMessage {
         location: String,
         backtrace: String,
     },
+    /// The app saved its snapshot for the requested restart session.
+    StateSaved { session: String, data: String },
 }
 
 /// Messages sent by the CLI to connected apps.

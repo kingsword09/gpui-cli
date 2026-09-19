@@ -27,11 +27,19 @@ struct LiveConfig {
     addr: String,
     token: String,
     project: String,
-    /// Snapshot session to restore, injected by the CLI on relaunch
-    /// (state snapshots). Unused until a snapshot provider registers.
-    #[allow(dead_code)]
+    /// Snapshot session to restore, injected by the CLI on relaunch.
     session: Option<String>,
+    /// Where the CLI stored that session's snapshot bytes.
+    state_file: Option<std::path::PathBuf>,
 }
+
+/// Latest snapshot the view published (`publish_state`), shipped to the CLI
+/// when it asks the app to prepare for a restart.
+static PUBLISHED_STATE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Snapshot bytes from the previous process, consumed by the view once via
+/// `take_restored_state`.
+static PENDING_STATE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Sender half of the current connection; `None` while disconnected.
 static OUTBOUND: Mutex<Option<mpsc::SyncSender<String>>> = Mutex::new(None);
@@ -49,6 +57,9 @@ static ASSET_SOURCE_INSTALLED: std::sync::atomic::AtomicBool =
 fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
     let project = std::env::var("GPUI_LIVE_PROJECT").unwrap_or_default();
     let session = std::env::var("GPUI_LIVE_SESSION").ok().filter(|s| !s.is_empty());
+    let state_file = std::env::var("GPUI_LIVE_STATE_FILE")
+        .ok()
+        .map(std::path::PathBuf::from);
     if let (Ok(addr), Ok(token)) = (
         std::env::var("GPUI_LIVE_ADDR"),
         std::env::var("GPUI_LIVE_TOKEN"),
@@ -58,15 +69,18 @@ fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
             token,
             project,
             session,
+            state_file,
         });
     }
 
     // Android has no inheritable environment: the CLI stages a config file
-    // into the app's internal files dir before launch.
+    // into the app's internal files dir before launch, alongside `gpui_state`
+    // when a snapshot is pending.
     let content = std::fs::read_to_string(config_file?).ok()?;
     let mut addr = None;
     let mut token = None;
     let mut file_project = None;
+    let mut file_session = None;
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("addr=") {
             addr = Some(value.trim().to_string());
@@ -74,14 +88,20 @@ fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
             token = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("project=") {
             file_project = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("session=") {
+            file_session = Some(value.trim().to_string());
         }
     }
     Some(LiveConfig {
         addr: addr?,
         token: token?,
         project: file_project.unwrap_or(project),
-        session,
-    })}
+        session: file_session.filter(|s| !s.is_empty()),
+        state_file: config_file
+            .and_then(Path::parent)
+            .map(|dir| dir.join("gpui_state")),
+    })
+}
 
 /// Installs the panic forwarding hook (chained on top of any existing one) and
 /// the log forwarder, then spawns the connection thread.
@@ -89,6 +109,20 @@ pub fn init(config_file: Option<&Path>) {
     let Some(config) = resolve_config(config_file) else {
         return;
     };
+
+    // A snapshot from the previous process may be waiting; stage it for the
+    // view to pick up. Unreadable or version-mismatched snapshots just mean a
+    // cold start — they must never block the app from booting.
+    if let (Some(session), Some(state_file)) = (&config.session, &config.state_file) {
+        match std::fs::read_to_string(state_file) {
+            Ok(data) => {
+                *PENDING_STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(data);
+            }
+            Err(err) => {
+                eprintln!("[live] could not restore session {session}: {err}; starting cold");
+            }
+        }
+    }
 
     install_panic_hook();
     install_log_forwarder();
@@ -112,6 +146,29 @@ pub fn init(config_file: Option<&Path>) {
 /// Asset paths reported changed by the CLI since the last call.
 pub fn take_asset_events() -> Vec<String> {
     std::mem::take(&mut ASSET_EVENTS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Publishes the current app state as an opaque snapshot (usually JSON).
+///
+/// Call this from `render` (or wherever state changes): whatever was published
+/// last is what the CLI receives when it asks the app to prepare for a
+/// restart, and what the new process restores from. Keep it small — the CLI
+/// rejects snapshots above its size limit.
+pub fn publish_state(json: &str) {
+    *PUBLISHED_STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(json.to_string());
+}
+
+/// Builds a single-number snapshot body, e.g. `"clicks":3` -> `"{"clicks":3}"`.
+pub fn snapshot_json_number(key: &str, value: usize) -> String {
+    ["{\"".to_owned(), key.to_owned(), "\":".to_owned(), value.to_string(), "}".to_owned()].concat()
+}
+
+/// Returns the previous process's snapshot, if one was saved, consuming it.
+///
+/// Call this when constructing your root view; data that fails to parse means
+/// the caller falls back to its defaults (a cold start).
+pub fn take_restored_state() -> Option<String> {
+    std::mem::take(&mut PENDING_STATE.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// A file-backed asset source for live development.
@@ -270,8 +327,24 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(path);
         }
+    } else if find_bytes(frame, b"\"prepare_restart\"") {
+        let Some(session) = string_field(frame, "session") else {
+            return;
+        };
+        // Ship the latest published snapshot; with none published the CLI
+        // treats the restart as a plain cold start.
+        let data = PUBLISHED_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default();
+        let payload = format!(
+            "{{\"type\":\"state_saved\",\"session\":\"{}\",\"data\":\"{}\"}}",
+            json_escape(&session),
+            json_escape(&data),
+        );
+        send(payload);
     }
-    // `prepare_restart` (state snapshots) is handled by the snapshot module.
     let _ = config;
 }
 
@@ -465,5 +538,34 @@ mod tests {
     fn json_escape_is_round_trip_safe_for_controls() {
         let escaped = json_escape("line\nbreak \"quoted\" \\slash");
         assert_eq!(escaped, "line\\nbreak \\\"quoted\\\" \\\\slash");
+    }
+
+    #[test]
+    fn prepare_restart_ships_the_published_snapshot() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        *OUTBOUND.lock().unwrap() = Some(tx);
+        *PUBLISHED_STATE.lock().unwrap() = Some("{\"clicks\":3}".to_string());
+
+        dispatch(
+            b"{\"type\":\"prepare_restart\",\"session\":\"s-abc\"}",
+            &LiveConfig {
+                addr: String::new(),
+                token: String::new(),
+                project: String::new(),
+                session: None,
+                state_file: None,
+            },
+        );
+
+        *OUTBOUND.lock().unwrap() = None;
+        let payload = rx.recv().unwrap();
+        assert!(payload.contains("\"type\":\"state_saved\""));
+        assert!(payload.contains("\"session\":\"s-abc\""));
+        assert!(payload.contains("\"data\":\"{\\\"clicks\\\":3}\""));
+    }
+
+    #[test]
+    fn snapshot_number_builder_produces_valid_json() {
+        assert_eq!(snapshot_json_number("clicks", 3), "{\"clicks\":3}");
     }
 }
