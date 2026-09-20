@@ -237,12 +237,12 @@ fn run_iteration(
                 Some(apk) => apk,
                 None => return Ok(Iteration::BuildFailed),
             };
+            // The snapshot handshake must happen BEFORE the APK is installed:
+            // `adb install -r` stops the process it replaces, so asking the
+            // old app afterwards would find no one to answer it.
+            prepare_restart(project, server, channel);
             println!("  {} installing on {}", "→".blue(), label);
             android::install_apk(serial, &apk)?;
-            // Snapshot goes to the still-running app before it is replaced.
-            prepare_restart(project, server, channel);
-            // adb reverse works on emulators and USB devices alike, so the app
-            // always reaches the dev server at 127.0.0.1:<port>.
             push_android_assets(project, serial, &bundle_id, &all_asset_paths(project));
             if let Some(session) = &channel.session {
                 let state = Channel::sessions_dir(project).join(format!("{session}.state"));
