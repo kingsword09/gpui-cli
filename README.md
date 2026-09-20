@@ -63,6 +63,42 @@ extra dependencies):
   JSON-serializable state across rebuilds. Every failure degrades to an
   announced cold start.
 
+Agents can query the running live session from another terminal in the same
+project (or one of its subdirectories):
+
+```bash
+gpui dev status --json
+gpui dev diagnostics --json
+gpui dev events --follow --json
+gpui dev events --after <seq> --timeout 30s --json
+```
+
+JSON replies contain `ok`, `session_id`, `schema_version` and `result` (or
+`error`). Take the cursor from `result.seq` in `status`, then request events
+after that cursor. Event pages include `next_seq` and `has_more`; `--follow`
+emits one event per line. Errors use a nonzero exit status. If multiple live
+sessions are running, select one with `--session <id>`.
+
+`status` separates the desired source/asset revisions from the running build
+and process. A failed build keeps the previous process and marks its version
+stale. Cargo diagnostics, including warnings, source spans and suggestions,
+arrive during compilation; desktop stdout/stderr and process exits are also
+recorded. Each launch has its own credentials, so older app templates still
+get correctly attributed logs and panic reports.
+
+Events and raw output are retained under `.gpui/live/<session_id>/`. The live
+event cursor covers up to 2,048 events / 4 MiB; an expired cursor returns
+`cursor_expired` with resynchronization information. On disk, event segments
+use up to 8 MiB and raw output up to 32 MiB per session. Ended sessions remain
+on disk for inspection; the query commands only connect to a live supervisor.
+
+This implements D1 of the [agent feedback design](docs/DESIGN-agent-live-feedback.md).
+UI responsiveness, screenshots, semantic inspection and automated interaction
+are later phases and are reported as unavailable. Version freshness does not
+confirm that a new frame has rendered; resource delivery is also reported
+without a rendering acknowledgment. Native mobile log collection remains
+outside D1.
+
 | Target | Prerequisites |
 | --- | --- |
 | Desktop | Rust and the host platform's native build dependencies |

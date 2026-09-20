@@ -183,6 +183,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: DeviceCommands,
     },
+    /// Query diagnostics and events from a running live session
+    Dev(commands::dev::DevArgs),
     /// Print the project metadata read from gpui.toml
     Info,
     /// Generate shell completions
@@ -233,6 +235,7 @@ fn main() -> anyhow::Result<()> {
             device,
         }) => commands::build::handle_build(Some(target), release, device.into())?,
         Some(Commands::Device { command }) => commands::device::handle_device(command)?,
+        Some(Commands::Dev(args)) => commands::dev::handle_dev(args)?,
         Some(Commands::Info) => commands::info::handle_info()?,
         Some(Commands::Completions { shell }) => commands::completions::handle_completions(shell)?,
         None => {

@@ -1,5 +1,6 @@
 pub mod build;
 pub mod completions;
+pub mod dev;
 pub mod device;
 pub mod doctor;
 pub mod error;
