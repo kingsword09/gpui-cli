@@ -70,11 +70,21 @@ pub struct MainView {
     clicks: usize,
 }
 
+/// Snapshot bytes from the previous process, when building with live support.
+/// Release builds have no `live` module — they always start cold.
+fn restored_state() -> Option<String> {
+    #[cfg(debug_assertions)]
+    let restored = crate::live::take_restored_state();
+    #[cfg(not(debug_assertions))]
+    let restored = None;
+    restored
+}
+
 impl MainView {
     pub fn new() -> Self {
         // Live mode: restore the snapshot the previous process published.
         // Unparseable data means a cold start — never a boot failure.
-        let clicks = crate::live::take_restored_state()
+        let clicks = restored_state()
             .and_then(|json| {
                 json.split("\"clicks\":")
                     .nth(1)
