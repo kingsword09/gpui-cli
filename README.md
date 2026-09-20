@@ -56,7 +56,7 @@ extra dependencies):
 - **Logs and panics** are forwarded to the CLI, so desktop and iOS-simulator
   output lands in one place with panic locations and backtraces.
 - **Assets hot-reload**: images under `assets/` update in the running app
-  without a rebuild (desktop, Android; iOS picks them up on the next rebuild).
+  without a rebuild (desktop, Android and the iOS simulator).
 - **State survives restarts**: the generated click counter demonstrates the
   snapshot protocol — call `live::publish_state` from your render and read
   `live::take_restored_state()` when constructing your view to keep any
