@@ -770,6 +770,10 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
             if code_change {
                 let _ = tx.send(Event::Change);
             } else if !assets.is_empty() {
+                // FSEvents reports one save as several events; pushing and
+                // broadcasting the same path four times is pure noise.
+                assets.sort();
+                assets.dedup();
                 let _ = tx.send(Event::Assets(assets));
             }
         },

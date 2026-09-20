@@ -1,7 +1,9 @@
 # Assets
 
 Files in this directory are bundled into your app through the dev asset
-source: reference them by path, e.g. `img("assets/logo.png")` in a view.
+source: reference them by path in a view, e.g.
+`img(crate::live::image_source("assets/logo.png"))`. The `live` module only
+exists in debug builds, so gate the call the same way.
 
 With `gpui run --live`, images here hot-reload in the running app without a
 rebuild — save the file and the change appears in under a second. On Android
