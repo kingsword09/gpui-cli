@@ -6,13 +6,13 @@
 //! is both the most complete source and the only one that works without the
 //! command line tools installed.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::*;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::{adb, emulator_binary, try_capture, Device, Kind, Platform, State};
+use super::{Device, Kind, Platform, State, adb, emulator_binary, try_capture};
 
 // ── config.ini ───────────────────────────────────────────────────────────────
 
@@ -298,10 +298,10 @@ fn emulator_devices() -> Vec<Device> {
             if let Some(device) = &avd.device {
                 detail.push(device.replace('_', " "));
             }
-            if let Some(image) = &avd.image {
-                if let Some(tag) = image.trim_end_matches('/').split('/').nth(2) {
-                    detail.push(tag.to_string());
-                }
+            if let Some(image) = &avd.image
+                && let Some(tag) = image.trim_end_matches('/').split('/').nth(2)
+            {
+                detail.push(tag.to_string());
             }
             if avd.play_store {
                 detail.push("play store".to_string());
@@ -338,10 +338,10 @@ fn connected_devices() -> Vec<Device> {
 
             // Emulators are reported by `emulator_devices` under their AVD name,
             // so skip them here unless the AVD is unknown to us.
-            if let Some(name) = &avd_name {
-                if avd_names.contains(name) {
-                    return None;
-                }
+            if let Some(name) = &avd_name
+                && avd_names.contains(name)
+            {
+                return None;
             }
 
             let api = getprop(&adb, &device.serial, "ro.build.version.sdk");
@@ -447,10 +447,10 @@ pub fn device_profiles() -> Vec<String> {
     for line in text.lines() {
         let line = line.trim();
         // `id: 12 or "pixel_9_pro"`
-        if let Some(rest) = line.strip_prefix("id:") {
-            if let Some(id) = rest.split('"').nth(1) {
-                out.push(id.to_string());
-            }
+        if let Some(rest) = line.strip_prefix("id:")
+            && let Some(id) = rest.split('"').nth(1)
+        {
+            out.push(id.to_string());
         }
     }
     out
@@ -467,16 +467,16 @@ pub fn create_avd(
     profile: Option<&str>,
 ) -> Result<()> {
     // The `android` CLI cannot select an image; use it only when asked to.
-    if image.is_none() {
-        if let Some(profile) = profile {
-            let cli = super::android_cli().context(
-                "the `android` CLI is not installed; pass --image to use avdmanager, or install it",
-            )?;
-            return super::run(
-                &cli,
-                &["emulator", "create", &format!("--profile={profile}")],
-            );
-        }
+    if image.is_none()
+        && let Some(profile) = profile
+    {
+        let cli = super::android_cli().context(
+            "the `android` CLI is not installed; pass --image to use avdmanager, or install it",
+        )?;
+        return super::run(
+            &cli,
+            &["emulator", "create", &format!("--profile={profile}")],
+        );
     }
 
     let manager = super::avdmanager().context(
@@ -596,7 +596,10 @@ pub fn install_apk(serial: &str, apk: &Path) -> Result<()> {
 /// with stale dev-channel credentials.
 pub fn force_stop(serial: &str, bundle_id: &str) -> Result<()> {
     let adb = adb().context("`adb` was not found")?;
-    super::run(&adb, &["-s", serial, "shell", "am", "force-stop", bundle_id])
+    super::run(
+        &adb,
+        &["-s", serial, "shell", "am", "force-stop", bundle_id],
+    )
 }
 
 /// Starts the app's activity.
@@ -638,12 +641,26 @@ pub fn write_device_config(serial: &str, package: &str, name: &str, content: &[u
     if let Some((dir, _)) = name.rsplit_once('/') {
         super::run(
             &adb,
-            &["-s", serial, "shell", "mkdir", "-p", &format!("/data/local/tmp/{dir}")],
+            &[
+                "-s",
+                serial,
+                "shell",
+                "mkdir",
+                "-p",
+                &format!("/data/local/tmp/{dir}"),
+            ],
         )?;
     }
 
     let mut stage = Command::new(&adb)
-        .args(["-s", serial, "shell", "sh", "-c", &format!("cat > {staged}")])
+        .args([
+            "-s",
+            serial,
+            "shell",
+            "sh",
+            "-c",
+            &format!("cat > {staged}"),
+        ])
         .stdin(Stdio::piped())
         .spawn()
         .with_context(|| format!("failed to stage {staged}"))?;
@@ -662,10 +679,17 @@ pub fn write_device_config(serial: &str, package: &str, name: &str, content: &[u
         Some((dir, _)) => dir.to_string(),
         None => "files".to_string(),
     };
-    super::run(&adb, &["-s", serial, "shell", "run-as", package, "mkdir", "-p", &parent])?;
     super::run(
         &adb,
-        &["-s", serial, "shell", "run-as", package, "cp", &staged, &target],
+        &[
+            "-s", serial, "shell", "run-as", package, "mkdir", "-p", &parent,
+        ],
+    )?;
+    super::run(
+        &adb,
+        &[
+            "-s", serial, "shell", "run-as", package, "cp", &staged, &target,
+        ],
     )
 }
 

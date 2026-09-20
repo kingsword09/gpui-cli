@@ -1,7 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use colored::*;
 
-use super::run::{build_android_apk, build_desktop, build_ios_app, resolve_ios_target, Project};
+use super::run::{Project, build_android_apk, build_desktop, build_ios_app, resolve_ios_target};
 use crate::device::DeviceFlags;
 
 /// Dispatches `gpui build <target>`.

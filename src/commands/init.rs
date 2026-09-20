@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::*;
 use inquire::{MultiSelect, Text};
 use std::env;
@@ -6,7 +6,7 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use crate::template::{add_platforms, scaffold, Platform, ProjectConfig, UiFramework};
+use crate::template::{Platform, ProjectConfig, UiFramework, add_platforms, scaffold};
 
 /// Platforms offered by the wizard, in display order.
 const PLATFORM_CHOICES: [(&str, Platform); 5] = [
@@ -376,20 +376,20 @@ fn read_toml_targets(contents: &str) -> Vec<Platform> {
     };
     for line in section.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("targets") {
-            if let Some(rest) = rest.trim_start().strip_prefix('=') {
-                return rest
-                    .split(['[', ']', ',', '"'])
-                    .filter_map(|part| {
-                        let part = part.trim();
-                        if part.is_empty() {
-                            None
-                        } else {
-                            Platform::parse(part)
-                        }
-                    })
-                    .collect();
-            }
+        if let Some(rest) = line.strip_prefix("targets")
+            && let Some(rest) = rest.trim_start().strip_prefix('=')
+        {
+            return rest
+                .split(['[', ']', ',', '"'])
+                .filter_map(|part| {
+                    let part = part.trim();
+                    if part.is_empty() {
+                        None
+                    } else {
+                        Platform::parse(part)
+                    }
+                })
+                .collect();
         }
     }
     Vec::new()

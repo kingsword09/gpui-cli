@@ -5,10 +5,10 @@
 //! keeps the previously launched app running (mobile) or the previous process
 //! alive (desktop); the loop just keeps watching until the fix lands.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -19,12 +19,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::error;
 use super::run::{
-    apk_path, android_abis, bundle_id_of, bundle_id_of_android, ensure_rust_target, ensure_tool,
-    gradle_task, resolve_ios_target, xcode_app_path, xcode_destination, IosTarget, Project,
+    IosTarget, Project, android_abis, apk_path, bundle_id_of, bundle_id_of_android,
+    ensure_rust_target, ensure_tool, gradle_task, resolve_ios_target, xcode_app_path,
+    xcode_destination,
 };
-use crate::device::{self, android, inventory, ios, DeviceFlags};
-use crate::devserver::protocol::{self, ClientMessage, ServerMessage};
+use crate::device::{self, DeviceFlags, android, inventory, ios};
 use crate::devserver::DevServer;
+use crate::devserver::protocol::{self, ClientMessage, ServerMessage};
 
 /// Source files watch out for asset-only changes under this directory; they
 /// can reload in the running app instead of triggering a rebuild.
@@ -173,7 +174,10 @@ fn run_iteration(
             let outcome = error::run_cargo_json(&mut cmd)?;
             if !outcome.success {
                 error::render_errors(&outcome.errors);
-                println!("{}", "✗ build failed — keeping the current app running".yellow());
+                println!(
+                    "{}",
+                    "✗ build failed — keeping the current app running".yellow()
+                );
                 return Ok(Iteration::BuildFailed);
             }
             let executable = outcome
@@ -220,8 +224,8 @@ fn run_iteration(
                 // The simulator app sandbox cannot read the project's assets
                 // dir, so asset bytes travel over the channel instead (the
                 // client acknowledges the connection with a hello first).
-                if let Some(ClientMessage::Hello { .. }) =
-                    server.wait_for(Duration::from_secs(30), |m| {
+                if let Some(ClientMessage::Hello { .. }) = server
+                    .wait_for(Duration::from_secs(30), |m| {
                         matches!(m, ClientMessage::Hello { .. })
                     })
                 {
@@ -248,10 +252,14 @@ fn run_iteration(
                 let state = Channel::sessions_dir(project).join(format!("{session}.state"));
                 match fs::read(&state) {
                     Ok(bytes) => {
-                        let _ = android::write_device_config(serial, &bundle_id, "gpui_state", &bytes);
+                        let _ =
+                            android::write_device_config(serial, &bundle_id, "gpui_state", &bytes);
                     }
                     Err(err) => {
-                        println!("{}", format!("⚠ failed to read the snapshot: {err}").yellow());
+                        println!(
+                            "{}",
+                            format!("⚠ failed to read the snapshot: {err}").yellow()
+                        );
                         channel.session = None;
                     }
                 }
@@ -345,7 +353,8 @@ fn prepare_restart(project: &Project, server: &DevServer, channel: &mut Channel)
             channel.session = None;
             println!(
                 "{}",
-                format!("⚠ failed to write the snapshot: {err} — restarting without state").yellow()
+                format!("⚠ failed to write the snapshot: {err} — restarting without state")
+                    .yellow()
             );
         }
     }
@@ -441,7 +450,12 @@ fn ios_frame_fits(raw_len: usize, path: &str) -> bool {
 /// Copies the given assets (relative to `<project>/assets`) into the app's
 /// files dir on the device. Returns the paths that were actually staged;
 /// failures are reported but never fatal.
-fn push_android_assets(project: &Project, serial: &str, package: &str, paths: &[String]) -> Vec<String> {
+fn push_android_assets(
+    project: &Project,
+    serial: &str,
+    package: &str,
+    paths: &[String],
+) -> Vec<String> {
     let mut pushed = Vec::new();
     for rel in paths {
         let source = project.root.join(rel);
@@ -466,7 +480,11 @@ fn push_android_assets(project: &Project, serial: &str, package: &str, paths: &[
 
 /// iOS build for the live loop: structured cargo diagnostics, captured output
 /// for xcodegen/xcodebuild (a tail on failure). `Ok(None)` = build failed.
-fn build_ios_app_live(project: &Project, physical: bool, udid: &str) -> Result<Option<std::path::PathBuf>> {
+fn build_ios_app_live(
+    project: &Project,
+    physical: bool,
+    udid: &str,
+) -> Result<Option<std::path::PathBuf>> {
     let rust_target = if physical {
         "aarch64-apple-ios"
     } else {
@@ -475,13 +493,21 @@ fn build_ios_app_live(project: &Project, physical: bool, udid: &str) -> Result<O
     ensure_rust_target(rust_target)?;
 
     let mut cargo = Command::new("cargo");
-    cargo
-        .current_dir(&project.root)
-        .args(["build", "--lib", "-p", &project.app_crate(), "--target", rust_target]);
+    cargo.current_dir(&project.root).args([
+        "build",
+        "--lib",
+        "-p",
+        &project.app_crate(),
+        "--target",
+        rust_target,
+    ]);
     let outcome = error::run_cargo_json(&mut cargo)?;
     if !outcome.success {
         error::render_errors(&outcome.errors);
-        println!("{}", "✗ build failed — keeping the current app running".yellow());
+        println!(
+            "{}",
+            "✗ build failed — keeping the current app running".yellow()
+        );
         return Ok(None);
     }
 
@@ -540,9 +566,13 @@ fn build_android_apk_live(project: &Project) -> Result<Option<std::path::PathBuf
     for abi in &abis {
         ndk.args(["-t", abi]);
     }
-    ndk.arg("-o")
-        .arg(project.android_jni_libs_dir())
-        .args(["--platform", "31", "build", "-p", &project.app_crate()]);
+    ndk.arg("-o").arg(project.android_jni_libs_dir()).args([
+        "--platform",
+        "31",
+        "build",
+        "-p",
+        &project.app_crate(),
+    ]);
     run_quiet(&format!("cargo ndk ({})", abis.join(", ")), &mut ndk)?;
 
     let expected = project
@@ -565,7 +595,10 @@ fn build_android_apk_live(project: &Project) -> Result<Option<std::path::PathBuf
 
     let apk = apk_path(project, false);
     if !apk.exists() {
-        bail!("Gradle finished but no APK was found at '{}'.", apk.display());
+        bail!(
+            "Gradle finished but no APK was found at '{}'.",
+            apk.display()
+        );
     }
     println!("  {} {}", "✓".green(), apk.display());
     Ok(Some(apk))
@@ -663,13 +696,13 @@ fn reload_assets(project: &Project, plan: &Plan, server: &DevServer, paths: &[St
             let package = bundle_id_of_android(project);
             push_android_assets(project, serial, &package, paths)
         }
-        Plan::Ios { physical: false, .. } => push_ios_assets(project, paths.to_vec(), server),
+        Plan::Ios {
+            physical: false, ..
+        } => push_ios_assets(project, paths.to_vec(), server),
         _ => paths.to_vec(),
     };
     for path in &pushed {
-        server.broadcast(&ServerMessage::AssetChanged {
-            path: path.clone(),
-        });
+        server.broadcast(&ServerMessage::AssetChanged { path: path.clone() });
     }
     if pushed.is_empty() {
         println!(
@@ -834,7 +867,11 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     );
     println!(
         "{}",
-        format!("[live] dev channel on {} (credentials in .gpui/)", channel.addr()).dimmed()
+        format!(
+            "[live] dev channel on {} (credentials in .gpui/)",
+            channel.addr()
+        )
+        .dimmed()
     );
     println!(
         "{}",
@@ -929,19 +966,23 @@ mod tests {
         assert!(should_trigger(&root.join("crates/app/src/lib.rs")));
         assert!(should_trigger(&root.join("Cargo.toml")));
         assert!(should_trigger(&root.join("gpui.toml")));
-        assert!(should_trigger(
-            &root.join("mobile/android/gradle/app/src/main/java/dev/gpui/mobile/GpuiActivity.kt")
-        ));
+        assert!(should_trigger(&root.join(
+            "mobile/android/gradle/app/src/main/java/dev/gpui/mobile/GpuiActivity.kt"
+        )));
         assert!(should_trigger(&root.join("mobile/ios/App.swift")));
         assert!(!should_trigger(&root.join("target/debug/app")));
-        assert!(!should_trigger(&root.join("mobile/ios/build/Build/Products/app")));
         assert!(!should_trigger(
-            &root.join("mobile/android/gradle/app/build/outputs/apk/app-debug.apk")
+            &root.join("mobile/ios/build/Build/Products/app")
         ));
+        assert!(!should_trigger(&root.join(
+            "mobile/android/gradle/app/build/outputs/apk/app-debug.apk"
+        )));
+        assert!(!should_trigger(&root.join(
+            "mobile/android/gradle/app/src/main/jniLibs/arm64-v8a/libapp.so"
+        )));
         assert!(!should_trigger(
-            &root.join("mobile/android/gradle/app/src/main/jniLibs/arm64-v8a/libapp.so")
+            &root.join("mobile/ios/App.xcodeproj/project.pbxproj")
         ));
-        assert!(!should_trigger(&root.join("mobile/ios/App.xcodeproj/project.pbxproj")));
         assert!(!should_trigger(&root.join(".git/index")));
     }
 
@@ -965,7 +1006,10 @@ mod tests {
             asset_rel_path(root, &root.join("assets/icons/x.svg")).as_deref(),
             Some("assets/icons/x.svg")
         );
-        assert_eq!(asset_rel_path(root, &root.join("crates/app/src/lib.rs")), None);
+        assert_eq!(
+            asset_rel_path(root, &root.join("crates/app/src/lib.rs")),
+            None
+        );
         assert_eq!(asset_rel_path(root, &root.join("assets_mine/x.png")), None);
         assert_eq!(asset_rel_path(root, &root.join("other/assets/x.png")), None);
     }

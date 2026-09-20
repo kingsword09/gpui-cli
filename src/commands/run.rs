@@ -1,10 +1,10 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::device::{self, android, inventory, ios, DeviceFlags, Kind, Platform as DevicePlatform};
+use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
 use crate::template::Platform;
 
 /// Resolved project layout, read from the current working directory.
@@ -98,10 +98,10 @@ fn read_string(contents: &str, key: &str) -> Option<String> {
     let section = section.split("\n[").next()?;
     for line in section.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix(key) {
-            if let Some(rest) = rest.trim_start().strip_prefix('=') {
-                return Some(rest.trim().trim_matches('"').to_string());
-            }
+        if let Some(rest) = line.strip_prefix(key)
+            && let Some(rest) = rest.trim_start().strip_prefix('=')
+        {
+            return Some(rest.trim().trim_matches('"').to_string());
         }
     }
     None
@@ -218,7 +218,11 @@ pub(crate) fn xcode_app_path(
     release: bool,
 ) -> PathBuf {
     let config = if release { "Release" } else { "Debug" };
-    let sdk_dir = if physical { "iphoneos" } else { "iphonesimulator" };
+    let sdk_dir = if physical {
+        "iphoneos"
+    } else {
+        "iphonesimulator"
+    };
     derived_dir.join(format!("Build/Products/{config}-{sdk_dir}/{scheme}.app"))
 }
 
@@ -460,10 +464,10 @@ pub(crate) fn bundle_id_of_android(project: &Project) -> String {
     if let Ok(contents) = fs::read_to_string(gradle) {
         for line in contents.lines() {
             let line = line.trim();
-            if let Some(rest) = line.strip_prefix("applicationId") {
-                if let Some(rest) = rest.trim_start().strip_prefix('=') {
-                    return rest.trim().trim_matches('"').to_string();
-                }
+            if let Some(rest) = line.strip_prefix("applicationId")
+                && let Some(rest) = rest.trim_start().strip_prefix('=')
+            {
+                return rest.trim().trim_matches('"').to_string();
             }
         }
     }

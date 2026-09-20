@@ -10,13 +10,13 @@ pub mod protocol;
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use protocol::{ClientMessage, ServerMessage, PROTO_VERSION};
+use protocol::{ClientMessage, PROTO_VERSION, ServerMessage};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -49,8 +49,8 @@ pub struct DevServer {
 impl DevServer {
     /// Binds a random loopback port and starts accepting connections.
     pub fn start() -> Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .context("failed to bind the live dev server")?;
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).context("failed to bind the live dev server")?;
         let port = listener.local_addr()?.port();
         let token = random_token();
         let (events_tx, events_rx) = mpsc::channel();
@@ -321,7 +321,9 @@ fn print_app_message(message: &ClientMessage) {
         } => {
             println!(
                 "{}",
-                format!("💥 [live] app panicked: {message} ({location})").red().bold()
+                format!("💥 [live] app panicked: {message} ({location})")
+                    .red()
+                    .bold()
             );
             let mut lines = backtrace.lines().peekable();
             let _ = lines.next(); // skip the "Backtrace No." style header noise
@@ -342,8 +344,12 @@ fn print_app_message(message: &ClientMessage) {
 /// loopback channel whose credentials are also delivered over adb/simctl.
 fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
-    let a = std::collections::hash_map::RandomState::new().build_hasher().finish();
-    let b = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let a = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    let b = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
     format!("{a:016x}{b:016x}")
 }
 

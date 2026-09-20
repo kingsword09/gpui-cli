@@ -152,8 +152,16 @@ pub mod b64 {
             let n = (b0 << 16) | (b1 << 8) | b2;
             out.push(TABLE[(n >> 18) as usize & 63] as char);
             out.push(TABLE[(n >> 12) as usize & 63] as char);
-            out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-            out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+            out.push(if chunk.len() > 1 {
+                TABLE[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[n as usize & 63] as char
+            } else {
+                '='
+            });
         }
         out
     }
@@ -208,4 +216,3 @@ mod b64_tests {
         }
     }
 }
-

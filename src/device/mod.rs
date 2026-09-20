@@ -5,7 +5,7 @@
 //! `devicectl --json-output`, `~/.android/avd/*/config.ini` and
 //! `adb devices -l`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::*;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ pub mod android;
 pub mod inventory;
 pub mod ios;
 
-pub use inventory::{resolve_device, Defaults};
+pub use inventory::{Defaults, resolve_device};
 
 // ── Model ────────────────────────────────────────────────────────────────────
 

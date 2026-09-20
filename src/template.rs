@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
-use include_dir::{include_dir, Dir};
+use anyhow::{Context, Result, bail};
+use include_dir::{Dir, include_dir};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -736,9 +736,10 @@ mod tests {
 
         assert!(dir.join("crates/app/src/lib.rs").exists());
         assert!(dir.join("mobile/ios/project.yml").exists());
-        assert!(dir
-            .join("mobile/android/gradle/app/build.gradle.kts")
-            .exists());
+        assert!(
+            dir.join("mobile/android/gradle/app/build.gradle.kts")
+                .exists()
+        );
         assert!(
             !dir.join("crates/desktop").exists(),
             "desktop must be absent"
@@ -870,9 +871,11 @@ mod tests {
             "// application's customized desktop entry\n"
         );
         assert!(dir.path().join("mobile/android/gradle/gradlew").exists());
-        assert!(fs::read_to_string(dir.path().join("gpui.toml"))
-            .unwrap()
-            .contains("android"));
+        assert!(
+            fs::read_to_string(dir.path().join("gpui.toml"))
+                .unwrap()
+                .contains("android")
+        );
     }
 
     #[test]

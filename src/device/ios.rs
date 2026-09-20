@@ -5,12 +5,12 @@
 //! iOS 18.4 and iOS 26.2), so a name match is genuinely ambiguous and only the
 //! UDID is a sound key.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::{capture, try_capture, Device, Kind, Platform, State};
+use super::{Device, Kind, Platform, State, capture, try_capture};
 
 fn xcrun() -> Result<PathBuf> {
     super::xcrun().context("`xcrun` was not found; install Xcode or the command line tools")
@@ -381,10 +381,10 @@ pub fn device_types(runtime: Option<&Runtime>) -> Result<Vec<DeviceType>> {
             continue;
         }
         let identifier = string_field(entry, "identifier").unwrap_or_default();
-        if let Some(runtime) = runtime {
-            if !runtime.supported_device_types.contains(&identifier) {
-                continue;
-            }
+        if let Some(runtime) = runtime
+            && !runtime.supported_device_types.contains(&identifier)
+        {
+            continue;
         }
         out.push(DeviceType {
             name: string_field(entry, "name").unwrap_or_default(),
