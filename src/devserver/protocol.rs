@@ -54,6 +54,9 @@ pub enum ServerMessage {
     HelloOk { proto: u32 },
     /// An asset file changed on disk; the app should drop its cache entry.
     AssetChanged { path: String },
+    /// The new bytes for an asset (base64), used for platforms whose app
+    /// sandbox cannot read the project directory (iOS simulator).
+    AssetData { path: String, data: String },
     /// A rebuild succeeded; the app should save its snapshot for `session`.
     PrepareRestart { session: String },
 }
@@ -135,3 +138,74 @@ mod tests {
         assert!(text.starts_with("{\"type\":\"log\""));
     }
 }
+
+/// Minimal standard base64; used for pushing asset bytes over the channel.
+pub mod b64 {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub fn encode(data: &[u8]) -> String {
+        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            out.push(TABLE[(n >> 18) as usize & 63] as char);
+            out.push(TABLE[(n >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+            out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        }
+        out
+    }
+
+    pub fn decode(text: &str) -> Option<Vec<u8>> {
+        fn value(c: u8) -> Option<u32> {
+            match c {
+                b'A'..=b'Z' => Some((c - b'A') as u32),
+                b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+                b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            }
+        }
+        let bytes: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+        for chunk in bytes.chunks(4) {
+            if chunk.len() < 2 {
+                return None;
+            }
+            let mut n = 0u32;
+            let mut count = 0;
+            for (i, &c) in chunk.iter().enumerate() {
+                if c == b'=' {
+                    break;
+                }
+                n |= value(c)? << (18 - 6 * i);
+                count += 1;
+            }
+            out.push((n >> 16) as u8);
+            if count > 2 {
+                out.push((n >> 8) as u8);
+            }
+            if count > 3 {
+                out.push(n as u8);
+            }
+        }
+        Some(out)
+    }
+}
+#[cfg(test)]
+mod b64_tests {
+    use super::b64;
+
+    #[test]
+    fn roundtrips_arbitrary_bytes() {
+        for len in 0..40usize {
+            let data: Vec<u8> = (0..len as u8).map(|i| i.wrapping_mul(37)).collect();
+            let encoded = b64::encode(&data);
+            assert_eq!(b64::decode(&encoded).as_deref(), Some(data.as_slice()));
+        }
+    }
+}
+

@@ -38,8 +38,17 @@ pub fn pump_live_assets(cx: &mut App) {
                 }
                 cx.update(|cx| {
                     for path in paths {
+                        // Embedded = the DevAssetSource key (desktop/Android);
+                        // Path = the simulator filesystem key used on iOS.
                         cx.remove_asset::<gpui::ImgResourceLoader>(&gpui::Resource::Embedded(
-                            path.into(),
+                            path.clone().into(),
+                        ));
+                        #[cfg(target_os = "ios")]
+                        cx.remove_asset::<gpui::ImgResourceLoader>(&gpui::Resource::Path(
+                            std::env::temp_dir()
+                                .join("gpui-assets")
+                                .join(&path)
+                                .into(),
                         ));
                     }
                     cx.refresh_windows();

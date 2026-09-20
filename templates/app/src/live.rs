@@ -124,6 +124,11 @@ pub fn init(config_file: Option<&Path>) {
         }
     }
 
+    // On iOS the CLI pushes asset bytes over the channel (see image_source);
+    // advertise that capability up front, before the first render.
+    #[cfg(all(debug_assertions, target_os = "ios"))]
+    ASSET_SOURCE_INSTALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+
     install_panic_hook();
     install_log_forwarder();
 
@@ -141,6 +146,35 @@ pub fn init(config_file: Option<&Path>) {
     let _ = std::thread::Builder::new()
         .name("gpui-live".into())
         .spawn(move || client_loop(config, platform));
+}
+
+/// Resolves the gpui image source for an asset under the dev assets dir.
+///
+/// Desktop/Android keep the embedded-resource key served by
+/// `dev_asset_source`. The iOS runner constructs `Application` internally, so
+/// there is no app-level asset source to install; instead, on a debug iOS
+/// build we hand gpui a filesystem path (`Resource::Path` loads via
+/// `fs::read`), which the simulator resolves on the shared host filesystem
+/// through `GPUI_LIVE_ASSETS`. `pump_live_assets` evicts both key styles.
+pub fn image_source(name: &str) -> gpui::ImageSource {
+    #[cfg(all(debug_assertions, target_os = "ios"))]
+    {
+        // The iOS runner constructs `Application` internally, so there is no
+        // app-level asset source to install. Instead the CLI pushes asset
+        // bytes over the dev channel; they land in the app's own tmp dir,
+        // which gpui can read via `Resource::Path` (`fs::read`).
+        let path = std::env::temp_dir()
+            .join("gpui-assets")
+            .join(name);
+        if path.exists() {
+            return gpui::ImageSource::Resource(gpui::Resource::Path(path.into()));
+        }
+        gpui::ImageSource::Resource(gpui::Resource::Embedded(name.to_string().into()))
+    }
+    #[cfg(not(all(debug_assertions, target_os = "ios")))]
+    {
+        gpui::ImageSource::Resource(gpui::Resource::Embedded(name.to_string().into()))
+    }
 }
 
 /// Asset paths reported changed by the CLI since the last call.
@@ -326,6 +360,23 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(path);
+        }
+    } else if find_bytes(frame, b"\"asset_data\"") {
+        if let (Some(path), Some(data)) = (string_field(frame, "path"), string_field(frame, "data")) {
+            if let Some(bytes) = b64_decode(&data) {
+                let target = std::env::temp_dir()
+                    .join("gpui-assets")
+                    .join(&path);
+                if let Some(parent) = target.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(&target, bytes).is_ok() {
+                    ASSET_EVENTS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(path);
+                }
+            }
         }
     } else if find_bytes(frame, b"\"prepare_restart\"") {
         let Some(session) = string_field(frame, "session") else {
@@ -568,4 +619,41 @@ mod tests {
     fn snapshot_number_builder_produces_valid_json() {
         assert_eq!(snapshot_json_number("clicks", 3), "{\"clicks\":3}");
     }
+}
+
+fn b64_decode(text: &str) -> Option<Vec<u8>> {
+    fn value(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 2 {
+            return None;
+        }
+        let mut n = 0u32;
+        let mut count = 0;
+        for (i, &c) in chunk.iter().enumerate() {
+            if c == b'=' {
+                break;
+            }
+            n |= value(c)? << (18 - 6 * i);
+            count += 1;
+        }
+        out.push((n >> 16) as u8);
+        if count > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if count > 3 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
 }

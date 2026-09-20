@@ -198,8 +198,8 @@ fn open_main_window(cx: &mut App) {
     Theme::change(ThemeMode::Light, None, cx);
 
     // Hot-reloads images changed under `assets/` while `gpui run --live` is
-    // running (Android; the iOS runner cannot install a dev asset source).
-    #[cfg(all(debug_assertions, target_os = "android"))]
+    // running (Android via pushed files, iOS simulator via the host path).
+    #[cfg(all(debug_assertions, any(target_os = "android", target_os = "ios")))]
     crate::pump_live_assets(cx);
 
     cx.open_window(WindowOptions::default(), |window, cx| {

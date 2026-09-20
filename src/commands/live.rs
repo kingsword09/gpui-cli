@@ -23,7 +23,7 @@ use super::run::{
     gradle_task, resolve_ios_target, xcode_app_path, xcode_destination, IosTarget, Project,
 };
 use crate::device::{self, android, inventory, ios, DeviceFlags};
-use crate::devserver::protocol::{ClientMessage, ServerMessage};
+use crate::devserver::protocol::{self, ClientMessage, ServerMessage};
 use crate::devserver::DevServer;
 
 /// Source files watch out for asset-only changes under this directory; they
@@ -217,6 +217,16 @@ fn run_iteration(
                 // Snapshot goes to the still-running app before it is replaced.
                 prepare_restart(project, server, channel);
                 ios::install_and_launch_with_env(id, &app, &bundle_id, &channel.env(project))?;
+                // The simulator app sandbox cannot read the project's assets
+                // dir, so asset bytes travel over the channel instead (the
+                // client acknowledges the connection with a hello first).
+                if let Some(ClientMessage::Hello { .. }) =
+                    server.wait_for(Duration::from_secs(30), |m| {
+                        matches!(m, ClientMessage::Hello { .. })
+                    })
+                {
+                    push_ios_assets(project, all_asset_paths(project), server);
+                }
             }
             println!("{}", format!("✓ relaunched on {label}").green());
             Ok(Iteration::Rebuilt)
@@ -384,6 +394,23 @@ fn all_asset_paths(project: &Project) -> Vec<String> {
         }
     }
     out
+}
+
+/// Sends the given asset files to the connected iOS app over the dev
+/// channel (the app sandbox cannot read the project directory, so the bytes
+/// travel as base64 `asset_data` messages). Not connected: silently skipped.
+fn push_ios_assets(project: &Project, paths: Vec<String>, server: &DevServer) {
+    for rel in paths {
+        match fs::read(project.root.join(&rel)) {
+            Ok(bytes) => {
+                server.broadcast(&ServerMessage::AssetData {
+                    path: rel,
+                    data: protocol::b64::encode(&bytes),
+                });
+            }
+            Err(err) => println!("{}", format!("⚠ failed to read {rel}: {err}").yellow()),
+        }
+    }
 }
 
 /// Copies the given assets (relative to `<project>/assets`) into the app's
@@ -599,9 +626,15 @@ fn reload_assets(project: &Project, plan: &Plan, server: &DevServer, paths: &[St
     if !(server.has_clients() && server.all_clients_support_asset_reload()) {
         return false;
     }
-    if let Plan::Android { serial, .. } = plan {
-        let package = bundle_id_of_android(project);
-        push_android_assets(project, serial, &package, paths);
+    match plan {
+        Plan::Android { serial, .. } => {
+            let package = bundle_id_of_android(project);
+            push_android_assets(project, serial, &package, paths);
+        }
+        Plan::Ios { physical: false, .. } => {
+            push_ios_assets(project, paths.to_vec(), server);
+        }
+        _ => {}
     }
     for path in paths {
         server.broadcast(&ServerMessage::AssetChanged {
