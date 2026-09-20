@@ -1,8 +1,8 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::*;
 
-use crate::device::{self, android, ios, Device, Kind, Platform};
 use crate::DeviceCommands;
+use crate::device::{self, Device, Kind, Platform, android, ios};
 
 pub fn handle_device(command: DeviceCommands) -> Result<()> {
     match command {

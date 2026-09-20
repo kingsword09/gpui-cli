@@ -4,10 +4,10 @@
 //! reproducible: CLI flags, then `gpui.toml` `[run]`, then environment
 //! variables, then an interactive prompt, then a documented auto-pick.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::*;
 
-use super::{android, ios, Device, DeviceFlags, Kind, Platform, State};
+use super::{Device, DeviceFlags, Kind, Platform, State, android, ios};
 
 /// Per-project defaults from the `[run]` section of `gpui.toml`.
 #[derive(Debug, Clone, Default)]
@@ -34,12 +34,12 @@ fn read_run_value(manifest: &str, key: &str) -> Option<String> {
         if line.starts_with('#') {
             continue;
         }
-        if let Some(rest) = line.strip_prefix(key) {
-            if let Some(rest) = rest.trim_start().strip_prefix('=') {
-                let value = toml_value(rest);
-                if !value.is_empty() {
-                    return Some(value);
-                }
+        if let Some(rest) = line.strip_prefix(key)
+            && let Some(rest) = rest.trim_start().strip_prefix('=')
+        {
+            let value = toml_value(rest);
+            if !value.is_empty() {
+                return Some(value);
             }
         }
     }
@@ -169,10 +169,10 @@ fn resolve_ios(
     if let Some(spec) = defaults.ios_simulator.as_deref() {
         return pick_simulator(Some(spec));
     }
-    if let Ok(spec) = std::env::var("GPUI_IOS_DEVICE") {
-        if !spec.trim().is_empty() {
-            return pick_simulator(Some(spec.trim()));
-        }
+    if let Ok(spec) = std::env::var("GPUI_IOS_DEVICE")
+        && !spec.trim().is_empty()
+    {
+        return pick_simulator(Some(spec.trim()));
     }
     if let Some(spec) = project_default {
         return pick_simulator(Some(spec));

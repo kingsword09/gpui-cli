@@ -10,13 +10,13 @@ pub mod protocol;
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use protocol::{ClientMessage, ServerMessage, PROTO_VERSION};
+use protocol::{ClientMessage, PROTO_VERSION, ServerMessage};
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,9 @@ struct Shared {
     next_id: AtomicU64,
     events_tx: mpsc::Sender<ClientMessage>,
     shutdown: AtomicBool,
+    /// Set when any connection write has failed; the live loop checks (and
+    /// clears) it so it never reports an unconfirmed send as a success.
+    write_failed: AtomicBool,
 }
 
 pub struct DevServer {
@@ -46,8 +49,8 @@ pub struct DevServer {
 impl DevServer {
     /// Binds a random loopback port and starts accepting connections.
     pub fn start() -> Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .context("failed to bind the live dev server")?;
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).context("failed to bind the live dev server")?;
         let port = listener.local_addr()?.port();
         let token = random_token();
         let (events_tx, events_rx) = mpsc::channel();
@@ -58,6 +61,7 @@ impl DevServer {
             next_id: AtomicU64::new(0),
             events_tx,
             shutdown: AtomicBool::new(false),
+            write_failed: AtomicBool::new(false),
         });
 
         let accept_shared = shared.clone();
@@ -116,6 +120,13 @@ impl DevServer {
             .lock()
             .map(|clients| !clients.is_empty())
             .unwrap_or(false)
+    }
+
+    /// Whether a connection write has failed since the last call, clearing
+    /// the flag. A failed write means whatever was last broadcast may not
+    /// have reached the app.
+    pub fn take_write_error(&self) -> bool {
+        self.shared.write_failed.swap(false, Ordering::SeqCst)
     }
 
     /// Whether every connected app can hot-reload assets. Only then may the
@@ -211,17 +222,10 @@ fn handle_connection(mut stream: std::net::TcpStream, shared: Arc<Shared>) {
         "{}",
         format!("[live] app connected: {project} ({platform}, pid {pid})").dimmed()
     );
-    // Surfaces the connection to the live loop, which uses it as the signal
-    // that a freshly launched app is ready to receive pushed assets.
-    let _ = shared.events_tx.send(ClientMessage::Hello {
-        proto: PROTO_VERSION,
-        token: shared.token.clone(),
-        project,
-        pid,
-        platform,
-        asset_reload,
-    });
 
+    // Register the connection BEFORE announcing it: the live loop reacts to
+    // the hello by broadcasting (e.g. replaying assets), and a broadcast
+    // that lands before registration would silently miss this app.
     let id = shared.next_id.fetch_add(1, Ordering::SeqCst);
     let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>();
     if let Ok(mut clients) = shared.clients.lock() {
@@ -233,15 +237,29 @@ fn handle_connection(mut stream: std::net::TcpStream, shared: Arc<Shared>) {
             },
         );
     }
+    let _ = shared.events_tx.send(ClientMessage::Hello {
+        proto: PROTO_VERSION,
+        token: shared.token.clone(),
+        project,
+        pid,
+        platform,
+        asset_reload,
+    });
 
-    // Writer half: drains broadcast messages into the socket.
+    // Writer half: drains broadcast messages into the socket. A stalled app
+    // must not wedge the thread forever, and a failed write must tear the
+    // whole socket down (the reader half blocks on the same connection and
+    // would otherwise wait for frames that can never arrive).
     let mut writer = stream;
+    let _ = writer.set_write_timeout(Some(Duration::from_secs(5)));
     let writer_shared = shared.clone();
     let writer_thread = std::thread::Builder::new()
         .name("gpui-devwrite".into())
         .spawn(move || {
             for payload in outbound_rx {
                 if protocol::write_frame(&mut writer, &payload).is_err() {
+                    writer_shared.write_failed.store(true, Ordering::SeqCst);
+                    let _ = writer.shutdown(std::net::Shutdown::Both);
                     break;
                 }
             }
@@ -303,7 +321,9 @@ fn print_app_message(message: &ClientMessage) {
         } => {
             println!(
                 "{}",
-                format!("💥 [live] app panicked: {message} ({location})").red().bold()
+                format!("💥 [live] app panicked: {message} ({location})")
+                    .red()
+                    .bold()
             );
             let mut lines = backtrace.lines().peekable();
             let _ = lines.next(); // skip the "Backtrace No." style header noise
@@ -324,8 +344,12 @@ fn print_app_message(message: &ClientMessage) {
 /// loopback channel whose credentials are also delivered over adb/simctl.
 fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
-    let a = std::collections::hash_map::RandomState::new().build_hasher().finish();
-    let b = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let a = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    let b = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
     format!("{a:016x}{b:016x}")
 }
 
@@ -400,5 +424,69 @@ mod tests {
         stream.read_exact(&mut body).unwrap();
         let message: ServerMessage = protocol::decode(&body).unwrap();
         assert!(matches!(message, ServerMessage::AssetChanged { path } if path == "assets/x.png"));
+    }
+
+    #[test]
+    fn hello_ready_implies_the_client_is_registered() {
+        let server = DevServer::start().unwrap();
+        let (mut stream, _reply) = connect(&server, &server.token);
+        // The hello is the live loop's signal to broadcast (e.g. replaying
+        // assets); no settle sleep here — the broadcast that answers the
+        // hello must reach the connection it was announced for.
+        let hello = server.wait_for(Duration::from_secs(1), |m| {
+            matches!(m, ClientMessage::Hello { .. })
+        });
+        assert!(hello.is_some());
+
+        server.broadcast(&ServerMessage::AssetChanged {
+            path: "assets/x.png".to_string(),
+        });
+        let mut len_bytes = [0u8; 4];
+        stream.read_exact(&mut len_bytes).unwrap();
+        let len = u32::from_be_bytes(len_bytes) as usize;
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).unwrap();
+        let message: ServerMessage = protocol::decode(&body).unwrap();
+        assert!(matches!(message, ServerMessage::AssetChanged { .. }));
+    }
+
+    #[test]
+    fn write_failure_tears_down_the_connection_and_is_reported() {
+        let server = DevServer::start().unwrap();
+        // Handshake but never read a byte: the hello_ok sits unread, and
+        // closing a socket with unread receive data forces an RST.
+        let mut raw = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        let hello = protocol::encode(&ClientMessage::Hello {
+            proto: PROTO_VERSION,
+            token: server.token.clone(),
+            project: "test".to_string(),
+            pid: 1,
+            platform: "test".to_string(),
+            asset_reload: true,
+        })
+        .unwrap();
+        protocol::write_frame(&mut raw, &hello).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        // Queue far more than the socket buffers can take so the writer is
+        // still mid-write when the RST lands — the failure must happen on
+        // the write path, not the reader noticing the reset first.
+        for _ in 0..12 {
+            server.broadcast(&ServerMessage::AssetData {
+                path: "assets/x.png".to_string(),
+                data: "x".repeat(256 * 1024),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        drop(raw);
+
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(100));
+            if !server.has_clients() {
+                break;
+            }
+        }
+        assert!(!server.has_clients());
+        assert!(server.take_write_error());
+        assert!(!server.take_write_error()); // reported exactly once per failure
     }
 }

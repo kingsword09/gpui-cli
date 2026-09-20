@@ -1,8 +1,8 @@
 [package]
 name = "gpui-cli"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
+edition = "2024"
+rust-version = "1.97"
 authors = ["Kingsword <kingsword09@gmail.com>"]
 description = "CLI tool to initialize and develop multi-platform GPUI desktop and mobile applications"
 license = "MIT OR Apache-2.0"

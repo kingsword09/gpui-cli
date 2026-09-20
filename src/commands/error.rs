@@ -147,9 +147,12 @@ pub fn render_errors(errors: &[Diagnostic]) {
         if diagnostic.rendered.trim().is_empty() {
             println!(
                 "{}",
-                format!("{}:{}:{}: {}", diagnostic.file, diagnostic.line, diagnostic.col, diagnostic.message)
-                    .red()
-                    .bold()
+                format!(
+                    "{}:{}:{}: {}",
+                    diagnostic.file, diagnostic.line, diagnostic.col, diagnostic.message
+                )
+                .red()
+                .bold()
             );
         } else {
             println!("{}", diagnostic.rendered.trim_end());
@@ -191,7 +194,10 @@ mod tests {
             r#"{"reason":"compiler-message","message":{"level":"warning","message":"unused","spans":[]}}"#,
             &mut outcome,
         );
-        apply_json_line(r#"{"reason":"build-finished","success":true}"#, &mut outcome);
+        apply_json_line(
+            r#"{"reason":"build-finished","success":true}"#,
+            &mut outcome,
+        );
         apply_json_line("not json at all", &mut outcome);
         assert!(outcome.errors.is_empty());
     }
@@ -212,6 +218,9 @@ mod tests {
             r#"{"reason":"compiler-artifact","package_id":"x","target":{"kind":["bin"]},"executable":"/tmp/app","fresh":false}"#,
             &mut outcome,
         );
-        assert_eq!(outcome.executable.as_deref(), Some(std::path::Path::new("/tmp/app")));
+        assert_eq!(
+            outcome.executable.as_deref(),
+            Some(std::path::Path::new("/tmp/app"))
+        );
     }
 }
