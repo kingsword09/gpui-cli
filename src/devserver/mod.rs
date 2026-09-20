@@ -256,13 +256,12 @@ fn handle_connection(mut stream: std::net::TcpStream, shared: Arc<Shared>) {
             break;
         }
         match protocol::read_frame(&mut reader) {
-            Ok(frame) => match protocol::decode::<ClientMessage>(&frame) {
-                Ok(message) => {
+            Ok(frame) => {
+                if let Ok(message) = protocol::decode::<ClientMessage>(&frame) {
                     print_app_message(&message);
                     let _ = shared.events_tx.send(message);
-                }
-                Err(_) => {} // unknown message: skip, keep the connection
-            },
+                } // unknown message: skip, keep the connection
+            }
             Err(_) => break, // EOF or socket error: the app is gone
         }
     }
@@ -333,7 +332,7 @@ fn random_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::Read;
 
     fn connect(server: &DevServer, token: &str) -> (std::net::TcpStream, Vec<u8>) {
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
@@ -377,7 +376,7 @@ mod tests {
         assert!(bad.read(&mut probe).unwrap_or(0) == 0 || true); // may EOF; must not hang
 
         // Right token: hello_ok comes back.
-        let (mut stream, reply) = connect(&server, &server.token);
+        let (stream, reply) = connect(&server, &server.token);
         let ok: ServerMessage = protocol::decode(&reply).unwrap();
         assert!(matches!(ok, ServerMessage::HelloOk { proto: 1 }));
         drop(stream);
