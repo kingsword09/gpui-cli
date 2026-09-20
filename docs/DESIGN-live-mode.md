@@ -1,6 +1,6 @@
 # 设计：Live 模式（改代码实时刷新运行中的应用）
 
-状态：P0–P3 已实现（#4、#5、#6、#7）；P4 PoC 已执行——未通过，L2 不实现（见附录 C）
+状态：P0–P3 已实现（#4、#5、#6、#7）；iOS L1 补齐（#10）；P4 PoC 已执行——未通过，L2 不实现（见附录 C）
 日期：2026-09-18
 相关文件：`src/commands/run.rs`、`src/commands/build.rs`、`src/main.rs`、`src/template.rs`、`templates/app/src/lib.rs`、`templates/desktop/src/main.rs`
 
@@ -248,18 +248,18 @@ div().flex().flex_col().items_center().justify_center()
 | 能力 | 覆盖的改动 | 延迟 | 状态保留 | 崩溃风险 |
 |---|---|---|---|---|
 | L0 快速重启 | 任意 | 桌面 1–3s / 模拟器 5–15s | 无（进程重启） | 无 |
-| L1 资源热重载 | 通过 dev asset source 加载的图片等资源 | 待测，目标 < 1s | 完整 | 低，需处理缓存失效 |
+| L1 资源热重载 | 通过 dev asset source 加载的图片等资源 | 实测 < 1s | 完整 | 低，缓存失效已处理（缓存驱逐） |
 | L0.5 状态快照恢复 | 应用显式注册的导航、表单、偏好等状态 | L0 + 少量序列化时间 | 应用级状态 | 低，失败回退 L0 |
 | L2 函数级热补丁 | 仅 PoC 验证过的函数体/逻辑 | 待测 | 不保证；类型/布局变化冷启动 | 高（见 §8） |
 
-按平台：
+按平台（实现结果）：
 
 | 平台 | L0 | L1 | L0.5 | L2 |
 |---|---|---|---|---|
-| 桌面 | ✅ | 试验性 | ✅ | 待 PoC，默认关闭 |
-| iOS 模拟器 | ✅ 5–15s | 试验性 | ✅ | 不承诺 |
-| iOS 真机 | ✅ 较慢 | 试验性 | ✅ | 明确不支持 |
-| Android 模拟器 | ✅ | 试验性 | ✅ | 明确不支持 |
+| 桌面 | ✅ | ✅（DevAssetSource + 缓存驱逐） | ✅ | 不实现（PoC 未通过） |
+| iOS 模拟器 | ✅ 5–15s | ✅（通道推送字节 → app tmp dir，#10） | ✅ | 不实现 |
+| iOS 真机 | ✅ 较慢 | —（通道仅限模拟器） | ✅ | 明确不支持 |
+| Android 模拟器 | ✅ | ✅（adb 推送 + 缓存驱逐） | ✅ | 明确不支持 |
 
 ---
 
@@ -374,6 +374,12 @@ Dioxus 文档显示这是最便宜、确定性最高的一层：**不碰 Rust，
 首版只覆盖通过 dev-only 文件资源源加载的图片。`include_bytes!`、编译进 staticlib/cdylib 的资源不会自动变成可重载资源；字体还需要明确的缓存失效和旧字体释放策略。等图片路径验证完成后，再单独评估字体和样式资源。延迟目标暂定 < 1s，不能预先承诺零风险。
 
 **性价比明确高于 subsecond**——建议在 subsecond 之前做，且在 subsecond 受阻时它是能独立交付的完整能力。
+
+**实现记录（2026-09-19/20，#6、#9、#10；三端实测均 < 1s）**：
+
+- **桌面/Android**：模板 `DevAssetSource` 直读磁盘，CLI 在变化时广播 `asset_changed`，app 侧 `pump_live_assets` 用 `cx.remove_asset::<ImgResourceLoader>` 驱逐缓存键并 `refresh_windows`。Android 的字节由 CLI 先经 adb 写入 app files dir 再通知（app 沙盒读不到项目目录）。入口必须**先装 asset source 再 init_live**，否则 hello 能力位有顺序竞态。
+- **iOS 模拟器（#10，推翻了「iOS 无法做 L1」的初判）**：iOS runner 在内部构造 `Application`，没有 app 侧 `.with_assets` 挂钩——但这只挡住了 *asset source* 路线，不挡 *图片源* 路线。解法在 app 侧：模板新增 `live::image_source(name)`，debug iOS 构建下图片解析为 app 自身 tmp dir 下的文件（`Resource::Path`，gpui 用 `fs::read` 读取），其他平台走原路；字节经新的 `asset_data` 消息（base64，1 MiB 帧上限不变）由 CLI 推送，并在 app（重）连时全量重放；`pump_live_assets` 同时驱逐 Embedded 与 Path 两种缓存键。能力位在 init 时上报（握手先于首次 render，早于图片源解析）。
+- **过程中修复的两个缺陷（#9）**：Android 冷启动（`am start` 会复用持有旧凭证的进程，改为先 `am force-stop`）、`init_live` 传目录而非 `gpui_live.txt` 文件导致客户端静默禁用、资产子目录 staging 缺 mkdir。
 
 ---
 
