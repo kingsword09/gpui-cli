@@ -909,6 +909,6 @@ mod tests {
         );
         assert_eq!(asset_rel_path(root, &root.join("crates/app/src/lib.rs")), None);
         assert_eq!(asset_rel_path(root, &root.join("assets_mine/x.png")), None);
-        assert_eq!(asset_rel_path(root, &root.join("/other/assets/x.png")), None);
+        assert_eq!(asset_rel_path(root, &root.join("other/assets/x.png")), None);
     }
 }
