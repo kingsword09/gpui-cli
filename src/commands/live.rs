@@ -398,24 +398,51 @@ fn all_asset_paths(project: &Project) -> Vec<String> {
 
 /// Sends the given asset files to the connected iOS app over the dev
 /// channel (the app sandbox cannot read the project directory, so the bytes
-/// travel as base64 `asset_data` messages). Not connected: silently skipped.
-fn push_ios_assets(project: &Project, paths: Vec<String>, server: &DevServer) {
+/// travel as base64 `asset_data` messages). Returns the paths that were
+/// actually queued. Not connected: silently skipped (empty).
+fn push_ios_assets(project: &Project, paths: Vec<String>, server: &DevServer) -> Vec<String> {
+    let mut pushed = Vec::new();
     for rel in paths {
         match fs::read(project.root.join(&rel)) {
             Ok(bytes) => {
+                if !ios_frame_fits(bytes.len(), &rel) {
+                    println!(
+                        "{}",
+                        format!(
+                            "⚠ {rel} is {} KiB — over the dev-channel frame limit; it cannot be \
+                             pushed or hot-reloaded on iOS",
+                            bytes.len() / 1024
+                        )
+                        .yellow()
+                    );
+                    continue;
+                }
                 server.broadcast(&ServerMessage::AssetData {
-                    path: rel,
+                    path: rel.clone(),
                     data: protocol::b64::encode(&bytes),
                 });
+                pushed.push(rel);
             }
             Err(err) => println!("{}", format!("⚠ failed to read {rel}: {err}").yellow()),
         }
     }
+    pushed
+}
+
+/// Whether an asset of this raw size still fits one dev-channel frame once
+/// base64-encoded into an `asset_data` message for `path` (`MAX_FRAME_LEN`
+/// bounds the whole JSON payload).
+fn ios_frame_fits(raw_len: usize, path: &str) -> bool {
+    let encoded = raw_len.div_ceil(3) * 4;
+    // JSON shape and escaping headroom on top of path and data.
+    encoded + path.len() + 64 <= protocol::MAX_FRAME_LEN as usize
 }
 
 /// Copies the given assets (relative to `<project>/assets`) into the app's
-/// files dir on the device; failures are reported but never fatal.
-fn push_android_assets(project: &Project, serial: &str, package: &str, paths: &[String]) {
+/// files dir on the device. Returns the paths that were actually staged;
+/// failures are reported but never fatal.
+fn push_android_assets(project: &Project, serial: &str, package: &str, paths: &[String]) -> Vec<String> {
+    let mut pushed = Vec::new();
     for rel in paths {
         let source = project.root.join(rel);
         match fs::read(&source) {
@@ -425,6 +452,8 @@ fn push_android_assets(project: &Project, serial: &str, package: &str, paths: &[
                         "{}",
                         format!("⚠ failed to sync asset {rel}: {err:#}").yellow()
                     );
+                } else {
+                    pushed.push(rel.clone());
                 }
             }
             Err(err) => {
@@ -432,6 +461,7 @@ fn push_android_assets(project: &Project, serial: &str, package: &str, paths: &[
             }
         }
     }
+    pushed
 }
 
 /// iOS build for the live loop: structured cargo diagnostics, captured output
@@ -626,25 +656,40 @@ fn reload_assets(project: &Project, plan: &Plan, server: &DevServer, paths: &[St
     if !(server.has_clients() && server.all_clients_support_asset_reload()) {
         return false;
     }
-    match plan {
+    // Only announce files the app can actually reload — announcing a push
+    // that failed would make the client evict a cache entry it cannot refill.
+    let pushed = match plan {
         Plan::Android { serial, .. } => {
             let package = bundle_id_of_android(project);
-            push_android_assets(project, serial, &package, paths);
+            push_android_assets(project, serial, &package, paths)
         }
-        Plan::Ios { physical: false, .. } => {
-            push_ios_assets(project, paths.to_vec(), server);
-        }
-        _ => {}
-    }
-    for path in paths {
+        Plan::Ios { physical: false, .. } => push_ios_assets(project, paths.to_vec(), server),
+        _ => paths.to_vec(),
+    };
+    for path in &pushed {
         server.broadcast(&ServerMessage::AssetChanged {
             path: path.clone(),
         });
     }
-    println!(
-        "{}",
-        format!("[live] reloaded asset(s): {}", paths.join(", ")).green()
-    );
+    if pushed.is_empty() {
+        println!(
+            "{}",
+            "[live] no asset reached the app — the change applies on the next rebuild".yellow()
+        );
+        return true;
+    }
+    if server.take_write_error() {
+        println!(
+            "{}",
+            "[live] the dev channel dropped mid-reload — save again or press 'r' to rebuild"
+                .yellow()
+        );
+    } else {
+        println!(
+            "{}",
+            format!("[live] reloaded asset(s): {}", pushed.join(", ")).green()
+        );
+    }
     true
 }
 
@@ -898,6 +943,15 @@ mod tests {
         ));
         assert!(!should_trigger(&root.join("mobile/ios/App.xcodeproj/project.pbxproj")));
         assert!(!should_trigger(&root.join(".git/index")));
+    }
+
+    #[test]
+    fn oversized_assets_are_rejected_before_encoding() {
+        // ~800 KiB raw base64s past the 1 MiB frame cap (the audit repro).
+        assert!(!ios_frame_fits(800 * 1024, "assets/logo.png"));
+        // Everyday images fit comfortably.
+        assert!(ios_frame_fits(256 * 1024, "assets/logo.png"));
+        assert!(ios_frame_fits(0, "assets/logo.png"));
     }
 
     #[test]
