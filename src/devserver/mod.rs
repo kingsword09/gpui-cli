@@ -211,6 +211,16 @@ fn handle_connection(mut stream: std::net::TcpStream, shared: Arc<Shared>) {
         "{}",
         format!("[live] app connected: {project} ({platform}, pid {pid})").dimmed()
     );
+    // Surfaces the connection to the live loop, which uses it as the signal
+    // that a freshly launched app is ready to receive pushed assets.
+    let _ = shared.events_tx.send(ClientMessage::Hello {
+        proto: PROTO_VERSION,
+        token: shared.token.clone(),
+        project,
+        pid,
+        platform,
+        asset_reload,
+    });
 
     let id = shared.next_id.fetch_add(1, Ordering::SeqCst);
     let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>();
