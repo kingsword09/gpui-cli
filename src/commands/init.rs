@@ -187,12 +187,18 @@ fn add_to_existing(path: Option<PathBuf>, targets: Option<String>) -> Result<()>
     }
 
     let manifest = fs::read_to_string(&manifest_path)?;
-    let name = read_toml_string(&manifest, "name")
-        .context("gpui.toml is missing `name` in the [app] section")?;
-    let title = read_toml_string(&manifest, "title").unwrap_or_else(|| name.clone());
-    let bundle_id =
-        read_toml_string(&manifest, "bundle_id").unwrap_or_else(|| default_bundle_id(&name));
-    let existing = read_toml_targets(&manifest);
+    let app = crate::config::Manifest::parse(&manifest)?.app;
+    let name = app.name;
+    let title = app.title.unwrap_or_else(|| name.clone());
+    let bundle_id = app.bundle_id.unwrap_or_else(|| default_bundle_id(&name));
+    let existing = app
+        .targets
+        .iter()
+        .map(|target| {
+            Platform::parse(target)
+                .with_context(|| format!("unknown target '{target}' in gpui.toml"))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     println!(
         "{}",
@@ -349,48 +355,4 @@ fn sanitize_crate_name(input: &str) -> String {
 fn default_bundle_id(project_name: &str) -> String {
     let leaf = project_name.replace('-', "");
     format!("com.example.{leaf}")
-}
-
-/// Minimal `key = "value"` reader for the `[app]` section of `gpui.toml`.
-fn read_toml_string(contents: &str, key: &str) -> Option<String> {
-    let section = contents.split("[app]").nth(1)?;
-    let section = section.split("\n[").next()?;
-    for line in section.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(key) {
-            let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_prefix('=') {
-                return Some(rest.trim().trim_matches('"').to_string());
-            }
-        }
-    }
-    None
-}
-
-fn read_toml_targets(contents: &str) -> Vec<Platform> {
-    let Some(section) = contents.split("[app]").nth(1) else {
-        return Vec::new();
-    };
-    let Some(section) = section.split("\n[").next() else {
-        return Vec::new();
-    };
-    for line in section.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("targets")
-            && let Some(rest) = rest.trim_start().strip_prefix('=')
-        {
-            return rest
-                .split(['[', ']', ',', '"'])
-                .filter_map(|part| {
-                    let part = part.trim();
-                    if part.is_empty() {
-                        None
-                    } else {
-                        Platform::parse(part)
-                    }
-                })
-                .collect();
-        }
-    }
-    Vec::new()
 }

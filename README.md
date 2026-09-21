@@ -44,6 +44,11 @@ gpui build all
 gpui build android --release
 ```
 
+Android release builds use Gradle's output metadata to locate the APK. The
+default template produces an unsigned release APK; configure a release
+`signingConfig` in `mobile/android/gradle/app/build.gradle.kts` before using
+`gpui run android --release`, or sign the build artifact separately.
+
 Use `gpui run --live` to keep the loop open: sources are watched, every save
 triggers an incremental rebuild and relaunch (desktop, iOS simulator or Android
 emulator), and compile errors are shown with file, line and snippet while the
@@ -107,6 +112,13 @@ outside D1.
 
 For Android, set `ANDROID_HOME` and `ANDROID_NDK_HOME` to the SDK and NDK
 directories.
+
+`GPUI_ANDROID_ABIS` accepts `arm64-v8a`, `armeabi-v7a`, `x86` and `x86_64`.
+The CLI installs the matching Rust targets and passes the same ABI list to
+Cargo and Gradle. For example, `GPUI_ANDROID_ABIS=arm64-v8a,x86_64 gpui build android`
+packages both architectures. Existing projects with a hard-coded Gradle
+`abiFilters` list need to adopt the `gpui.abis` / `GPUI_ANDROID_ABIS` handling
+from [the current template](templates/android/gradle/app/build.gradle.kts).
 
 ## Devices and emulators
 

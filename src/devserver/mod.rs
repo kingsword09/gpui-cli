@@ -5,6 +5,7 @@ pub mod control;
 pub mod events;
 pub mod inputs;
 pub mod output;
+mod process;
 pub mod protocol;
 pub mod session;
 

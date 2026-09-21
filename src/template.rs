@@ -160,11 +160,49 @@ impl ProjectConfig {
 
 /// Replaces every `{{KEY}}` placeholder in `input`.
 fn substitute(input: &str, vars: &HashMap<&str, String>) -> String {
-    let mut out = input.to_string();
-    for (key, value) in vars {
-        out = out.replace(&format!("{{{{{}}}}}", key), value);
+    // Scan the template once. A user title containing another placeholder is
+    // literal text, not a second template expansion (HashMap order is random).
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let Some(end) = rest.find("}}") else { break };
+        let placeholder = &rest[..end + 2];
+        out.push_str(
+            vars.get(&rest[2..end])
+                .map(String::as_str)
+                .unwrap_or(placeholder),
+        );
+        rest = &rest[end + 2..];
     }
+    out.push_str(rest);
     out
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+        .replace('\n', "&#10;")
+        .replace('\r', "&#13;")
+        .replace('\t', "&#9;")
+}
+
+fn android_string(value: &str) -> String {
+    // Android has an additional string-resource escaping layer after XML.
+    // Surrounding quotes also preserve whitespace and literal leading @ / ?.
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    xml_escape(&format!("\"{escaped}\""))
 }
 
 /// Emits the mobile entry points for the shared crate.
@@ -287,6 +325,14 @@ fn vars_for(config: &ProjectConfig) -> HashMap<&'static str, String> {
 
     vars.insert("PROJECT_NAME", config.name.clone());
     vars.insert("APP_TITLE", config.title.clone());
+    vars.insert("APP_TITLE_RUST", format!("{:?}", config.title));
+    vars.insert(
+        "APP_TITLE_TOML",
+        toml::Value::String(config.title.clone()).to_string(),
+    );
+    vars.insert("APP_TITLE_XML", xml_escape(&config.title));
+    vars.insert("APP_TITLE_ANDROID", android_string(&config.title));
+    vars.insert("APP_TITLE_COMMENT", config.title.replace(['\r', '\n'], " "));
     vars.insert("BUNDLE_ID", config.bundle_id.clone());
     vars.insert("BUNDLE_PREFIX", config.bundle_prefix());
     vars.insert("XCODE_TARGET", config.xcode_target());
@@ -494,6 +540,35 @@ fn render_file(template_path: &str, dest: &Path, vars: &HashMap<&str, String>) -
 pub fn scaffold(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
     if config.targets.is_empty() {
         bail!("at least one target platform is required");
+    }
+    // Identifiers appear in code, manifest keys and paths. Reject invalid
+    // identifiers before creating files; display titles are escaped separately.
+    if !config.name.starts_with(|c: char| c.is_ascii_alphabetic())
+        || !config
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("Project name must start with a letter and contain only letters, digits, '-' or '_'");
+    }
+    let segments: Vec<_> = config.bundle_id.split('.').collect();
+    if segments.len() < 2
+        || segments.iter().any(|part| {
+            !part.starts_with(|c: char| c.is_ascii_alphabetic())
+                || !part.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || c == '_' || (c == '-' && !config.has_android())
+                })
+        })
+    {
+        bail!(
+            "Invalid bundle identifier '{}': use dot-separated identifiers starting with a letter (e.g. com.example.myapp)",
+            config.bundle_id
+        );
+    }
+    if config.title.chars().any(|c| {
+        (c.is_control() && !matches!(c, '\n' | '\r' | '\t')) || matches!(c, '\u{fffe}' | '\u{ffff}')
+    }) {
+        bail!("Application title contains control characters unsupported by native manifests");
     }
     let vars = vars_for(config);
     fs::create_dir_all(target_dir)?;
@@ -903,5 +978,70 @@ mod tests {
             "// application's customized view\n"
         );
         assert!(!dir.path().join("mobile").exists());
+    }
+
+    #[test]
+    fn titles_round_trip_through_metadata_rust_and_native_xml() {
+        for title in [
+            r#"R&D "Desk" \path {{APP_CRATE}} <工具> ' % @test"#,
+            "first\n[run]\nios_simulator = \"not-a-device\"\nlast",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut before = config(vec![Platform::MacOs]);
+            before.title = title.into();
+            scaffold(dir.path(), &before).unwrap();
+            let mut after = before.clone();
+            after.targets.extend([Platform::IOs, Platform::Android]);
+            add_platforms(dir.path(), &before, &after).unwrap();
+            let project = crate::commands::run::Project::load(Some(dir.path().into())).unwrap();
+            assert_eq!(project.title, title);
+            assert!(project.defaults.ios_simulator.is_none());
+            for file in ["crates/app/src/lib.rs", "crates/desktop/src/main.rs"] {
+                let source = fs::read_to_string(dir.path().join(file)).unwrap();
+                syn::parse_file(&source).unwrap_or_else(|error| panic!("{file}: {error}"));
+            }
+            for file in [
+                "mobile/ios/Info.plist",
+                "mobile/ios/LaunchScreen.storyboard",
+                "mobile/android/gradle/app/src/main/AndroidManifest.xml",
+                "mobile/android/gradle/app/src/main/res/values/strings.xml",
+            ] {
+                let text = fs::read_to_string(dir.path().join(file)).unwrap();
+                let doc = roxmltree::Document::parse_with_options(
+                    &text,
+                    roxmltree::ParsingOptions {
+                        allow_dtd: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                if file.ends_with("Info.plist") {
+                    assert!(
+                        doc.descendants()
+                            .any(|node| node.has_tag_name("string") && node.text() == Some(title))
+                    );
+                }
+                if file.ends_with("storyboard") {
+                    assert!(
+                        doc.descendants()
+                            .any(|node| node.attribute("text") == Some(title))
+                    );
+                }
+            }
+            let source = fs::read_to_string(dir.path().join("crates/app/src/lib.rs")).unwrap();
+            assert!(
+                source.contains(&format!(".child({title:?})")),
+                "title was expanded as another template"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_identifiers_fail_before_writing_project_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(vec![Platform::Android]);
+        config.bundle_id = "com.example.bad\"id".into();
+        assert!(scaffold(dir.path(), &config).is_err());
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 }

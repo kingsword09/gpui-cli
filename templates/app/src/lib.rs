@@ -1,4 +1,4 @@
-//! Shared UI for {{APP_TITLE}}.
+//! Shared UI for {{APP_TITLE_COMMENT}}.
 //!
 //! All view code lives here so desktop, iOS and Android render the same
 //! element tree; only the platform entry points differ.
@@ -120,7 +120,7 @@ impl Render for MainView {
                 div()
                     .text_2xl()
                     .font_weight(FontWeight::BOLD)
-                    .child("{{APP_TITLE}}"),
+                    .child({{APP_TITLE_RUST}}),
             )
             .child(
                 div()

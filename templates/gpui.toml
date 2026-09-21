@@ -1,6 +1,6 @@
 [app]
 name = "{{PROJECT_NAME}}"
-title = "{{APP_TITLE}}"
+title = {{APP_TITLE_TOML}}
 bundle_id = "{{BUNDLE_ID}}"
 version = "0.1.0"
 targets = [{{TARGETS}}]

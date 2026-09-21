@@ -10,55 +10,39 @@ use colored::*;
 use super::{Device, DeviceFlags, Kind, Platform, State, android, ios};
 
 /// Per-project defaults from the `[run]` section of `gpui.toml`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct Defaults {
+    #[serde(default, deserialize_with = "optional_device")]
     pub ios_simulator: Option<String>,
+    #[serde(default, deserialize_with = "optional_device")]
     pub android_avd: Option<String>,
 }
 
+fn optional_device<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    use serde::Deserialize;
+    Ok(Option::<String>::deserialize(deserializer)?.and_then(|value| nonempty(Some(&value))))
+}
+
+fn nonempty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 impl Defaults {
-    pub fn from_manifest(manifest: &str) -> Self {
-        Self {
-            ios_simulator: read_run_value(manifest, "ios_simulator"),
-            android_avd: read_run_value(manifest, "android_avd"),
+    pub fn from_manifest(manifest: &str) -> Result<Self> {
+        #[derive(serde::Deserialize)]
+        struct RunManifest {
+            #[serde(default)]
+            run: Defaults,
         }
+        Ok(toml::from_str::<RunManifest>(manifest)
+            .context("invalid gpui.toml")?
+            .run)
     }
-}
-
-/// Reads `key = "value"` from the `[run]` section only.
-fn read_run_value(manifest: &str, key: &str) -> Option<String> {
-    let section = manifest.split("[run]").nth(1)?;
-    let section = section.split("\n[").next()?;
-    for line in section.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix(key)
-            && let Some(rest) = rest.trim_start().strip_prefix('=')
-        {
-            let value = toml_value(rest);
-            if !value.is_empty() {
-                return Some(value);
-            }
-        }
-    }
-    None
-}
-
-/// Extracts a string value, dropping a trailing inline comment. The generated
-/// template ships inline comments on these keys, so `iPhone 16e@18.4   # ...`
-/// has to parse as just the device spec.
-fn toml_value(raw: &str) -> String {
-    let raw = raw.trim();
-    let raw = match raw.strip_prefix('"') {
-        // Quoted: take up to the closing quote, so a `#` inside the value is
-        // preserved and anything after it is a comment.
-        Some(rest) => rest.split('"').next().unwrap_or(""),
-        // Unquoted: a `#` starts a comment.
-        None => raw.split('#').next().unwrap_or(""),
-    };
-    raw.trim().to_string()
 }
 
 // ── Spec matching ───────────────────────────────────────────────────────────
@@ -107,6 +91,95 @@ fn android_matches(device: &Device, spec: &str) -> bool {
 
 // ── Resolution ──────────────────────────────────────────────────────────────
 
+#[derive(Default)]
+struct Environment {
+    ios_device_id: Option<String>,
+    ios_simulator: Option<String>,
+    android_serial: Option<String>,
+}
+
+impl Environment {
+    fn read() -> Self {
+        let get = |key| nonempty(std::env::var(key).ok().as_deref());
+        Self {
+            ios_device_id: get("GPUI_IOS_DEVICE_ID"),
+            ios_simulator: get("GPUI_IOS_DEVICE"),
+            android_serial: get("ANDROID_SERIAL"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Selection {
+    Device(String),
+    Physical(Option<String>),
+    Simulator(String),
+    Avd(String),
+    Serial(String),
+    Automatic,
+}
+
+fn ios_selection(
+    flags: &DeviceFlags,
+    defaults: &Defaults,
+    project_default: Option<&str>,
+    env: &Environment,
+) -> Result<Selection> {
+    if flags.avd.is_some() {
+        bail!("--avd is only supported for Android");
+    }
+    if flags.sim.is_some() && (flags.device.is_some() || flags.device_only) {
+        bail!("--sim cannot be combined with --device or --device-only");
+    }
+    if flags.device_only {
+        return Ok(Selection::Physical(
+            flags.device.clone().or_else(|| env.ios_device_id.clone()),
+        ));
+    }
+    if let Some(spec) = &flags.device {
+        return Ok(Selection::Device(spec.clone()));
+    }
+    if let Some(spec) = &flags.sim {
+        return Ok(Selection::Simulator(spec.clone()));
+    }
+    if let Some(spec) = &defaults.ios_simulator {
+        return Ok(Selection::Simulator(spec.clone()));
+    }
+    if let Some(spec) = &env.ios_device_id {
+        return Ok(Selection::Physical(Some(spec.clone())));
+    }
+    if let Some(spec) = env.ios_simulator.as_deref().or(project_default) {
+        return Ok(Selection::Simulator(spec.into()));
+    }
+    Ok(Selection::Automatic)
+}
+
+fn android_selection(
+    flags: &DeviceFlags,
+    defaults: &Defaults,
+    env: &Environment,
+) -> Result<Selection> {
+    if flags.sim.is_some() || flags.device_only {
+        bail!("--sim and --device-only are only supported for iOS");
+    }
+    if flags.avd.is_some() && flags.device.is_some() {
+        bail!("--avd cannot be combined with --device");
+    }
+    if let Some(spec) = &flags.avd {
+        return Ok(Selection::Avd(spec.clone()));
+    }
+    if let Some(spec) = &flags.device {
+        return Ok(Selection::Device(spec.clone()));
+    }
+    if let Some(spec) = &defaults.android_avd {
+        return Ok(Selection::Avd(spec.clone()));
+    }
+    if let Some(spec) = &env.android_serial {
+        return Ok(Selection::Serial(spec.clone()));
+    }
+    Ok(Selection::Automatic)
+}
+
 /// Resolves the device to use for `platform`.
 pub fn resolve_device(
     platform: Platform,
@@ -125,22 +198,13 @@ fn resolve_ios(
     defaults: &Defaults,
     project_default: Option<&str>,
 ) -> Result<Device> {
-    let physical_id = std::env::var("GPUI_IOS_DEVICE_ID")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-
-    // Explicit physical-device requests.
-    if flags.device_only || physical_id.is_some() {
-        let wanted = flags.device.clone().or(physical_id);
-        return pick_physical(wanted);
-    }
-
-    // A `--device` that names a physical device wins over simulator specs, and
-    // is reported with its own reason when it cannot be used rather than
-    // falling through to a confusing "no simulator" error.
-    if let Some(spec) = flags.device.as_deref() {
-        let (name, runtime) = split_runtime(spec);
-        if !looks_like_udid(&name) {
+    match ios_selection(flags, defaults, project_default, &Environment::read())? {
+        Selection::Physical(wanted) => return pick_physical(wanted),
+        Selection::Simulator(spec) => return pick_simulator(Some(&spec)),
+        Selection::Device(spec) => {
+            let (name, runtime) = split_runtime(&spec);
+            // CoreDevice identifiers and simulator UDIDs have similar shapes.
+            // Check physical devices by ID as well as by name before fallback.
             let physical = ios::physical_devices();
             if let Some(device) = physical
                 .iter()
@@ -157,25 +221,9 @@ fn resolve_ios(
                 }
                 return Ok(device.clone());
             }
+            return pick_simulator(Some(&spec));
         }
-        return pick_simulator(Some(spec));
-    }
-
-    if let Some(spec) = flags.sim.as_deref() {
-        return pick_simulator(Some(spec));
-    }
-
-    // Project default, then the long-standing environment variable.
-    if let Some(spec) = defaults.ios_simulator.as_deref() {
-        return pick_simulator(Some(spec));
-    }
-    if let Ok(spec) = std::env::var("GPUI_IOS_DEVICE")
-        && !spec.trim().is_empty()
-    {
-        return pick_simulator(Some(spec.trim()));
-    }
-    if let Some(spec) = project_default {
-        return pick_simulator(Some(spec));
+        _ => {}
     }
 
     if let Some(device) = prompt(Platform::Ios)? {
@@ -185,22 +233,38 @@ fn resolve_ios(
 }
 
 fn resolve_android(flags: &DeviceFlags, defaults: &Defaults) -> Result<Device> {
-    if let Some(spec) = flags.avd.as_deref() {
-        return pick_android_emulator(spec);
-    }
-    if let Some(spec) = flags.device.as_deref() {
-        // A serial selects a connected device; anything else is an AVD name.
+    let selection = android_selection(flags, defaults, &Environment::read())?;
+    if selection != Selection::Automatic {
         let devices = android::all();
-        if let Some(device) = devices
-            .into_iter()
-            .find(|d| d.serial() == Some(spec) && d.launchable())
-        {
-            return Ok(device);
+        let (spec, device) = match &selection {
+            Selection::Avd(spec) => (
+                spec,
+                devices
+                    .iter()
+                    .find(|d| d.kind == Kind::Emulator && android_matches(d, spec)),
+            ),
+            Selection::Serial(spec) => (
+                spec,
+                devices
+                    .iter()
+                    .find(|d| d.serial() == Some(spec) || d.id == *spec),
+            ),
+            Selection::Device(spec) => (spec, devices.iter().find(|d| android_matches(d, spec))),
+            _ => unreachable!("Android selection"),
+        };
+        if let Some(device) = device {
+            if !device.launchable() {
+                bail!(
+                    "`{}` is not usable: {}",
+                    device.label(),
+                    device.state_label()
+                );
+            }
+            return Ok(device.clone());
         }
-        return pick_android_emulator(spec);
-    }
-    if let Some(spec) = defaults.android_avd.as_deref() {
-        return pick_android_emulator(spec);
+        bail!(
+            "No Android device matching `{spec}`. Run `gpui device list --all` to check the selected device."
+        );
     }
 
     if let Some(device) = prompt(Platform::Android)? {
@@ -268,41 +332,6 @@ fn pick_simulator(spec: Option<&str>) -> Result<Device> {
         return Ok((*device).clone());
     }
     bail!("Simulator `{spec}` exists but is not usable.")
-}
-
-fn pick_android_emulator(spec: &str) -> Result<Device> {
-    let devices = android::all();
-
-    if let Some(device) = devices
-        .iter()
-        .find(|d| android_matches(d, spec) && d.launchable())
-    {
-        return Ok(device.clone());
-    }
-    if let Some(device) = devices.iter().find(|d| android_matches(d, spec)) {
-        bail!(
-            "`{}` is not usable: {}",
-            device.label(),
-            device.state_label()
-        );
-    }
-
-    let available = devices
-        .iter()
-        .filter(|d| d.launchable())
-        .map(Device::label)
-        .collect::<Vec<_>>();
-    if available.is_empty() {
-        bail!(
-            "No Android device named `{spec}`, and none are available.\n  \
-             Create one with `gpui device create --platform android --name {spec}`."
-        );
-    }
-    bail!(
-        "No Android device named `{spec}`.\n  Available: {}\n  \
-         Run `gpui device list` to see installed AVDs.",
-        available.join(", ")
-    );
 }
 
 fn pick_physical(wanted: Option<String>) -> Result<Device> {
@@ -514,7 +543,7 @@ name = \"demo\"
 ios_simulator = \"iPhone 17 Pro@26.2\"
 android_avd = \"Pixel_9_Pro\"
 ";
-        let defaults = Defaults::from_manifest(manifest);
+        let defaults = Defaults::from_manifest(manifest).unwrap();
         assert_eq!(
             defaults.ios_simulator.as_deref(),
             Some("iPhone 17 Pro@26.2")
@@ -534,7 +563,7 @@ name = \"demo\"
 # ios_simulator = \"iPhone 17 Pro@26.2\"
 # android_avd = \"Pixel_9_Pro\"
 ";
-        let defaults = Defaults::from_manifest(manifest);
+        let defaults = Defaults::from_manifest(manifest).unwrap();
         assert_eq!(defaults.ios_simulator, None);
         assert_eq!(defaults.android_avd, None);
     }
@@ -547,13 +576,19 @@ name = \"demo\"
 name = \"demo\"
 ios_simulator = \"Wrong\"
 ";
-        assert_eq!(Defaults::from_manifest(manifest).ios_simulator, None);
+        assert_eq!(
+            Defaults::from_manifest(manifest).unwrap().ios_simulator,
+            None
+        );
     }
 
     #[test]
     fn empty_run_values_are_treated_as_absent() {
         let manifest = "[run]\nios_simulator = \"\"\n";
-        assert_eq!(Defaults::from_manifest(manifest).ios_simulator, None);
+        assert_eq!(
+            Defaults::from_manifest(manifest).unwrap().ios_simulator,
+            None
+        );
     }
 
     #[test]
@@ -565,17 +600,97 @@ ios_simulator = \"Wrong\"
 ios_simulator = \"iPhone 16e@18.4\"   # name@runtime; runtime optional
 android_avd = \"Pixel_9a\"  # trailing
 ";
-        let defaults = Defaults::from_manifest(manifest);
+        let defaults = Defaults::from_manifest(manifest).unwrap();
         assert_eq!(defaults.ios_simulator.as_deref(), Some("iPhone 16e@18.4"));
         assert_eq!(defaults.android_avd.as_deref(), Some("Pixel_9a"));
     }
 
     #[test]
-    fn unquoted_values_still_parse() {
+    fn invalid_toml_is_reported_instead_of_silently_misparsed() {
         let manifest = "[run]\nandroid_avd = Pixel_9a # note\n";
+        assert!(Defaults::from_manifest(manifest).is_err());
+    }
+
+    #[test]
+    fn explicit_ios_selection_and_project_defaults_override_environment() {
+        let env = Environment {
+            ios_device_id: Some("physical-id".into()),
+            ios_simulator: Some("env-sim".into()),
+            ..Default::default()
+        };
+        let defaults = Defaults {
+            ios_simulator: Some("project-sim".into()),
+            ..Default::default()
+        };
+        let flags = DeviceFlags {
+            sim: Some("cli-sim".into()),
+            ..Default::default()
+        };
         assert_eq!(
-            Defaults::from_manifest(manifest).android_avd.as_deref(),
-            Some("Pixel_9a")
+            ios_selection(&flags, &defaults, None, &env).unwrap(),
+            Selection::Simulator("cli-sim".into())
         );
+        assert_eq!(
+            ios_selection(&DeviceFlags::default(), &defaults, None, &env).unwrap(),
+            Selection::Simulator("project-sim".into())
+        );
+        let flags = DeviceFlags {
+            device: Some("00008101-000250100252001E".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            ios_selection(&flags, &defaults, None, &env).unwrap(),
+            Selection::Device("00008101-000250100252001E".into())
+        );
+        assert_eq!(
+            ios_selection(&DeviceFlags::default(), &Defaults::default(), None, &env).unwrap(),
+            Selection::Physical(Some("physical-id".into()))
+        );
+    }
+
+    #[test]
+    fn android_serial_is_used_after_cli_and_project_defaults() {
+        let env = Environment {
+            android_serial: Some("serial-b".into()),
+            ..Default::default()
+        };
+        let defaults = Defaults {
+            android_avd: Some("project-avd".into()),
+            ..Default::default()
+        };
+        let flags = DeviceFlags {
+            device: Some("serial-a".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            android_selection(&flags, &defaults, &env).unwrap(),
+            Selection::Device("serial-a".into())
+        );
+        assert_eq!(
+            android_selection(&DeviceFlags::default(), &defaults, &env).unwrap(),
+            Selection::Avd("project-avd".into())
+        );
+        assert_eq!(
+            android_selection(&DeviceFlags::default(), &Defaults::default(), &env).unwrap(),
+            Selection::Serial("serial-b".into())
+        );
+    }
+
+    #[test]
+    fn conflicting_device_flags_are_rejected_before_discovery() {
+        let flags = DeviceFlags {
+            device_only: true,
+            sim: Some("sim".into()),
+            ..Default::default()
+        };
+        assert!(
+            ios_selection(&flags, &Defaults::default(), None, &Environment::default()).is_err()
+        );
+        let flags = DeviceFlags {
+            device: Some("serial".into()),
+            avd: Some("avd".into()),
+            ..Default::default()
+        };
+        assert!(android_selection(&flags, &Defaults::default(), &Environment::default()).is_err());
     }
 }

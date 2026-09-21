@@ -21,7 +21,7 @@
                                     <constraint firstAttribute="height" constant="96" id="mark-height"/>
                                 </constraints>
                             </imageView>
-                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="{{APP_TITLE}}" textAlignment="center" numberOfLines="2" translatesAutoresizingMaskIntoConstraints="NO" id="launch-title">
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="{{APP_TITLE_XML}}" textAlignment="center" numberOfLines="2" translatesAutoresizingMaskIntoConstraints="NO" id="launch-title">
                                 <rect key="frame" x="24" y="488" width="366" height="26"/>
                                 <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="20"/>
                                 <color key="textColor" red="0.12" green="0.12" blue="0.12" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>

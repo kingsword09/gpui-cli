@@ -3,6 +3,7 @@ use colored::*;
 use std::path::PathBuf;
 
 pub mod commands;
+mod config;
 pub mod device;
 pub mod devserver;
 pub mod template;

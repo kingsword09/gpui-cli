@@ -20,3 +20,44 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+
+  desktop-template:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: Generate an app with a title requiring escaping
+        run: >-
+          target/debug/gpui init template-probe
+          --path "$RUNNER_TEMP/gpui-template"
+          --targets macos --bundle-id com.example.templateprobe
+          --title 'R&D "Desk" <工具> \path {{APP_CRATE}}'
+      - name: Check generated debug and release code
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/template-check
+        run: |
+          cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace
+          cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --release --locked
+
+  android-template:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
+      - run: cargo build --locked
+      - name: Verify generated resources, release output and packaged ABIs
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          python3 scripts/check-android-template.py --gpui target/debug/gpui

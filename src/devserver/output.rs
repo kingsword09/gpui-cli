@@ -1,76 +1,20 @@
 //! Concurrent pipe draining, raw output retention and owned process lifetimes.
 
 use super::events::{Kind, Scope};
+use super::process::OwnedChild;
 use super::session::{Build, Session};
 use crate::commands::error::{self, CargoMessage, CargoOutcome};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const CHUNK_BYTES: usize = 64 * 1024;
-
-struct ChildGuard(Child);
-
-impl std::ops::Deref for ChildGuard {
-    type Target = Child;
-    fn deref(&self) -> &Child {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for ChildGuard {
-    fn deref_mut(&mut self) -> &mut Child {
-        &mut self.0
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        terminate(&mut self.0);
-    }
-}
-
-fn configure(cmd: &mut Command) {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-}
-
-/// Only kill the process group we created; never match processes by name.
-fn terminate(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: process_group(0) created this owned child's process group.
-        // An unreaped child keeps its PID from being reused.
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-    }
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
 
 pub fn exit_data(status: ExitStatus, expected: bool) -> Value {
     #[cfg(unix)]
@@ -125,10 +69,9 @@ fn run_inner(
     if build.session.stopping.load(Ordering::SeqCst) {
         anyhow::bail!("live session is stopping");
     }
-    configure(cmd);
-    let mut child = ChildGuard(cmd.spawn().with_context(|| format!("starting {stage}"))?);
-    let stdout = child.stdout.take().context("capturing stdout")?;
-    let stderr = child.stderr.take().context("capturing stderr")?;
+    let mut child = OwnedChild::spawn(cmd).with_context(|| format!("starting {stage}"))?;
+    let stdout = child.stdout().context("capturing stdout")?;
+    let stderr = child.stderr().context("capturing stderr")?;
     thread::scope(|threads| {
         let out = threads.spawn(|| {
             drain(
@@ -144,13 +87,13 @@ fn run_inner(
             threads.spawn(|| drain(stderr, &build.session, &build.scope, stage, "stderr", false));
         let status = loop {
             if build.session.stopping.load(Ordering::SeqCst) {
-                terminate(&mut child);
+                let _ = child.terminate();
             }
             match child.try_wait() {
                 Ok(Some(status)) => break Ok(status),
                 Ok(None) => thread::sleep(Duration::from_millis(50)),
                 Err(error) => {
-                    terminate(&mut child);
+                    let _ = child.terminate();
                     break Err(error);
                 }
             }
@@ -256,7 +199,7 @@ fn drain(
 }
 
 pub struct AppProcess {
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<OwnedChild>>,
     expected: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
     readers: Vec<JoinHandle<()>>,
@@ -264,8 +207,7 @@ pub struct AppProcess {
 
 impl AppProcess {
     pub fn spawn(cmd: &mut Command, session: Arc<Session>, scope: Scope) -> Result<Self> {
-        configure(cmd);
-        let mut child = match cmd.spawn() {
+        let mut child = match OwnedChild::spawn(cmd) {
             Ok(child) => child,
             Err(error) => {
                 session.emit(
@@ -276,8 +218,8 @@ impl AppProcess {
                 return Err(error).context("launching desktop app");
             }
         };
-        let stdout = child.stdout.take().context("app stdout")?;
-        let stderr = child.stderr.take().context("app stderr")?;
+        let stdout = child.stdout().context("app stdout")?;
+        let stderr = child.stderr().context("app stderr")?;
         session.emit(Kind::AppStarted, &scope, json!({"pid": child.id()}));
         let mut process = Self {
             child: Arc::new(Mutex::new(child)),
@@ -321,7 +263,11 @@ impl AppProcess {
 impl Drop for AppProcess {
     fn drop(&mut self) {
         self.expected.store(true, Ordering::SeqCst);
-        terminate(&mut self.child.lock().unwrap_or_else(|e| e.into_inner()));
+        let _ = self
+            .child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .terminate();
         if let Some(monitor) = self.monitor.take() {
             let _ = monitor.join();
         }
