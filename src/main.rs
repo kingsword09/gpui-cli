@@ -8,6 +8,7 @@ pub mod device;
 pub mod devserver;
 pub mod fixtures;
 pub mod template;
+pub mod toolchain;
 
 /// Options shared by `init` and `new`.
 #[derive(clap::Args, Default)]
