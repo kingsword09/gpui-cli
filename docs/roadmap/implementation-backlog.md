@@ -22,7 +22,7 @@
 | F01 | G0 | core | M | — | P-01, P-02 | in_review |
 | T01 | G0 | core | M | — | T-01, T-02, T-03 | in_review |
 | P01 | G0 | core | L | F01, T01 | O-05, O-10, O-11, P-03 | in_review |
-| T02 | G1 | core | M | F01 | T-04 | planned |
+| T02 | G1 | core | M | F01 | T-04 | in_review |
 | F02 | G1 | core | L | P01, T02 | C-01, C-02, C-03, C-04, C-05 | planned |
 | T03 | G1 | core | M | T02 | T-04, T-05 | planned |
 | T04 | G1 | core | L | T03, F02 | T-06, T-07, C-02 | planned |

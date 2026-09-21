@@ -8,6 +8,7 @@ pub mod device;
 pub mod devserver;
 pub mod fixtures;
 pub mod template;
+pub mod template_manifest;
 pub mod toolchain;
 
 /// Options shared by `init` and `new`.

@@ -17,17 +17,18 @@
   },
   "groups": [
     {"id": "app-runtime", "atomic": true},
+    {"id": "desktop-host", "atomic": true},
     {"id": "android-renderer", "atomic": true},
     {"id": "ios-host", "atomic": true}
   ],
   "files": [
-    {"path": "crates/app/Cargo.toml", "group": "app-runtime", "base_sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
-    {"path": "crates/app/src/lib.rs", "group": "app-runtime", "base_sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
-    {"path": "crates/desktop/src/main.rs", "group": "app-runtime", "base_sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
-    {"path": "Cargo.toml", "group": "android-renderer", "base_sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
-    {"path": "vendor/gpui-pre-wgpu-0.3.5/src/wgpu_renderer.rs", "group": "android-renderer", "base_sha256": "5555555555555555555555555555555555555555555555555555555555555555"},
-    {"path": "mobile/android/gradle/app/build.gradle.kts", "group": "android-renderer", "base_sha256": "6666666666666666666666666666666666666666666666666666666666666666"},
-    {"path": "mobile/ios/project.yml", "group": "ios-host", "base_sha256": "7777777777777777777777777777777777777777777777777777777777777777"},
-    {"path": "mobile/ios/App.swift", "group": "ios-host", "base_sha256": "8888888888888888888888888888888888888888888888888888888888888888"}
+    {"path": "crates/app/Cargo.toml", "group": "app-runtime", "base_sha256": "1111111111111111111111111111111111111111111111111111111111111111", "template_path": "app/Cargo.toml.template"},
+    {"path": "crates/app/src/lib.rs", "group": "app-runtime", "base_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "template_path": "app/src/lib.rs"},
+    {"path": "crates/desktop/src/main.rs", "group": "desktop-host", "base_sha256": "3333333333333333333333333333333333333333333333333333333333333333", "template_path": "desktop/src/main.rs"},
+    {"path": "Cargo.toml", "group": "android-renderer", "base_sha256": "4444444444444444444444444444444444444444444444444444444444444444", "template_path": "workspace.Cargo.toml"},
+    {"path": "vendor/gpui-pre-wgpu-0.3.5/src/wgpu_renderer.rs", "group": "android-renderer", "base_sha256": "5555555555555555555555555555555555555555555555555555555555555555", "template_path": "android-compat/gpui-pre-wgpu-0.3.5/src/wgpu_renderer.rs"},
+    {"path": "mobile/android/gradle/app/build.gradle.kts", "group": "android-renderer", "base_sha256": "6666666666666666666666666666666666666666666666666666666666666666", "template_path": "android/gradle/app/build.gradle.kts"},
+    {"path": "mobile/ios/project.yml", "group": "ios-host", "base_sha256": "7777777777777777777777777777777777777777777777777777777777777777", "template_path": "ios/project.yml"},
+    {"path": "mobile/ios/App.swift", "group": "ios-host", "base_sha256": "8888888888888888888888888888888888888888888888888888888888888888", "template_path": "ios/App.swift"}
   ]
 }
