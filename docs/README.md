@@ -10,6 +10,19 @@
 - [研究和设计决策](roadmap/research-and-decisions.md)：跨平台工具的官方来源、取舍和上游实验关卡。
 - [可解析配置/响应草案](examples/README.md)：场景、矩阵、性能预算、观察、复现包、模板与 doctor。
 
+F01 的 headless 基线驱动器已经随仓库提供。它只测量 CLI/supervisor 的开发链路，
+不把 Cargo 夹具冒充成 GPUI 窗口验收：
+
+```bash
+python3 scripts/live-baseline.py --self-test
+cargo build --locked
+python3 scripts/live-baseline.py --gpui target/debug/gpui --output /tmp/gpui-f01-baseline
+```
+
+驱动器默认执行 10 次预热和 30 次测量，输出 `environment.json`、
+`spans.ndjson`、`summary.json` 以及保留原始命令的 `commands.ndjson`。完整 UI、设备和
+GPU 能力仍以对应验收用例为准。
+
 ## 专项设计
 
 | 主题 | 设计 |

@@ -19,7 +19,7 @@
 
 | ID | 门槛 | 优先级 | 规模 | 前置任务 | 验收 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| F01 | G0 | core | M | — | P-01, P-02 | planned |
+| F01 | G0 | core | M | — | P-01, P-02 | in_review |
 | T01 | G0 | core | M | — | T-01, T-02, T-03 | planned |
 | P01 | G0 | core | L | F01, T01 | O-05, O-10, O-11, P-03 | planned |
 | T02 | G1 | core | M | F01 | T-04 | planned |
@@ -87,6 +87,11 @@
 PR 拆分：夹具/基线契约 → span 和有界记录 → 重跑脚本及报告。输出 `environment.json`、`spans.ndjson`、`summary.json` 和原命令。
 
 验收：P-01/P-02；功能对照运行现有 fmt/clippy/test。回退：关闭新增计时，不改变 D1 状态语义。不能先承诺“提速百分比”再选择样本。
+
+当前代码交付了严格 fixture 契约、supervisor 单调 span、有限 `spans.ndjson` 和可重跑
+的 headless 基线驱动器；本地完整运行已覆盖 3 个夹具、每个 10 次预热和 30 次测量，
+并保留编译失败/恢复样本。真实 native 安装失败以及 T05/T06 的索引/缓存对照仍需在
+对应平台/任务完成后补齐，不能将这次 headless 结果写成跨平台性能结论。
 
 ### T01 · Target-aware doctor
 
