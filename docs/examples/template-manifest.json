@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "generator": {"name": "gpui-cli", "version": "0.1.0-draft"},
+  "template_version": "agent-native-v1-draft",
+  "platforms": ["macos", "ios", "android"],
+  "dependencies": {
+    "gpui_pre_version": "0.3.5",
+    "gpui_kit_revision": "9504b4658d57c59024a664f22b5ab55e070a24b4",
+    "gpui_mobile_revision": "b4e3ab258f271003b7d4b874f7c5ebe3a77fac60",
+    "dev_protocol_version": "0.1.0-draft",
+    "dev_runtime_version": "0.1.0-draft"
+  },
+  "baseline": {
+    "template_version": "agent-native-v1-draft",
+    "content_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "distribution": "embedded-version-package"
+  },
+  "groups": [
+    {"id": "app-runtime", "atomic": true},
+    {"id": "android-renderer", "atomic": true},
+    {"id": "ios-host", "atomic": true}
+  ],
+  "files": [
+    {"path": "crates/app/Cargo.toml", "group": "app-runtime", "base_sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+    {"path": "crates/app/src/lib.rs", "group": "app-runtime", "base_sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+    {"path": "crates/desktop/src/main.rs", "group": "app-runtime", "base_sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+    {"path": "Cargo.toml", "group": "android-renderer", "base_sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
+    {"path": "vendor/gpui-pre-wgpu-0.3.5/src/wgpu_renderer.rs", "group": "android-renderer", "base_sha256": "5555555555555555555555555555555555555555555555555555555555555555"},
+    {"path": "mobile/android/gradle/app/build.gradle.kts", "group": "android-renderer", "base_sha256": "6666666666666666666666666666666666666666666666666666666666666666"},
+    {"path": "mobile/ios/project.yml", "group": "ios-host", "base_sha256": "7777777777777777777777777777777777777777777777777777777777777777"},
+    {"path": "mobile/ios/App.swift", "group": "ios-host", "base_sha256": "8888888888888888888888888888888888888888888888888888888888888888"}
+  ]
+}

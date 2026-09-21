@@ -5,6 +5,8 @@
 设计事实基线：本仓库 `c5b0c7f`；模板锁定的 `gpui-pre 0.3.5` 源码。第 2 节保留实施前基线。
 前置设计：[Live 模式](DESIGN-live-mode.md)。沿用 L0 重建重启、L1 资源重载、L0.5 状态恢复。
 
+后续详细计划（2026-09-21，基线 `6d091b6`）：[Agent-native 总路线](ROADMAP-agent-native-development.md)、[实施任务清单](roadmap/implementation-backlog.md)、[验收矩阵](roadmap/acceptance-matrix.md)。本文保留 D1 的历史背景与实现记录；D2–D4 的版本契约、命令和执行顺序以新专项设计为准。例如正式场景入口拟为根命令 `gpui check`，下文早期 `gpui dev check` 示意不构成兼容承诺。
+
 ## 1. 目标与关键决定
 
 让 agent 每次修改代码后，都能回答三个问题：**这次修改是否成功运行、运行中的界面变成了什么、交互是否符合预期。**

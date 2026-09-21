@@ -1,0 +1,40 @@
+# Draft. Resolve/replace the device IDs and configure remote runners explicitly.
+schema_version = 1
+source_mode = "frozen"
+max_parallel = 2
+fail_fast = false
+
+[[targets]]
+id = "macos-local"
+runner = "local"
+platform = "macos"
+required = true
+scenarios = ["counter-basic", "login-invalid", "list-scroll"]
+timeout_ms = 600000
+
+[[targets]]
+id = "ios-simulator"
+runner = "local"
+platform = "ios"
+device = "REPLACE_WITH_SIMULATOR_UDID"
+required = true
+scenarios = ["counter-basic", "login-invalid", "list-scroll"]
+timeout_ms = 600000
+
+[[targets]]
+id = "android-emulator"
+runner = "local"
+platform = "android"
+device = "emulator-5554"
+abi = "arm64-v8a"
+required = true
+scenarios = ["counter-basic", "login-invalid", "list-scroll"]
+timeout_ms = 600000
+
+[[targets]]
+id = "windows-remote"
+runner = "windows-lab-1"
+platform = "windows"
+required = false
+scenarios = ["counter-basic", "login-invalid", "list-scroll"]
+timeout_ms = 600000

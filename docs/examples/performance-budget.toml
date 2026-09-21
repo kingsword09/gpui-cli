@@ -1,0 +1,34 @@
+# Draft budgets, not measured guarantees. Relative comparison needs paired runs.
+schema_version = 1
+algorithm = "paired-bootstrap-v1"
+
+[sampling]
+warmup_runs = 10
+measurement_runs = 30
+bootstrap_resamples = 2000
+confidence = 0.95
+seed = 20260921
+
+[[budgets]]
+scenario = "list-scroll"
+metric = "frame.interval_ms"
+measure_steps = ["scroll-list"]
+min_samples = 30
+unit = "ms"
+per_run = "p95"
+aggregate = "median"
+direction = "lower_is_better"
+absolute = { enabled = true, limit = 16.7 }
+relative = { enabled = true, max_regression_pct = 10.0, min_delta = 1.0 }
+
+[[budgets]]
+scenario = "list-scroll"
+metric = "ui.layout_ms"
+measure_steps = ["scroll-list"]
+min_samples = 30
+unit = "ms"
+per_run = "p95"
+aggregate = "median"
+direction = "lower_is_better"
+absolute = { enabled = true, limit = 8.0 }
+relative = { enabled = true, max_regression_pct = 10.0, min_delta = 0.5 }

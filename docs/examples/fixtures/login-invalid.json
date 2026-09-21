@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "component": "LoginForm",
+  "initial_username": "alice@example.test",
+  "initial_password": "",
+  "network": {
+    "mode": "fixture",
+    "latency_ms": 200,
+    "response": {"status": "error", "code": "invalid_credentials", "message": "Invalid credentials"}
+  },
+  "allowed_runtime_errors": [
+    {"source": "login-fixture", "code": "invalid_credentials", "phase": "submit", "reason": "Expected validation outcome for this fixture"}
+  ],
+  "sensitive_logical_ids": ["login.password"]
+}

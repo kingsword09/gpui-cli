@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "bundle_id": "repro-login-example",
+  "producer": {"cli_version": "0.1.0-draft", "control_schema_version": 2, "app_proto": 2, "runtime_version": "0.1.0-draft"},
+  "created_at": "2026-09-21T06:00:00Z",
+  "source": {
+    "base_commit": "6d091b661d7ef82115e88cf142c7ff252b593864",
+    "input_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "manifest_path": "inputs/source-manifest.json",
+    "included": false,
+    "worktree_patch": null
+  },
+  "replayability": "requires_source",
+  "prerequisites": [
+    {"kind": "source", "requirement": "Provide trusted source matching source.input_hash"},
+    {"kind": "runner", "platform": "macos", "backend": "metal", "requirement": "Matching GPUI dependency revisions and graphical session"}
+  ],
+  "failure": {
+    "check_id": "check-login-example",
+    "scenario_id": "login-invalid",
+    "step_id": "show-validation-error",
+    "code": "assertion_failed",
+    "expected": "Invalid credentials",
+    "actual": "Loading",
+    "result_path": "results/check.json"
+  },
+  "privacy": {
+    "source_included": false,
+    "patch_included": false,
+    "credentials_included": false,
+    "environment_policy": "allowlist",
+    "redacted_logical_ids": ["login.password"],
+    "redacted_files": ["artifacts/login.png", "artifacts/login-tree.json", "logs/app.ndjson"]
+  },
+  "files": [
+    {"path": "inputs/source-manifest.json", "size_bytes": 2100, "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "kind": "input_manifest", "redacted": false},
+    {"path": "inputs/scenarios.toml", "size_bytes": 5200, "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "kind": "scenario", "redacted": false},
+    {"path": "inputs/fixtures/login-invalid.json", "size_bytes": 600, "sha256": "4444444444444444444444444444444444444444444444444444444444444444", "kind": "fixture", "redacted": false},
+    {"path": "events/events.ndjson", "size_bytes": 32000, "sha256": "5555555555555555555555555555555555555555555555555555555555555555", "kind": "events", "redacted": false},
+    {"path": "results/check.json", "size_bytes": 12000, "sha256": "6666666666666666666666666666666666666666666666666666666666666666", "kind": "check_result", "redacted": false},
+    {"path": "artifacts/login.png", "size_bytes": 48000, "sha256": "7777777777777777777777777777777777777777777777777777777777777777", "kind": "screenshot", "redacted": true},
+    {"path": "artifacts/login-tree.json", "size_bytes": 3000, "sha256": "8888888888888888888888888888888888888888888888888888888888888888", "kind": "semantics", "redacted": true},
+    {"path": "logs/app.ndjson", "size_bytes": 6000, "sha256": "9999999999999999999999999999999999999999999999999999999999999999", "kind": "logs", "redacted": true}
+  ]
+}
