@@ -139,6 +139,7 @@ fn real_live_build_failure_recovery_supersession_crash_and_event_follow() {
     let mut fixture = Fixture::start();
     let initial = fixture
         .wait(|s| s["build"]["status"] == "succeeded" && s["running"]["process"] == "running");
+    let session_id = initial["session_id"].as_str().unwrap().to_owned();
     let run = initial["running"]["run_id"].clone();
     let pid = initial["running"]["pid"].clone();
     assert_eq!(initial["stale"], false);
@@ -253,6 +254,34 @@ fn main() {
         thread::sleep(Duration::from_millis(25));
     }
     fixture.stop();
+    let spans_path = fixture
+        .root
+        .join(".gpui/live")
+        .join(session_id)
+        .join("spans.ndjson");
+    let spans: Vec<Value> = fs::read_to_string(&spans_path)
+        .unwrap_or_else(|error| panic!("missing span journal {}: {error}", spans_path.display()))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for name in [
+        "inputs.scan",
+        "build",
+        "build.queue",
+        "cargo.compile",
+        "app.launch",
+    ] {
+        assert!(
+            spans.iter().any(|span| span["name"] == name),
+            "missing {name} span"
+        );
+    }
+    assert!(spans.iter().any(|span| span["status"] == "failed"));
+    assert!(spans.iter().any(|span| span["status"] == "superseded"));
+    assert!(spans.iter().all(|span| {
+        span["duration_ns"].is_null()
+            || span["ended_at_ns"].as_u64().unwrap() >= span["started_at_ns"].as_u64().unwrap()
+    }));
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
         if let Some(status) = follower.try_wait().unwrap() {

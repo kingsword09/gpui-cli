@@ -32,6 +32,7 @@ use crate::devserver::inputs::should_trigger;
 use crate::devserver::output::{self, AppProcess};
 use crate::devserver::protocol::{self, ServerMessage};
 use crate::devserver::session::{Build, Session};
+use crate::devserver::timing;
 use serde_json::json;
 
 /// Source files watch out for asset-only changes under this directory; they
@@ -261,13 +262,16 @@ fn run_iteration(
                 return Ok(Iteration::Superseded);
             }
             prepare_launch(channel, server, build)?;
-            observed_step(build, "ios.install_launch", || {
-                if *physical {
-                    ios::install_and_launch_device(id, &app, &bundle_id)
-                } else {
-                    ios::install_and_launch_with_env(id, &app, &bundle_id, &channel.env(project))
-                }
-            })?;
+            if *physical {
+                observed_step(build, "ios.install", || ios::install_device(id, &app))?;
+                observed_step(build, "ios.launch", || ios::launch_device(id, &bundle_id))?;
+            } else {
+                observed_step(build, "ios.install", || ios::install_simulator(id, &app))?;
+                let env = channel.env(project);
+                observed_step(build, "ios.launch", || {
+                    ios::launch_simulator_with_env(id, &bundle_id, &env)
+                })?;
+            }
             channel.live.emit(
                 Kind::AppStarted,
                 &channel.scope,
@@ -345,12 +349,24 @@ fn observed_step<T>(build: &Build, stage: &str, f: impl FnOnce() -> Result<T>) -
     if build.session.stopping.load(Ordering::SeqCst) {
         bail!("live session is stopping");
     }
+    let span = build.session.start_span(
+        timing::stage_name(stage),
+        &build.scope,
+        Some(build.span_id()),
+        json!({"stage": stage}),
+    );
     build
         .session
         .emit(Kind::StageStarted, &build.scope, json!({"stage": stage}));
     let result = f();
     build.session.emit(Kind::StageFinished, &build.scope,
         json!({"stage": stage, "success": result.is_ok(), "error": result.as_ref().err().map(|e| format!("{e:#}"))}));
+    if let Err(error) = &result {
+        let message = format!("{error:#}");
+        span.finish("failed", Some(&message));
+    } else {
+        span.finish("ok", None);
+    }
     result
 }
 
@@ -1019,8 +1035,11 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                 )?;
             }
             Ok(Event::Assets(paths)) => {
-                let sent = reload_assets(project, &plan, &server, &paths);
                 let scope = session.current_run().unwrap_or_default();
+                let asset_span =
+                    session.start_span("assets.apply", &scope, None, json!({"paths": paths}));
+                let sent = reload_assets(project, &plan, &server, &paths);
+                asset_span.finish(if sent { "sent" } else { "fallback" }, None);
                 session.emit(
                     Kind::AssetsSent,
                     &scope,

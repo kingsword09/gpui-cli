@@ -304,6 +304,14 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
             _ => return,
         }
     };
+    let connect_span = shared.session.as_ref().map(|session| {
+        session.start_span(
+            "app.connect",
+            &scope,
+            None,
+            json!({"project": project, "platform": platform, "pid": pid}),
+        )
+    });
     if protocol::write_frame(
         &mut stream,
         &protocol::encode(&ServerMessage::HelloOk {
@@ -313,6 +321,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
     )
     .is_err()
     {
+        if let Some(span) = &connect_span {
+            span.finish("failed", Some("writing hello_ok failed"));
+        }
         return;
     }
     let _ = stream.set_read_timeout(None);
@@ -343,6 +354,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
         json!({"project": project, "platform": platform, "pid": pid,
         "asset_reload": asset_reload, "connection_id": id}),
     );
+    if let Some(span) = &connect_span {
+        span.finish("ok", None);
+    }
     shared.changed.notify_all();
     let writer_state = shared.clone();
     let writer = thread::Builder::new()
