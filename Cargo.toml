@@ -11,6 +11,10 @@ keywords = ["gpui", "gui", "cli", "mobile", "desktop"]
 categories = ["command-line-utilities", "gui"]
 include = ["/src/**", "/tests/**", "/templates/**", "/assets/**", "/scripts/**", "/docs/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/CONTRIBUTING.md", "/LICENSE-*", "/THIRD_PARTY_NOTICES.md"]
 
+[workspace]
+members = ["xtask"]
+resolver = "3"
+
 [[bin]]
 name = "gpui"
 path = "src/main.rs"

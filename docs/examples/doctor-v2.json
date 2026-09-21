@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "project": "counter-example",
+  "target": {"platform": "macos", "architecture": "aarch64"},
+  "overall": "pass",
+  "checks": [
+    {
+      "id": "rust.version",
+      "required": true,
+      "status": "pass",
+      "expected": {"minimum": "1.97"},
+      "actual": {"version": "1.97.0", "host": "aarch64-apple-darwin"},
+      "reason": null,
+      "remediation": [],
+      "duration_ms": 25
+    },
+    {
+      "id": "desktop.c_toolchain",
+      "required": true,
+      "status": "pass",
+      "expected": "Working native linker and macOS SDK",
+      "actual": "Probe completed successfully",
+      "reason": null,
+      "remediation": [],
+      "duration_ms": 40
+    },
+    {
+      "id": "capture.gpudebug",
+      "required": false,
+      "status": "warning",
+      "expected": "Optional Metal trace analysis tool",
+      "actual": {"available": false},
+      "reason": "tool_not_found",
+      "remediation": [
+        {"message": "Check the selected Xcode toolchain; normal desktop development remains available", "command": ["xcrun", "--find", "gpudebug"]}
+      ],
+      "duration_ms": 15
+    }
+  ]
+}

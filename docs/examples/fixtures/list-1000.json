@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "component": "VirtualList",
+  "items": {
+    "count": 1000,
+    "stable_key_prefix": "item-",
+    "stable_key_digits": 4,
+    "label_prefix": "Item "
+  },
+  "row_height": 32,
+  "initial_scroll_y": 0,
+  "show_images": false,
+  "animation": "disabled"
+}

@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "session_id": "s-example-01",
+  "request_id": "req-observe-01",
+  "ok": true,
+  "result": {
+    "operation": {
+      "operation_id": "op-observe-01",
+      "kind": "observe",
+      "state": "succeeded",
+      "sync": true,
+      "deadline_ms": 30000,
+      "required": ["screenshot", "semantics"]
+    },
+    "observation": {
+      "observation_id": "o-example-01",
+      "project_id": "project-counter-example",
+      "session_id": "s-example-01",
+      "target_id": "local-macos-arm64",
+      "build_id": "b-example-12",
+      "run_id": "r-example-12",
+      "window_id": "w-counter",
+      "scene_epoch": 41,
+      "presented_frame_id": null,
+      "revision": {
+        "source_revision": 12,
+        "asset_revision": 4,
+        "overlay_revision": 0
+      },
+      "source_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "asset_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "input_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "input_consistency": "tracked_scan",
+      "input_scope": ["workspace", "assets", "native_host_config", "declared_path_dependencies"],
+      "untracked_inputs": [],
+      "freshness": {"source": "current", "assets": "applied", "scene": "matches"},
+      "preview_only": false,
+      "build": {"status": "succeeded"},
+      "process": {"status": "running"},
+      "channel": {"status": "connected"},
+      "ui": {"status": "responsive", "probe_request_id": "req-probe-01", "probe_latency_ms": 8},
+      "capture": {"status": "captured"},
+      "check": {"status": "not_run"},
+      "completeness": "complete",
+      "consistency": "same_scene",
+      "settled": true,
+      "settle_ms": 300,
+      "created_at": "2026-09-21T06:00:00Z",
+      "versions": {
+        "control_schema": 2,
+        "app_proto": 2,
+        "runtime": "0.1.0-draft",
+        "template": "agent-native-v1-draft",
+        "gpui": "0.3.5"
+      },
+      "capabilities": {
+        "ui.heartbeat": {"available": true, "reason": null, "provider": "gpui-dev-runtime", "constraints": {"foreground_only": true}},
+        "windows.list": {"available": true, "reason": null, "provider": "gpui-dev-runtime", "constraints": {}},
+        "capture.scene": {"available": true, "reason": null, "provider": "gpui-scene-adapter", "constraints": {"scope": "scene"}},
+        "semantics.read": {"available": true, "reason": null, "provider": "gpui-scene-adapter", "constraints": {"max_nodes": 50000}},
+        "metrics.gpu": {"available": false, "reason": "backend_unsupported", "provider": "gpui-scene-adapter", "constraints": {}}
+      },
+      "screenshot": {
+        "artifact_id": "a-counter-png-01",
+        "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "media_type": "image/png",
+        "size_bytes": 42000,
+        "provider": "gpui-scene-adapter",
+        "scope": "scene",
+        "pixel_width": 1280,
+        "pixel_height": 960,
+        "logical_width": 640,
+        "logical_height": 480,
+        "scale": 2.0,
+        "orientation": "landscape",
+        "includes_system_ui": false,
+        "started_at": "2026-09-21T05:59:59.980Z",
+        "finished_at": "2026-09-21T05:59:59.995Z",
+        "scene_epoch_before": 41,
+        "scene_epoch_after": 41
+      },
+      "semantics": {
+        "artifact_id": "a-counter-tree-01",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "media_type": "application/json",
+        "size_bytes": 1600,
+        "node_count": 4,
+        "scene_epoch": 41,
+        "unsupported_fields": ["source_location"]
+      }
+    },
+    "next_action": {"kind": "query", "observation_id": "o-example-01", "logical_id": "counter.increment"}
+  }
+}

@@ -208,6 +208,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks, template development and icon
 generation. Templates are embedded in the CLI binary, so rebuild the CLI after
 changing them.
 
+The [agent-native development roadmap](docs/ROADMAP-agent-native-development.md)
+contains detailed designs, PR-sized tasks, acceptance cases and configuration
+drafts for cross-platform observation, scenarios, performance and Agent tooling.
+These are planned capabilities, not commands available in the current release.
+
 ## License
 
 Original code and artwork are available under [MIT](LICENSE-MIT) or

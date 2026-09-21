@@ -9,8 +9,8 @@ their directories in the source package. Scaffolding restores the normal
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 cargo build --locked
 ```
 
@@ -23,6 +23,24 @@ the generated Android host in both modes with multiple ABIs. These checks use
 titles containing quotes, XML characters and backslashes to exercise template
 escaping. Android host packaging is separate from GPUI's Rust cross-compilation
 and device execution; it does not validate native runtime behavior.
+
+## Design documentation
+
+Start with the [agent-native roadmap](docs/ROADMAP-agent-native-development.md),
+then select a task from its implementation backlog and the matching acceptance
+cases. Proposed APIs and configuration examples must stay marked as drafts
+until their implementation and required platform checks have passed.
+
+For documentation-only changes, check links, task dependencies, acceptance IDs
+and JSON/TOML examples with the repository's Rust `x` task runner:
+
+```bash
+cargo x check-design-docs
+git diff --check
+```
+
+This checks documentation consistency, not runtime behavior or example artifact
+hashes. Rust, native and GUI checks remain required for implementation changes.
 
 ## Artwork
 

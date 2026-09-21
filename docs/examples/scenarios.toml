@@ -1,0 +1,131 @@
+# Draft schema: not supported by the current CLI.
+schema_version = 1
+
+[[scenarios]]
+id = "counter-basic"
+component = "Counter"
+fixture = "fixtures/counter-zero.json"
+tags = ["smoke", "interaction"]
+timeout_ms = 30000
+requires = ["screenshot", "semantics", "scenario.reset", "input.pointer"]
+theme = "light"
+locale = "en-US"
+random_seed = 7
+clock = "fixed"
+clock_at = "2026-09-21T06:00:00Z"
+ready_id = "counter.value"
+viewport = { width = 640, height = 480 }
+
+[[scenarios.steps]]
+id = "initial-zero"
+type = "assert"
+selector = { logical_id = "counter.value" }
+assertion = "value_equals"
+expected = 0
+
+[[scenarios.steps]]
+id = "increment"
+type = "click"
+selector = { logical_id = "counter.increment" }
+
+[[scenarios.steps]]
+id = "after-increment"
+type = "wait_for"
+selector = { logical_id = "counter.value" }
+assertion = "value_equals"
+expected = 1
+timeout_ms = 2000
+
+[[scenarios.steps]]
+id = "counter-evidence"
+type = "capture"
+label = "counter-after-increment"
+require = ["screenshot", "semantics"]
+
+[[scenarios]]
+id = "login-invalid"
+component = "LoginForm"
+fixture = "fixtures/login-invalid.json"
+tags = ["smoke", "form", "async"]
+timeout_ms = 30000
+requires = ["screenshot", "semantics", "scenario.reset", "input.pointer", "input.keyboard"]
+theme = "light"
+locale = "en-US"
+random_seed = 7
+clock = "fixed"
+clock_at = "2026-09-21T06:00:00Z"
+ready_id = "login.password"
+viewport = { width = 640, height = 480 }
+
+[[scenarios.steps]]
+id = "type-invalid-password"
+type = "type_text"
+selector = { logical_id = "login.password" }
+text = "bad-password"
+mode = "replace"
+
+[[scenarios.steps]]
+id = "submit"
+type = "click"
+selector = { logical_id = "login.submit" }
+
+[[scenarios.steps]]
+id = "show-validation-error"
+type = "wait_for"
+selector = { logical_id = "login.error" }
+assertion = "text_equals"
+expected = "Invalid credentials"
+timeout_ms = 5000
+
+[[scenarios.steps]]
+id = "no-unexpected-errors"
+type = "assert"
+assertion = "no_runtime_errors"
+
+[[scenarios.steps]]
+id = "form-evidence"
+type = "capture"
+label = "login-invalid-state"
+require = ["screenshot", "semantics"]
+
+[[scenarios]]
+id = "list-scroll"
+component = "VirtualList"
+fixture = "fixtures/list-1000.json"
+tags = ["layout", "virtualization", "performance"]
+timeout_ms = 30000
+requires = ["screenshot", "semantics", "semantics.bounds", "scenario.reset", "input.pointer"]
+theme = "light"
+locale = "en-US"
+random_seed = 7
+clock = "fixed"
+clock_at = "2026-09-21T06:00:00Z"
+ready_id = "list.viewport"
+viewport = { width = 640, height = 480 }
+
+[[scenarios.steps]]
+id = "scroll-list"
+type = "scroll"
+selector = { logical_id = "list.viewport" }
+delta_x = 0
+delta_y = 1200
+duration_ms = 2000
+
+[[scenarios.steps]]
+id = "item-visible"
+type = "wait_for"
+selector = { logical_id = "list.item.item-0042" }
+assertion = "visible"
+timeout_ms = 3000
+
+[[scenarios.steps]]
+id = "item-not-clipped"
+type = "assert"
+selector = { logical_id = "list.item.item-0042" }
+assertion = "not_clipped"
+
+[[scenarios.steps]]
+id = "list-evidence"
+type = "capture"
+label = "list-after-scroll"
+require = ["screenshot", "semantics"]
