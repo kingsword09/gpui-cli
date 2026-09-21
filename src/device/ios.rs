@@ -457,9 +457,22 @@ pub fn install_and_launch_with_env(
     bundle_id: &str,
     env: &[(String, String)],
 ) -> Result<()> {
+    install_simulator(udid, app)?;
+    launch_simulator_with_env(udid, bundle_id, env)
+}
+
+pub fn install_simulator(udid: &str, app: &std::path::Path) -> Result<()> {
     let xcrun = xcrun()?;
     let app = app.to_string_lossy().into_owned();
-    super::run(&xcrun, &["simctl", "install", udid, &app])?;
+    super::run(&xcrun, &["simctl", "install", udid, &app])
+}
+
+pub fn launch_simulator_with_env(
+    udid: &str,
+    bundle_id: &str,
+    env: &[(String, String)],
+) -> Result<()> {
+    let xcrun = xcrun()?;
     let mut launch = Command::new(&xcrun);
     launch.args([
         "simctl",
@@ -482,6 +495,11 @@ pub fn install_and_launch_with_env(
 
 /// Installs and launches an app bundle on a physical device.
 pub fn install_and_launch_device(udid: &str, app: &std::path::Path, bundle_id: &str) -> Result<()> {
+    install_device(udid, app)?;
+    launch_device(udid, bundle_id)
+}
+
+pub fn install_device(udid: &str, app: &std::path::Path) -> Result<()> {
     let xcrun = xcrun()?;
     let app = app.to_string_lossy().into_owned();
     super::run(
@@ -495,7 +513,11 @@ pub fn install_and_launch_device(udid: &str, app: &std::path::Path, bundle_id: &
             "--device",
             udid,
         ],
-    )?;
+    )
+}
+
+pub fn launch_device(udid: &str, bundle_id: &str) -> Result<()> {
+    let xcrun = xcrun()?;
     super::run(
         &xcrun,
         &[

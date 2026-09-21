@@ -2,6 +2,7 @@
 
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
 use super::inputs::Inputs;
+use super::timing::{SpanGuard, Timing};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::fs;
@@ -17,14 +18,15 @@ pub struct Session {
     pub stopping: AtomicBool,
     inputs: Mutex<Inputs>,
     output: Mutex<RollingFile>,
+    pub timing: Arc<Timing>,
     next_build: AtomicU64,
     next_run: AtomicU64,
 }
 
-#[derive(Clone)]
 pub struct Build {
     pub session: Arc<Session>,
     pub scope: Scope,
+    span: SpanGuard,
 }
 
 impl Session {
@@ -53,7 +55,7 @@ impl Session {
             capabilities: json!({"status": true, "diagnostics": true, "events": true,
                 "run_identity": "launch_token", "ui_observation": false, "asset_confirmation": false,
                 "actions": false, "checks": false, "input_scope": "project_files",
-                "native_mobile_logs": false}),
+                "native_mobile_logs": false, "timing_spans": true}),
             diagnostics: Vec::new(),
             diagnostics_omitted: 0,
             runtime_issues: Vec::new(),
@@ -61,6 +63,7 @@ impl Session {
             storage_error: None,
             watcher_error: None,
         };
+        let timing = Arc::new(Timing::new(&dir, &id)?);
         let session = Arc::new(Self {
             id,
             root,
@@ -71,26 +74,64 @@ impl Session {
                 4 * 1024 * 1024,
                 8,
             )?),
+            timing,
             dir,
             stopping: AtomicBool::new(false),
             inputs: Mutex::new(Inputs::default()),
             next_build: AtomicU64::new(1),
             next_run: AtomicU64::new(1),
         });
+        for stage in [
+            "device.lease_wait",
+            "ui.ready",
+            "observation.capture",
+            "artifact.publish",
+        ] {
+            session.timing.not_instrumented(
+                stage,
+                &Scope::default(),
+                json!({"reason": "not implemented in the D1 live runtime"}),
+            );
+        }
         session.emit(Kind::SessionStarted, &Scope::default(), json!({}));
         session.sync_inputs()?;
         Ok(session)
     }
 
     pub fn emit(&self, kind: Kind, scope: &Scope, data: Value) {
+        if let Some(error) = self.timing.last_error() {
+            self.store.storage_error(error);
+        }
         self.store.emit(kind, scope, data);
     }
 
+    pub fn start_span(
+        &self,
+        name: impl Into<String>,
+        scope: &Scope,
+        parent_id: Option<&str>,
+        attributes: Value,
+    ) -> SpanGuard {
+        self.timing.start(name, scope, parent_id, attributes)
+    }
+
     pub fn sync_inputs(&self) -> Result<Revision> {
+        let scan_scope = Scope {
+            revision: self.store.state().desired,
+            ..Scope::default()
+        };
+        let scan = self.start_span("inputs.scan", &scan_scope, None, json!({}));
         // Serialize scans without holding the event/state mutex. Queries stay
         // responsive even with a large workspace or a running compiler.
         let mut previous = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
-        let inputs = Inputs::scan(&self.root)?;
+        let inputs = match Inputs::scan(&self.root) {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                let message = error.to_string();
+                scan.finish("failed", Some(&message));
+                return Err(error);
+            }
+        };
         let mut revision = self.store.state().desired;
         if revision.source_revision == 0 || inputs != *previous {
             if revision.source_revision == 0
@@ -107,6 +148,7 @@ impl Session {
                     "untracked_directory_links": inputs.untracked_directory_links}));
             *previous = inputs;
         }
+        scan.finish("ok", None);
         Ok(revision)
     }
 
@@ -121,15 +163,29 @@ impl Session {
             revision: self.store.state().desired,
             ..Scope::default()
         };
+        let build_span = self.start_span(
+            "build",
+            &scope,
+            None,
+            json!({"input_hash": inputs.digest()}),
+        );
+        let queue_span = self.start_span(
+            "build.queue",
+            &scope,
+            Some(build_span.span_id()),
+            json!({"input_hash": inputs.digest()}),
+        );
         let manifest = self.record(&scope, "inputs", &json!(inputs.clone()));
         self.emit(
             Kind::BuildStarted,
             &scope,
             json!({"input_hash": inputs.digest(), "manifest": manifest}),
         );
+        queue_span.finish("ok", None);
         Ok(Build {
             session: self.clone(),
             scope,
+            span: build_span,
         })
     }
 
@@ -188,10 +244,15 @@ impl Session {
     pub fn end(&self) {
         self.stopping.store(true, Ordering::SeqCst);
         self.emit(Kind::SessionEnded, &Scope::default(), json!({}));
+        let _ = self.timing.flush();
     }
 }
 
 impl Build {
+    pub fn span_id(&self) -> &str {
+        self.span.span_id()
+    }
+
     pub fn is_current(&self) -> Result<bool> {
         Ok(!self.session.stopping.load(Ordering::SeqCst)
             && self.session.sync_inputs()? == self.scope.revision)
@@ -199,10 +260,20 @@ impl Build {
 
     pub fn finish(&self, success: bool, error: Option<String>) {
         let mut data = json!({"success": success});
-        if let Some(error) = error {
+        if let Some(error) = &error {
             data["error"] = json!(error);
         }
         self.session.emit(Kind::BuildFinished, &self.scope, data);
+        self.span.finish(
+            if success {
+                "ok"
+            } else if self.session.stopping.load(Ordering::SeqCst) {
+                "cancelled"
+            } else {
+                "failed"
+            },
+            error.as_deref(),
+        );
     }
 
     pub fn superseded(&self) {
@@ -211,6 +282,7 @@ impl Build {
             &self.scope,
             json!({"desired": self.session.store.state().desired}),
         );
+        self.span.finish("superseded", None);
     }
 }
 

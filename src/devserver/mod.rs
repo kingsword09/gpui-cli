@@ -8,6 +8,7 @@ pub mod output;
 mod process;
 pub mod protocol;
 pub mod session;
+pub mod timing;
 
 pub use app_channel::DevServer;
 

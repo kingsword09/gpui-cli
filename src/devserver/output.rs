@@ -3,6 +3,7 @@
 use super::events::{Kind, Scope};
 use super::process::OwnedChild;
 use super::session::{Build, Session};
+use super::timing;
 use crate::commands::error::{self, CargoMessage, CargoOutcome};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -33,6 +34,16 @@ pub fn run(
     stage: &str,
     cargo_json: bool,
 ) -> Result<CargoOutcome> {
+    let span = build.session.start_span(
+        timing::stage_name(stage),
+        &build.scope,
+        Some(build.span_id()),
+        json!({
+            "stage": stage,
+            "program": cmd.get_program().to_string_lossy(),
+            "args": cmd.get_args().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>()
+        }),
+    );
     build.session.emit(
         Kind::StageStarted,
         &build.scope,
@@ -46,12 +57,26 @@ pub fn run(
             let mut data = exit_data(*status, build.session.stopping.load(Ordering::SeqCst));
             data["stage"] = json!(stage);
             build.session.emit(Kind::StageFinished, &build.scope, data);
+            span.finish(
+                if status.success() {
+                    "ok"
+                } else if build.session.stopping.load(Ordering::SeqCst) {
+                    "cancelled"
+                } else {
+                    "failed"
+                },
+                None,
+            );
         }
-        Err(error) => build.session.emit(
-            Kind::StageFinished,
-            &build.scope,
-            json!({"stage": stage, "success": false, "error": format!("{error:#}")}),
-        ),
+        Err(error) => {
+            build.session.emit(
+                Kind::StageFinished,
+                &build.scope,
+                json!({"stage": stage, "success": false, "error": format!("{error:#}")}),
+            );
+            let message = format!("{error:#}");
+            span.finish("failed", Some(&message));
+        }
     }
     let (status, executable) = result?;
     Ok(CargoOutcome {
@@ -207,6 +232,7 @@ pub struct AppProcess {
 
 impl AppProcess {
     pub fn spawn(cmd: &mut Command, session: Arc<Session>, scope: Scope) -> Result<Self> {
+        let launch_span = session.start_span("app.launch", &scope, None, json!({}));
         let mut child = match OwnedChild::spawn(cmd) {
             Ok(child) => child,
             Err(error) => {
@@ -215,12 +241,15 @@ impl AppProcess {
                     &scope,
                     json!({"error": error.to_string()}),
                 );
+                let message = error.to_string();
+                launch_span.finish("failed", Some(&message));
                 return Err(error).context("launching desktop app");
             }
         };
         let stdout = child.stdout().context("app stdout")?;
         let stderr = child.stderr().context("app stderr")?;
         session.emit(Kind::AppStarted, &scope, json!({"pid": child.id()}));
+        launch_span.finish("ok", None);
         let mut process = Self {
             child: Arc::new(Mutex::new(child)),
             expected: Arc::new(AtomicBool::new(false)),
