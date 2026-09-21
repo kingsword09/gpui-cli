@@ -12,20 +12,26 @@ use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::error;
 use super::run::{
-    IosTarget, Project, android_abis, apk_path, bundle_id_of, bundle_id_of_android,
-    ensure_rust_target, ensure_tool, gradle_task, resolve_ios_target, xcode_app_path,
-    xcode_destination,
+    IosTarget, Project, android_abis, apk_path, bundle_id_of, bundle_id_of_android, ensure_tool,
+    gradle_task, resolve_ios_target, xcode_app_path, xcode_destination,
 };
 use crate::device::{self, DeviceFlags, android, inventory, ios};
 use crate::devserver::DevServer;
-use crate::devserver::protocol::{self, ClientMessage, ServerMessage};
+use crate::devserver::control::ControlServer;
+use crate::devserver::events::{Kind, Scope};
+use crate::devserver::inputs::should_trigger;
+use crate::devserver::output::{self, AppProcess};
+use crate::devserver::protocol::{self, ServerMessage};
+use crate::devserver::session::{Build, Session};
+use serde_json::json;
 
 /// Source files watch out for asset-only changes under this directory; they
 /// can reload in the running app instead of triggering a rebuild.
@@ -39,21 +45,6 @@ const SNAPSHOT_TTL: Duration = Duration::from_secs(24 * 3600);
 
 /// Editors fire several events per save; this absorbs the burst.
 const DEBOUNCE_MS: u64 = 400;
-/// How many trailing lines of a failed external command to show.
-const OUTPUT_TAIL_LINES: usize = 40;
-
-/// Directory names that hold build outputs or VCS noise. Watching them would
-/// re-trigger the build that just wrote them, so they are filtered out.
-const IGNORED_DIRS: &[&str] = &[
-    "target",
-    ".git",
-    ".gpui",
-    ".gradle",
-    "build",
-    "jniLibs",
-    "node_modules",
-    "Pods",
-];
 
 enum Event {
     Change,
@@ -67,6 +58,7 @@ enum Event {
 enum Iteration {
     Rebuilt,
     BuildFailed,
+    Superseded,
 }
 
 /// The resolved launch plan; device selection happens once, up front.
@@ -85,6 +77,9 @@ enum Plan {
 
 /// Dev-channel credentials handed to the app at every launch.
 struct Channel {
+    live: Arc<Session>,
+    scope: Scope,
+    overflow: Arc<AtomicBool>,
     project: String,
     port: u16,
     token: String,
@@ -111,6 +106,14 @@ impl Channel {
             ("GPUI_LIVE_ADDR".to_string(), self.addr()),
             ("GPUI_LIVE_TOKEN".to_string(), self.token.clone()),
             (
+                "GPUI_LIVE_BUILD_ID".to_string(),
+                self.scope.build_id.clone().unwrap_or_default(),
+            ),
+            (
+                "GPUI_LIVE_RUN_ID".to_string(),
+                self.scope.run_id.clone().unwrap_or_default(),
+            ),
+            (
                 "GPUI_LIVE_ASSETS".to_string(),
                 self.assets_dir.to_string_lossy().into_owned(),
             ),
@@ -132,20 +135,14 @@ impl Channel {
     fn device_config(&self) -> String {
         let session = self.session.as_deref().unwrap_or_default();
         format!(
-            "project={}\naddr={}\ntoken={}\nsession={session}\n",
+            "project={}\naddr={}\ntoken={}\nsession={session}\nbuild_id={}\nrun_id={}\n",
             self.project,
             self.addr(),
-            self.token
+            self.token,
+            self.scope.build_id.as_deref().unwrap_or_default(),
+            self.scope.run_id.as_deref().unwrap_or_default(),
         )
     }
-}
-
-/// Directory name components that would re-trigger the build that wrote them.
-fn should_trigger(path: &Path) -> bool {
-    path.components().all(|component| {
-        let name = component.as_os_str().to_string_lossy();
-        !IGNORED_DIRS.contains(&name.as_ref()) && !name.ends_with(".xcodeproj")
-    })
 }
 
 /// Slash-relative path of an asset change under `<root>/assets/`, if it is one.
@@ -157,6 +154,49 @@ fn asset_rel_path(root: &Path, path: &Path) -> Option<String> {
     Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
+/// Path the app is launched from.
+///
+/// Windows locks a running image against replacement, so launching cargo's own
+/// output makes the *next* build fail with "Access is denied" and the loop can
+/// never install a successful rebuild. Each launch therefore runs from a sibling
+/// copy; cargo's output stays replaceable while the app runs. The copy sits beside
+/// it so DLLs and other resources the executable finds next to itself still
+/// resolve. Other platforms launch the built binary directly — this is purely
+/// about the Windows file lock.
+fn launch_path(executable: &Path) -> Result<PathBuf> {
+    if !cfg!(windows) {
+        return Ok(executable.to_owned());
+    }
+    let stem = executable
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app");
+    let extension = executable
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("exe");
+    let path = executable.with_file_name(format!("{stem}-live.{extension}"));
+    // The previous process has just been killed; Windows can take a moment to
+    // release its image, and a scanner may hold the fresh copy briefly.
+    let mut last = None;
+    for _ in 0..20 {
+        match fs::copy(executable, &path) {
+            Ok(_) => return Ok(path),
+            Err(error) => {
+                last = Some(error);
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    Err(last.expect("a failed copy records its error")).with_context(|| {
+        format!(
+            "copying {} to {} (is another instance still running?)",
+            executable.display(),
+            path.display()
+        )
+    })
+}
+
 /// Runs one build + (re)launch cycle. `Ok(BuildFailed)` means a compile failure
 /// was already rendered; infrastructure errors come back as `Err`.
 fn run_iteration(
@@ -164,43 +204,42 @@ fn run_iteration(
     plan: &Plan,
     channel: &mut Channel,
     server: &DevServer,
-    child: &mut Option<Child>,
+    child: &mut Option<AppProcess>,
+    build: &Build,
 ) -> Result<Iteration> {
     match plan {
         Plan::Desktop => {
             let mut cmd = Command::new("cargo");
             cmd.current_dir(&project.root)
                 .args(["build", "-p", &project.desktop_crate()]);
-            let outcome = error::run_cargo_json(&mut cmd)?;
+            let outcome = error::run_cargo_json(&mut cmd, build, "cargo.build")?;
             if !outcome.success {
-                error::render_errors(&outcome.errors);
-                println!(
-                    "{}",
-                    "✗ build failed — keeping the current app running".yellow()
-                );
                 return Ok(Iteration::BuildFailed);
             }
             let executable = outcome
                 .executable
                 .context("cargo succeeded but reported no binary path")?;
-            // Snapshot goes to the still-running app before it is replaced.
+            if !build.is_current()? {
+                return Ok(Iteration::Superseded);
+            }
             prepare_restart(project, server, channel);
-            // Killing an already-exited child is a harmless no-op.
-            if let Some(mut old) = child.take() {
-                let _ = old.kill();
-                let _ = old.wait();
+            if !build.is_current()? {
+                return Ok(Iteration::Superseded);
             }
-            let mut spawn_cmd = Command::new(&executable);
-            spawn_cmd.current_dir(&project.root).stdin(Stdio::null());
+            drop(child.take());
+            prepare_launch(channel, server, build)?;
+            let executable = launch_path(&executable)?;
+            let mut cmd = Command::new(&executable);
+            cmd.current_dir(&project.root);
             for (key, value) in channel.env(project) {
-                spawn_cmd.env(key, value);
+                cmd.env(key, value);
             }
-            let new_child = spawn_cmd
-                .spawn()
-                .with_context(|| format!("failed to launch {}", executable.display()))?;
-            *child = Some(new_child);
+            *child = Some(AppProcess::spawn(
+                &mut cmd,
+                channel.live.clone(),
+                channel.scope.clone(),
+            )?);
             println!("{}", "✓ restarted".green());
-            Ok(Iteration::Rebuilt)
         }
         Plan::Ios {
             physical,
@@ -208,77 +247,110 @@ fn run_iteration(
             label,
         } => {
             let bundle_id = bundle_id_of(project);
-            let app = match build_ios_app_live(project, *physical, id)? {
-                Some(app) => app,
-                None => return Ok(Iteration::BuildFailed),
+            let Some(app) = build_ios_app_live(project, *physical, id, build)? else {
+                return Ok(Iteration::BuildFailed);
             };
-            println!("  {} installing on {}", "→".blue(), label);
-            if *physical {
-                // No channel on physical devices (see DESIGN-live-mode.md §7.2);
-                // launch without credentials, the app just runs detached.
-                ios::install_and_launch_device(id, &app, &bundle_id)?;
-            } else {
-                // Snapshot goes to the still-running app before it is replaced.
+            if !build.is_current()? {
+                return Ok(Iteration::Superseded);
+            }
+            if !physical {
                 prepare_restart(project, server, channel);
-                ios::install_and_launch_with_env(id, &app, &bundle_id, &channel.env(project))?;
-                // The simulator app sandbox cannot read the project's assets
-                // dir, so asset bytes travel over the channel instead (the
-                // client acknowledges the connection with a hello first).
-                if let Some(ClientMessage::Hello { .. }) = server
-                    .wait_for(Duration::from_secs(30), |m| {
-                        matches!(m, ClientMessage::Hello { .. })
-                    })
-                {
-                    push_ios_assets(project, all_asset_paths(project), server);
+            }
+            if !build.is_current()? {
+                return Ok(Iteration::Superseded);
+            }
+            prepare_launch(channel, server, build)?;
+            observed_step(build, "ios.install_launch", || {
+                if *physical {
+                    ios::install_and_launch_device(id, &app, &bundle_id)
+                } else {
+                    ios::install_and_launch_with_env(id, &app, &bundle_id, &channel.env(project))
                 }
+            })?;
+            channel.live.emit(
+                Kind::AppStarted,
+                &channel.scope,
+                json!({"confirmed": false, "device": id}),
+            );
+            if !physical && server.wait_for_client(Duration::from_secs(30)) {
+                push_ios_assets(project, all_asset_paths(project), server);
             }
             println!("{}", format!("✓ relaunched on {label}").green());
-            Ok(Iteration::Rebuilt)
         }
         Plan::Android { serial, label } => {
             let bundle_id = bundle_id_of_android(project);
-            let apk = match build_android_apk_live(project)? {
-                Some(apk) => apk,
-                None => return Ok(Iteration::BuildFailed),
+            let Some(apk) = build_android_apk_live(project, build)? else {
+                return Ok(Iteration::BuildFailed);
             };
-            // The snapshot handshake must happen BEFORE the APK is installed:
-            // `adb install -r` stops the process it replaces, so asking the
-            // old app afterwards would find no one to answer it.
+            if !build.is_current()? {
+                return Ok(Iteration::Superseded);
+            }
+            // Installation stops the old app, so snapshot it first.
             prepare_restart(project, server, channel);
-            println!("  {} installing on {}", "→".blue(), label);
-            android::install_apk(serial, &apk)?;
+            if !build.is_current()? {
+                return Ok(Iteration::Superseded);
+            }
+            prepare_launch(channel, server, build)?;
+            observed_step(build, "android.install", || {
+                android::install_apk(serial, &apk)
+            })?;
             push_android_assets(project, serial, &bundle_id, &all_asset_paths(project));
             if let Some(session) = &channel.session {
                 let state = Channel::sessions_dir(project).join(format!("{session}.state"));
-                match fs::read(&state) {
-                    Ok(bytes) => {
-                        let _ =
-                            android::write_device_config(serial, &bundle_id, "gpui_state", &bytes);
-                    }
-                    Err(err) => {
-                        println!(
-                            "{}",
-                            format!("⚠ failed to read the snapshot: {err}").yellow()
-                        );
+                match fs::read(&state)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|bytes| {
+                        android::write_device_config(serial, &bundle_id, "gpui_state", &bytes)
+                    }) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        channel.live.emit(Kind::AppLog, &channel.scope, json!({"level": "warn", "target": "restore", "message": error.to_string()}));
                         channel.session = None;
                     }
                 }
             }
-            android::write_device_config(
-                serial,
-                &bundle_id,
-                "gpui_live.txt",
-                channel.device_config().as_bytes(),
-            )?;
-            // Cold launch: `am start` on a live process would reuse stale
-            // dev-channel credentials read at startup.
-            android::force_stop(serial, &bundle_id)?;
-            android::reverse_port(serial, channel.port)?;
-            android::launch_app(serial, &bundle_id)?;
+            observed_step(build, "android.configure", || {
+                android::write_device_config(
+                    serial,
+                    &bundle_id,
+                    "gpui_live.txt",
+                    channel.device_config().as_bytes(),
+                )?;
+                android::force_stop(serial, &bundle_id)?;
+                android::reverse_port(serial, channel.port)
+            })?;
+            observed_step(build, "android.launch", || {
+                android::launch_app(serial, &bundle_id)
+            })?;
+            channel.live.emit(
+                Kind::AppStarted,
+                &channel.scope,
+                json!({"confirmed": false, "device": serial}),
+            );
             println!("{}", format!("✓ relaunched on {label}").green());
-            Ok(Iteration::Rebuilt)
         }
     }
+    Ok(Iteration::Rebuilt)
+}
+
+fn prepare_launch(channel: &mut Channel, server: &DevServer, build: &Build) -> Result<()> {
+    channel.scope = channel.live.begin_run(build);
+    channel.token = server.expect_run(channel.scope.clone())?;
+    fs::write(channel.live.root.join(".gpui/dev-token"), &channel.token)?;
+    Ok(())
+}
+
+fn observed_step<T>(build: &Build, stage: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    if build.session.stopping.load(Ordering::SeqCst) {
+        bail!("live session is stopping");
+    }
+    build
+        .session
+        .emit(Kind::StageStarted, &build.scope, json!({"stage": stage}));
+    let result = f();
+    build.session.emit(Kind::StageFinished, &build.scope,
+        json!({"stage": stage, "success": result.is_ok(), "error": result.as_ref().err().map(|e| format!("{e:#}"))}));
+    result
 }
 
 /// Asks the running app to save its snapshot for the next session and stores
@@ -298,19 +370,7 @@ fn prepare_restart(project: &Project, server: &DevServer, channel: &mut Channel)
             .unwrap_or_default()
             .as_nanos()
     );
-    server.broadcast(&ServerMessage::PrepareRestart {
-        session: session.clone(),
-    });
-    let saved = server.wait_for(SNAPSHOT_WAIT, |message| {
-        matches!(
-            message,
-            ClientMessage::StateSaved { session: s, .. } if s == &session
-        )
-    });
-    let data = match saved {
-        Some(ClientMessage::StateSaved { data, .. }) => Some(data),
-        _ => None,
-    };
+    let data = server.save_state(&session, SNAPSHOT_WAIT);
     let Some(data) = data else {
         channel.session = None;
         println!(
@@ -478,19 +538,24 @@ fn push_android_assets(
     pushed
 }
 
-/// iOS build for the live loop: structured cargo diagnostics, captured output
-/// for xcodegen/xcodebuild (a tail on failure). `Ok(None)` = build failed.
+/// iOS build with streaming Cargo diagnostics and Xcode output.
+/// `Ok(None)` means the Rust build failed.
 fn build_ios_app_live(
     project: &Project,
     physical: bool,
     udid: &str,
+    build: &Build,
 ) -> Result<Option<std::path::PathBuf>> {
     let rust_target = if physical {
         "aarch64-apple-ios"
     } else {
         "aarch64-apple-ios-sim"
     };
-    ensure_rust_target(rust_target)?;
+    output::step(
+        "rustup.target",
+        Command::new("rustup").args(["target", "add", rust_target]),
+        build,
+    )?;
 
     let mut cargo = Command::new("cargo");
     cargo.current_dir(&project.root).args([
@@ -501,9 +566,8 @@ fn build_ios_app_live(
         "--target",
         rust_target,
     ]);
-    let outcome = error::run_cargo_json(&mut cargo)?;
+    let outcome = error::run_cargo_json(&mut cargo, build, "cargo.build")?;
     if !outcome.success {
-        error::render_errors(&outcome.errors);
         println!(
             "{}",
             "✗ build failed — keeping the current app running".yellow()
@@ -513,11 +577,12 @@ fn build_ios_app_live(
 
     ensure_tool("xcodegen", "Install it with `brew install xcodegen`.")?;
     let ios_dir = project.ios_dir();
-    run_quiet(
+    run_tool(
         "xcodegen generate",
         Command::new("xcodegen")
             .current_dir(&ios_dir)
             .args(["generate", "--spec", "project.yml"]),
+        build,
     )?;
 
     let scheme = project.xcode_target();
@@ -538,7 +603,7 @@ fn build_ios_app_live(
         .arg(&derived_dir)
         .arg("-allowProvisioningUpdates")
         .arg("build");
-    run_quiet("xcodebuild (Debug)", &mut xcodebuild)?;
+    run_tool("xcodebuild (Debug)", &mut xcodebuild, build)?;
 
     let app_path = xcode_app_path(&derived_dir, &scheme, physical, false);
     if !app_path.exists() {
@@ -551,14 +616,18 @@ fn build_ios_app_live(
     Ok(Some(app_path))
 }
 
-/// Android build for the live loop: cargo-ndk and gradle output is captured and
-/// only a tail is shown on failure. `Ok(None)` = build failed.
-fn build_android_apk_live(project: &Project) -> Result<Option<std::path::PathBuf>> {
+/// Android build with Cargo JSON diagnostics and streaming Gradle output.
+/// `Ok(None)` means the Rust build failed.
+fn build_android_apk_live(project: &Project, build: &Build) -> Result<Option<std::path::PathBuf>> {
     ensure_tool(
         "cargo-ndk",
         "Install it with `cargo install cargo-ndk`, then set ANDROID_NDK_HOME.",
     )?;
-    ensure_rust_target("aarch64-linux-android")?;
+    output::step(
+        "rustup.target",
+        Command::new("rustup").args(["target", "add", "aarch64-linux-android"]),
+        build,
+    )?;
 
     let abis = android_abis();
     let mut ndk = Command::new("cargo");
@@ -573,7 +642,9 @@ fn build_android_apk_live(project: &Project) -> Result<Option<std::path::PathBuf
         "-p",
         &project.app_crate(),
     ]);
-    run_quiet(&format!("cargo ndk ({})", abis.join(", ")), &mut ndk)?;
+    if !error::run_cargo_json(&mut ndk, build, "cargo.ndk")?.success {
+        return Ok(None);
+    }
 
     let expected = project
         .android_jni_libs_dir()
@@ -586,11 +657,12 @@ fn build_android_apk_live(project: &Project) -> Result<Option<std::path::PathBuf
         );
     }
 
-    run_quiet(
+    run_tool(
         &format!("gradlew {}", gradle_task(false)),
         Command::new("./gradlew")
             .current_dir(project.android_gradle_dir())
             .arg(gradle_task(false)),
+        build,
     )?;
 
     let apk = apk_path(project, false);
@@ -604,29 +676,10 @@ fn build_android_apk_live(project: &Project) -> Result<Option<std::path::PathBuf
     Ok(Some(apk))
 }
 
-/// Runs an external command with its output captured; on failure prints a tail
-/// instead of streaming everything.
-fn run_quiet(label: &str, cmd: &mut Command) -> Result<()> {
+/// Streams external tool output into the live event store and terminal.
+fn run_tool(label: &str, cmd: &mut Command, build: &Build) -> Result<()> {
     println!("  {} {}", "→".blue(), label);
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to spawn: {label}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(OUTPUT_TAIL_LINES);
-    println!(
-        "  {} {label} failed; last {} line(s):",
-        "✗".red(),
-        lines.len() - start
-    );
-    for line in &lines[start..] {
-        println!("    {line}");
-    }
-    bail!("{label} failed");
+    output::step(label, cmd, build)
 }
 
 /// One build cycle plus coalescing of everything that arrived during it.
@@ -636,40 +689,59 @@ fn run_cycles(
     plan: &Plan,
     channel: &mut Channel,
     server: &DevServer,
-    child: &mut Option<Child>,
+    child: &mut Option<AppProcess>,
     rx: &mpsc::Receiver<Event>,
     last_failed: &mut bool,
 ) -> Result<bool> {
     loop {
-        let failed = match run_iteration(project, plan, channel, server, child) {
+        if channel.live.stopping.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
+        let build = channel.live.begin_build()?;
+        let mut again = false;
+        let failed = match run_iteration(project, plan, channel, server, child, &build) {
             Ok(Iteration::Rebuilt) => {
+                build.finish(true, None);
                 if *last_failed {
                     println!("{}", "✓ build recovered".green());
                 }
                 false
             }
-            Ok(Iteration::BuildFailed) => true,
-            Err(err) => {
-                println!("{}", format!("✗ {err:#}").red());
+            Ok(Iteration::BuildFailed) => {
+                build.finish(false, None);
+                println!(
+                    "{}",
+                    "✗ build failed — keeping the current app running".yellow()
+                );
+                true
+            }
+            Ok(Iteration::Superseded) => {
+                build.superseded();
+                again = true;
+                *last_failed
+            }
+            Err(error) => {
+                build.finish(false, Some(format!("{error:#}")));
+                if channel.scope.build_id == build.scope.build_id {
+                    channel.live.emit(
+                        Kind::AppLaunchFailed,
+                        &channel.scope,
+                        json!({"error": format!("{error:#}")}),
+                    );
+                }
+                println!("{}", format!("✗ {error:#}").red());
                 true
             }
         };
         *last_failed = failed;
-
-        let mut again = false;
-        let mut quit = false;
+        let latest = channel.live.sync_inputs()?;
+        again |= latest != build.scope.revision || channel.overflow.swap(false, Ordering::SeqCst);
+        let mut quit = channel.live.stopping.load(Ordering::SeqCst);
         while let Ok(event) = rx.try_recv() {
             match event {
                 Event::Quit => quit = true,
-                Event::Change | Event::Force => again = true,
-                Event::Assets(paths) => {
-                    // The relaunch above already picked up fresh assets when a
-                    // rebuild happened; only fall back to another rebuild when
-                    // no capable client can hot-reload them.
-                    if !reload_assets(project, plan, server, &paths) {
-                        again = true;
-                    }
-                }
+                Event::Force => again = true,
+                Event::Change | Event::Assets(_) => {}
             }
         }
         if quit {
@@ -678,7 +750,6 @@ fn run_cycles(
         if !again {
             return Ok(false);
         }
-        // Changes landed while building: fall through and rebuild once more.
     }
 }
 
@@ -720,7 +791,7 @@ fn reload_assets(project: &Project, plan: &Plan, server: &DevServer, paths: &[St
     } else {
         println!(
             "{}",
-            format!("[live] reloaded asset(s): {}", pushed.join(", ")).green()
+            format!("[live] sent asset update(s): {}", pushed.join(", ")).green()
         );
     }
     true
@@ -782,60 +853,99 @@ fn resolve_plan(project: &Project, target: &str, flags: &DeviceFlags) -> Result<
 
 pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Result<()> {
     let plan = resolve_plan(project, target, flags)?;
-
-    // Dev channel: a loopback server apps connect back to, for logs, panics
-    // and (in later phases) asset reloads and snapshot hand-off.
-    let server = DevServer::start().context("failed to start the live dev server")?;
+    let target_id = match &plan {
+        Plan::Desktop => format!("desktop:{}", std::env::consts::OS),
+        Plan::Ios { physical, id, .. } => format!(
+            "ios-{}:{id}",
+            if *physical { "device" } else { "simulator" }
+        ),
+        Plan::Android { serial, .. } => format!("android:{serial}"),
+    };
+    let session = Session::start(&project.root, &project.name, &target_id)?;
+    struct EndSession(Arc<Session>);
+    impl Drop for EndSession {
+        fn drop(&mut self) {
+            self.0.end();
+        }
+    }
+    let _end_session = EndSession(session.clone());
+    let _control = ControlServer::start(session.clone())?;
+    let server = DevServer::start_observed(session.clone())?;
     let channel_dir = project.root.join(".gpui");
-    fs::create_dir_all(&channel_dir)?;
     fs::write(channel_dir.join("dev-port"), server.port.to_string())?;
-    fs::write(channel_dir.join("dev-token"), &server.token)?;
+    let overflow = Arc::new(AtomicBool::new(false));
     let mut channel = Channel {
+        live: session.clone(),
+        scope: Scope::default(),
+        overflow: overflow.clone(),
         project: project.name.clone(),
         port: server.port,
         token: server.token.clone(),
         assets_dir: project.root.join(ASSETS_DIR),
         session: None,
     };
+    let (tx, rx) = mpsc::sync_channel::<Event>(64);
+    let interrupt = Arc::downgrade(&session);
+    let interrupt_tx = tx.clone();
+    ctrlc::set_handler(move || {
+        if let Some(session) = interrupt.upgrade() {
+            session.stopping.store(true, Ordering::SeqCst);
+        }
+        let _ = interrupt_tx.try_send(Event::Quit);
+    })
+    .context("installing the live shutdown handler")?;
 
-    let (tx, rx) = mpsc::channel::<Event>();
-
-    // Key commands come in as lines: the terminal buffers input until Enter,
-    // so 'r' and 'q' are documented as "press + Enter" rather than raw keys.
     let keys_tx = tx.clone();
+    let keys_session = Arc::downgrade(&session);
+    let keys_overflow = overflow.clone();
     thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
-            match line.trim() {
-                "r" | "R" => {
-                    if keys_tx.send(Event::Force).is_err() {
-                        break;
-                    }
-                }
+            let event = match line.trim() {
+                "r" | "R" => Event::Force,
                 "q" | "Q" | "quit" | "exit" => {
-                    let _ = keys_tx.send(Event::Quit);
+                    if let Some(session) = keys_session.upgrade() {
+                        session.stopping.store(true, Ordering::SeqCst);
+                    }
+                    let _ = keys_tx.try_send(Event::Quit);
                     break;
                 }
-                _ => {}
+                _ => continue,
+            };
+            if keys_tx.try_send(event).is_err() {
+                keys_overflow.store(true, Ordering::SeqCst);
             }
         }
     });
 
-    let watch_root = project.root.clone();
+    let watch_root = session.root.clone();
+    let watch_session = session.clone();
     let mut debouncer = new_debouncer(
         Duration::from_millis(DEBOUNCE_MS),
         None,
         move |result: DebounceEventResult| {
-            let Ok(events) = result else { return };
-            let mut assets: Vec<String> = Vec::new();
+            let events = match result {
+                Ok(events) => events,
+                Err(errors) => {
+                    watch_session.emit(
+                        Kind::WatchError,
+                        &Scope::default(),
+                        json!({"message": format!("{errors:?}")}),
+                    );
+                    return;
+                }
+            };
+            let mut assets = Vec::new();
             let mut code_change = false;
             for event in events {
-                // Access events (reads, open/close) never change source code.
                 if matches!(event.kind, EventKind::Access(_)) {
                     continue;
                 }
                 for path in &event.paths {
-                    if !should_trigger(path) {
+                    let Ok(relative) = path.strip_prefix(&watch_root) else {
+                        continue;
+                    };
+                    if !should_trigger(relative) {
                         continue;
                     }
                     if let Some(rel) = asset_rel_path(&watch_root, path) {
@@ -845,44 +955,49 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     }
                 }
             }
-            if code_change {
-                let _ = tx.send(Event::Change);
-            } else if !assets.is_empty() {
-                // FSEvents reports one save as several events; pushing and
-                // broadcasting the same path four times is pure noise.
-                assets.sort();
-                assets.dedup();
-                let _ = tx.send(Event::Assets(assets));
+            if !code_change && assets.is_empty() {
+                return;
+            }
+            let previous = watch_session.store.state().desired;
+            match watch_session.sync_inputs() {
+                Ok(revision) if revision == previous => return,
+                Ok(_) => {}
+                Err(error) => {
+                    watch_session.emit(
+                        Kind::WatchError,
+                        &Scope::default(),
+                        json!({"message": format!("{error:#}")}),
+                    );
+                    return;
+                }
+            }
+            assets.sort();
+            assets.dedup();
+            let event = if code_change {
+                Event::Change
+            } else {
+                Event::Assets(assets)
+            };
+            if tx.try_send(event).is_err() {
+                overflow.store(true, Ordering::SeqCst);
             }
         },
-    )
-    .context("failed to create the file watcher")?;
+    )?;
     debouncer
-        .watch(&project.root, RecursiveMode::Recursive)
-        .with_context(|| format!("failed to watch '{}'", project.root.display()))?;
-
+        .watch(&session.root, RecursiveMode::Recursive)
+        .with_context(|| format!("watching {}", session.root.display()))?;
     println!(
-        "\n{}",
-        format!("[live] watching {} (debug builds)", project.root.display()).bold()
+        "\n[live] watching {} (debug builds)",
+        session.root.display()
     );
     println!(
-        "{}",
-        format!(
-            "[live] dev channel on {} (credentials in .gpui/)",
-            channel.addr()
-        )
-        .dimmed()
+        "[live] session {} — query with `gpui dev status --json`",
+        session.id
     );
-    println!(
-        "{}",
-        "[live] type 'r' + Enter to force rebuild, 'q' + Enter to quit\n".dimmed()
-    );
-
-    let mut child: Option<Child> = None;
+    println!("[live] type 'r' + Enter to force rebuild, 'q' + Enter to quit\n");
+    let mut child: Option<AppProcess> = None;
     let mut last_failed = false;
-
-    // The first call builds and launches immediately, then the loop waits.
-    let mut quit_requested = run_cycles(
+    let mut quit = run_cycles(
         project,
         &plan,
         &mut channel,
@@ -891,11 +1006,24 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         &rx,
         &mut last_failed,
     )?;
-    while !quit_requested {
-        match rx.recv_timeout(Duration::from_millis(300)) {
+    while !quit && !session.stopping.load(Ordering::SeqCst) {
+        let event = rx.recv_timeout(Duration::from_millis(100));
+        if channel.overflow.swap(false, Ordering::SeqCst) {
+            quit = run_cycles(
+                project,
+                &plan,
+                &mut channel,
+                &server,
+                &mut child,
+                &rx,
+                &mut last_failed,
+            )?;
+            continue;
+        }
+        match event {
             Ok(Event::Quit) => break,
             Ok(Event::Change) | Ok(Event::Force) => {
-                quit_requested = run_cycles(
+                quit = run_cycles(
                     project,
                     &plan,
                     &mut channel,
@@ -906,8 +1034,17 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                 )?;
             }
             Ok(Event::Assets(paths)) => {
-                if !reload_assets(project, &plan, &server, &paths) {
-                    quit_requested = run_cycles(
+                let sent = reload_assets(project, &plan, &server, &paths);
+                let scope = session.current_run().unwrap_or_default();
+                session.emit(
+                    Kind::AssetsSent,
+                    &scope,
+                    json!({"paths": paths,
+                    "requested_asset_revision": session.store.state().desired.asset_revision,
+                    "handled_without_build": sent, "render_confirmed": false}),
+                );
+                if !sent {
+                    quit = run_cycles(
                         project,
                         &plan,
                         &mut channel,
@@ -918,42 +1055,16 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     )?;
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => report_exited_child(&mut child),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-
-    // Live mode leaves nothing running behind the CLI.
-    if let Some(mut child) = child.take() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    drop(debouncer);
+    drop(child);
+    server.shutdown();
+    session.end();
     println!("{}", "\n[live] stopped".dimmed());
     Ok(())
-}
-
-/// Reports a desktop app that exited on its own (crash or window close) without
-/// waiting for the next rebuild to find out.
-fn report_exited_child(child: &mut Option<Child>) {
-    let Some(running) = child.as_mut() else {
-        return;
-    };
-    match running.try_wait() {
-        Ok(Some(status)) => {
-            child.take();
-            let detail = if status.success() {
-                "exited normally".to_string()
-            } else {
-                format!("exited with {status}")
-            };
-            println!(
-                "{}",
-                format!("[live] app {detail} — save a file or press 'r' to relaunch").yellow()
-            );
-        }
-        Ok(None) => {}
-        Err(_) => {}
-    }
 }
 
 #[cfg(test)]

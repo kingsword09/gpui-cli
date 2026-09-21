@@ -4,6 +4,8 @@
 日期：2026-09-18
 相关文件：`src/commands/run.rs`、`src/commands/build.rs`、`src/main.rs`、`src/template.rs`、`templates/app/src/lib.rs`、`templates/desktop/src/main.rs`
 
+阅读说明：本文第 2 节保留的是实施前的现状，当前实现以代码与 README 为准。面向 agent 的错误订阅、版本关联、截图、语义树和交互验证，见后续提案 [Live 错误反馈与界面观察](DESIGN-agent-live-feedback.md)。
+
 ---
 
 ## 1. 背景与目标
