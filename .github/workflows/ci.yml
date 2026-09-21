@@ -54,6 +54,10 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v3
+        with:
+          # The action defaults to the retired SDK package named "tools".
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - uses: gradle/actions/setup-gradle@v4
       - run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
       - run: cargo build --locked
