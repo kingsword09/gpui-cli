@@ -116,7 +116,7 @@ impl Platform {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ProjectConfig {
     /// Cargo/package identifier, e.g. `delta-mobile`.
     pub name: String,

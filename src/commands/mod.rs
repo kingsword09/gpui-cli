@@ -8,3 +8,4 @@ pub mod info;
 pub mod init;
 pub mod live;
 pub mod run;
+pub mod upgrade;
