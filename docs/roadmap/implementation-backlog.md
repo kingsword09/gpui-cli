@@ -24,7 +24,7 @@
 | P01 | G0 | core | L | F01, T01 | O-05, O-10, O-11, P-03 | in_review |
 | T02 | G1 | core | M | F01 | T-04 | in_review |
 | F02 | G1 | core | L | P01, T02 | C-01, C-02, C-03, C-04, C-05 | planned |
-| T03 | G1 | core | M | T02 | T-04, T-05 | planned |
+| T03 | G1 | core | M | T02 | T-04, T-05 | in_review |
 | T04 | G1 | core | L | T03, F02 | T-06, T-07, C-02 | planned |
 | O01 | G1 | core | M | F02, P01 | O-04, O-05 | planned |
 | O02 | G1 | core | M | F02 | O-06, O-07 | planned |

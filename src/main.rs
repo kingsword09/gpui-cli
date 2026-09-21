@@ -10,6 +10,7 @@ pub mod fixtures;
 pub mod template;
 pub mod template_manifest;
 pub mod toolchain;
+pub mod upgrade;
 
 /// Options shared by `init` and `new`.
 #[derive(clap::Args, Default)]
@@ -191,6 +192,11 @@ pub enum Commands {
     Dev(commands::dev::DevArgs),
     /// Print the project metadata read from gpui.toml
     Info,
+    /// Plan a read-only template upgrade
+    Upgrade {
+        #[command(subcommand)]
+        command: commands::upgrade::UpgradeCommands,
+    },
     /// Generate shell completions
     Completions {
         /// Shell: bash, zsh, fish, powershell, elvish
@@ -246,6 +252,12 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Device { command }) => commands::device::handle_device(command)?,
         Some(Commands::Dev(args)) => commands::dev::handle_dev(args)?,
         Some(Commands::Info) => commands::info::handle_info()?,
+        Some(Commands::Upgrade { command }) => {
+            let exit_code = commands::upgrade::handle_upgrade(command)?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
         Some(Commands::Completions { shell }) => commands::completions::handle_completions(shell)?,
         None => {
             println!(
