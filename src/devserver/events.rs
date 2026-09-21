@@ -559,6 +559,38 @@ impl RollingFile {
     }
 }
 
+/// Every event this session journaled to disk, in seq order.
+///
+/// A follower reads these when the supervisor is already gone: the closing
+/// events are on disk even though the control socket is closed. The journal
+/// rotates, so the earliest events may already be missing.
+pub fn archived(dir: &Path) -> Result<Vec<Event>> {
+    let mut segments = Vec::new();
+    for entry in fs::read_dir(dir)?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("events-") && name.ends_with(".ndjson") {
+            segments.push(entry.path());
+        }
+    }
+    // Segment names are zero-padded, so lexicographic order is seq order.
+    segments.sort();
+    let mut events = Vec::new();
+    for segment in segments {
+        let text = match fs::read_to_string(&segment) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            // A record still being written when the process died is not fatal.
+            Err(_) => continue,
+        };
+        events.extend(
+            text.lines()
+                .filter_map(|line| serde_json::from_str(line).ok()),
+        );
+    }
+    Ok(events)
+}
+
 pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().expect("state directory"))?;
     serde_json::to_writer(&mut file, value)?;

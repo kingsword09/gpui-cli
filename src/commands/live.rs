@@ -154,6 +154,49 @@ fn asset_rel_path(root: &Path, path: &Path) -> Option<String> {
     Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
+/// Path the app is launched from.
+///
+/// Windows locks a running image against replacement, so launching cargo's own
+/// output makes the *next* build fail with "Access is denied" and the loop can
+/// never install a successful rebuild. Each launch therefore runs from a sibling
+/// copy; cargo's output stays replaceable while the app runs. The copy sits beside
+/// it so DLLs and other resources the executable finds next to itself still
+/// resolve. Other platforms launch the built binary directly — this is purely
+/// about the Windows file lock.
+fn launch_path(executable: &Path) -> Result<PathBuf> {
+    if !cfg!(windows) {
+        return Ok(executable.to_owned());
+    }
+    let stem = executable
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app");
+    let extension = executable
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("exe");
+    let path = executable.with_file_name(format!("{stem}-live.{extension}"));
+    // The previous process has just been killed; Windows can take a moment to
+    // release its image, and a scanner may hold the fresh copy briefly.
+    let mut last = None;
+    for _ in 0..20 {
+        match fs::copy(executable, &path) {
+            Ok(_) => return Ok(path),
+            Err(error) => {
+                last = Some(error);
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    Err(last.expect("a failed copy records its error")).with_context(|| {
+        format!(
+            "copying {} to {} (is another instance still running?)",
+            executable.display(),
+            path.display()
+        )
+    })
+}
+
 /// Runs one build + (re)launch cycle. `Ok(BuildFailed)` means a compile failure
 /// was already rendered; infrastructure errors come back as `Err`.
 fn run_iteration(
@@ -185,6 +228,7 @@ fn run_iteration(
             }
             drop(child.take());
             prepare_launch(channel, server, build)?;
+            let executable = launch_path(&executable)?;
             let mut cmd = Command::new(&executable);
             cmd.current_dir(&project.root);
             for (key, value) in channel.env(project) {

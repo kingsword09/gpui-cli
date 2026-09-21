@@ -281,6 +281,14 @@ pub fn request(registration: &Registration, command: Command) -> Result<Reply> {
     Ok(reply)
 }
 
+/// Where a session keeps its journal, raw output and registration file.
+pub fn session_dir(registration: &Registration) -> PathBuf {
+    registration
+        .project_root
+        .join(".gpui/live")
+        .join(&registration.session_id)
+}
+
 pub fn discover(
     root: &Path,
     selected: Option<&str>,

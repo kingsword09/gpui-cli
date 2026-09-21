@@ -229,6 +229,7 @@ fn main() {
         .as_u64()
         .unwrap();
     let follow_file = fixture.dir.path().join("follow.ndjson");
+    let follow_err = fixture.dir.path().join("follow.err");
     let mut follower = Command::new(env!("CARGO_BIN_EXE_gpui"))
         .current_dir(&fixture.root)
         .args([
@@ -240,7 +241,7 @@ fn main() {
             &seq.to_string(),
         ])
         .stdout(fs::File::create(&follow_file).unwrap())
-        .stderr(Stdio::null())
+        .stderr(fs::File::create(&follow_err).unwrap())
         .spawn()
         .unwrap();
     // Wait until it has received a new event, proving the subscription attached.
@@ -263,7 +264,11 @@ fn main() {
         }
         thread::sleep(Duration::from_millis(25));
     };
-    assert!(status.success());
+    assert!(
+        status.success(),
+        "event follower failed: {}",
+        fs::read_to_string(&follow_err).unwrap_or_default()
+    );
     let lines = fs::read_to_string(&follow_file).unwrap();
     let values: Vec<Value> = lines
         .lines()

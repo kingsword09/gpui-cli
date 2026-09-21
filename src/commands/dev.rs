@@ -1,5 +1,5 @@
 use crate::devserver::control::{self, ApiError, Command, Reply};
-use crate::devserver::events::{Page, SCHEMA_VERSION};
+use crate::devserver::events::{self, Event, Kind, Page, SCHEMA_VERSION};
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use serde_json::json;
@@ -103,8 +103,39 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
                 },
             },
         };
-        let reply = control::request(&registration, command)
-            .map_err(|e| ApiError::new("connection_failed", e.to_string()))?;
+        let reply = match control::request(&registration, command) {
+            Ok(reply) => reply,
+            // The supervisor is gone. If the session actually ended, following
+            // ends here: its closing events are already journaled on disk, so
+            // replay the ones the follower has not seen rather than reporting a
+            // transport failure. A live supervisor that merely dropped one
+            // connection still reports the error.
+            Err(error) if follow => {
+                let archived =
+                    events::archived(&control::session_dir(&registration)).unwrap_or_default();
+                if !archived
+                    .iter()
+                    .any(|event| event.kind == Kind::SessionEnded)
+                {
+                    return Err(ApiError::new("connection_failed", error.to_string()));
+                }
+                // Same contract as a live long poll: a cursor whose events were
+                // already rotated away is reported, never silently skipped.
+                if let Some(first) = archived.iter().find(|event| event.seq > after)
+                    && first.seq > after + 1
+                {
+                    return Err(ApiError { code: "cursor_expired".into(), message: "Events were evicted. Read status/diagnostics and resume from earliest_seq - 1, or from the status seq.".into(),
+                        details: Some(json!({"session_id": registration.session_id, "earliest_seq": first.seq,
+                            "last_seq": archived.last().map(|event| event.seq).unwrap_or(0),
+                            "requested_after": after, "schema_version": SCHEMA_VERSION})) });
+                }
+                for event in archived.iter().filter(|event| event.seq > after) {
+                    emit_event(event, args.json)?;
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(ApiError::new("connection_failed", error.to_string())),
+        };
         if !reply.ok {
             return Err(reply
                 .error
@@ -120,11 +151,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             }
             if follow {
                 for event in &page.events {
-                    if args.json {
-                        write_value(event, false)?;
-                    } else {
-                        write_line(&format!("{} {:?} {}", event.seq, event.kind, event.data))?;
-                    }
+                    emit_event(event, args.json)?;
                 }
                 after = page.next_seq;
                 if page.ended && !page.has_more {
@@ -139,6 +166,15 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             write_value(&reply.result, true)?;
         }
         return Ok(());
+    }
+}
+
+/// One event, in the shape `--json` (one JSON object per line) or human mode emits.
+fn emit_event(event: &Event, json: bool) -> std::result::Result<(), ApiError> {
+    if json {
+        write_value(event, false)
+    } else {
+        write_line(&format!("{} {:?} {}", event.seq, event.kind, event.data))
     }
 }
 

@@ -152,6 +152,55 @@ fn journal_rotation_removes_old_segments_and_references_locate_records() {
 }
 
 #[test]
+fn a_follower_recovers_the_closing_events_from_the_journal_after_the_supervisor_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    for index in 0..3 {
+        session.emit(
+            Kind::AppLog,
+            &Scope::default(),
+            json!({"level": "info", "message": format!("before {index}")}),
+        );
+    }
+    // A follower that already consumed these is only waiting for what comes next.
+    let after = session.store.state().seq;
+    session.end();
+    // The supervisor is gone, but the journal still says the session ended — the
+    // follower replays exactly the unseen tail instead of failing the command.
+    let archived = super::events::archived(&session.dir).unwrap();
+    assert_eq!(
+        archived.last().map(|event| event.kind),
+        Some(Kind::SessionEnded)
+    );
+    let unseen: Vec<u64> = archived
+        .iter()
+        .filter(|event| event.seq > after)
+        .map(|event| event.seq)
+        .collect();
+    assert_eq!(unseen, vec![after + 1]);
+}
+
+#[test]
+fn journal_segments_are_read_in_seq_order_across_rotation() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    // Rotate: the event journal holds 8 segments, so this rolls several times.
+    for index in 0..9000 {
+        session.emit(
+            Kind::AppLog,
+            &Scope::default(),
+            json!({"level": "info", "message": format!("message {index}")}),
+        );
+    }
+    let archived = super::events::archived(&session.dir).unwrap();
+    assert!(archived.len() > 100, "expected a multi-segment journal");
+    assert!(
+        archived.windows(2).all(|pair| pair[0].seq < pair[1].seq),
+        "segments must be concatenated in seq order"
+    );
+}
+
+#[test]
 fn control_authentication_selection_and_long_poll_are_independent_of_builds() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
