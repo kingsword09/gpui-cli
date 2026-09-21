@@ -6,6 +6,7 @@ pub mod commands;
 mod config;
 pub mod device;
 pub mod devserver;
+pub mod fixtures;
 pub mod template;
 
 /// Options shared by `init` and `new`.
