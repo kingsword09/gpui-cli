@@ -5,7 +5,9 @@
 .vscode/
 
 # Live-mode dev channel credentials (`gpui run --live`)
-.gpui/
+.gpui/*
+!.gpui/
+!.gpui/template-manifest.json
 
 # iOS
 mobile/ios/build/

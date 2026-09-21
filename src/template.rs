@@ -1,11 +1,38 @@
 use anyhow::{Context, Result, bail};
 use include_dir::{Dir, include_dir};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use crate::template_manifest::{
+    BaselineInfo, DependencyInfo, GeneratorInfo, ManifestFile, ManifestGroup, TemplateManifest,
+};
 
 /// Full built-in template tree, embedded at compile time.
 static TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
+
+const LEGACY_GITIGNORE: &str = r#"/target
+**/*.rs.bk
+.DS_Store
+.idea/
+.vscode/
+
+# Live-mode dev channel credentials (\`gpui run --live\`)
+.gpui/
+
+# iOS
+mobile/ios/build/
+mobile/ios/*.xcodeproj/
+mobile/ios/*.xcworkspace/
+
+# Android
+mobile/android/gradle/.gradle/
+mobile/android/gradle/build/
+mobile/android/gradle/app/build/
+mobile/android/gradle/local.properties
+"#;
 
 /// GPUI is published as a family of `gpui-pre-*` crates that must all share one
 /// version. These constants centralise the pins the generated projects use.
@@ -17,6 +44,8 @@ pub const GPUI_KIT_REV: &str = "9504b4658d57c59024a664f22b5ab55e070a24b4";
 pub const GPUI_MOBILE_GIT: &str = "https://github.com/longbridge/gpui-mobile.git";
 /// Mobile platform revision validated with the pinned GPUI family and renderer patch.
 pub const GPUI_MOBILE_REV: &str = "b4e3ab258f271003b7d4b874f7c5ebe3a77fac60";
+/// Stable identifier for the template layout represented by this CLI.
+pub const TEMPLATE_VERSION: &str = "agent-native-v1-draft";
 /// Package name of the crate at the root of `GPUI_MOBILE_GIT`.
 pub const GPUI_MOBILE_PKG: &str = "gpui-pre-mobile";
 
@@ -536,8 +565,250 @@ fn render_file(template_path: &str, dest: &Path, vars: &HashMap<&str, String>) -
     Ok(())
 }
 
+fn sha256(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn is_legacy_gitignore(bytes: &[u8]) -> bool {
+    let escaped_tick = format!("{}{}", '\\', '\u{60}');
+    String::from_utf8_lossy(bytes).replace('\u{60}', &escaped_tick) == LEGACY_GITIGNORE
+}
+
+fn slash_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn collect_embedded_files(
+    dir: &Dir<'_>,
+    prefix: &Path,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<()> {
+    for file in dir.files() {
+        let name = file
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("embedded template file {:?} has no name", file.path()))?;
+        out.push((slash_path(&prefix.join(name)), file.contents().to_vec()));
+    }
+    for sub in dir.dirs() {
+        let name = sub
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("embedded template directory {:?} has no name", sub.path()))?;
+        collect_embedded_files(sub, &prefix.join(name), out)?;
+    }
+    Ok(())
+}
+
+fn current_template_content_id() -> &'static str {
+    static CONTENT_ID: OnceLock<String> = OnceLock::new();
+    CONTENT_ID.get_or_init(|| {
+        let mut files = Vec::new();
+        collect_embedded_files(&TEMPLATES, Path::new(""), &mut files)
+            .expect("embedded template paths must be valid");
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut digest = Sha256::new();
+        for (path, bytes) in files {
+            digest.update(path.as_bytes());
+            digest.update([0]);
+            digest.update(bytes);
+            digest.update([0]);
+        }
+        format!("sha256:{:x}", digest.finalize())
+    })
+}
+
+fn template_path_for_output(relative: &Path) -> Option<String> {
+    let value = slash_path(relative);
+    let direct = match value.as_str() {
+        "Cargo.toml" => Some("workspace.Cargo.toml"),
+        "gpui.toml" => Some("gpui.toml"),
+        ".gitignore" => Some("gitignore"),
+        "README.md" => Some("README.md"),
+        "THIRD_PARTY_NOTICES.md" => Some("THIRD_PARTY_NOTICES.md"),
+        "crates/app/Cargo.toml" => Some("app/Cargo.toml.template"),
+        "crates/app/src/lib.rs" => Some("app/src/lib.rs"),
+        "crates/app/src/live.rs" => Some("app/src/live.rs"),
+        "crates/desktop/Cargo.toml" => Some("desktop/Cargo.toml.template"),
+        "crates/desktop/src/main.rs" => Some("desktop/src/main.rs"),
+        "mobile/android/.cargo/config.toml" => Some("cargo-config.toml"),
+        _ => None,
+    };
+    if let Some(path) = direct {
+        return Some(path.to_string());
+    }
+    value
+        .strip_prefix("assets/")
+        .map(|suffix| format!("assets/{suffix}"))
+        .or_else(|| {
+            value
+                .strip_prefix("licenses/")
+                .map(|suffix| format!("licenses/{suffix}"))
+        })
+        .or_else(|| {
+            value
+                .strip_prefix("mobile/ios/")
+                .map(|suffix| format!("ios/{suffix}"))
+        })
+        .or_else(|| {
+            value
+                .strip_prefix("mobile/android/")
+                .map(|suffix| format!("android/{suffix}"))
+        })
+        .or_else(|| {
+            value
+                .strip_prefix("vendor/")
+                .map(|suffix| format!("android-compat/{suffix}"))
+        })
+}
+
+fn manifest_group_for(relative: &Path, config: &ProjectConfig) -> &'static str {
+    let value = slash_path(relative);
+    if value.starts_with("mobile/ios/") {
+        "ios-host"
+    } else if value.starts_with("mobile/android/")
+        || value.starts_with("vendor/")
+        || (value == "Cargo.toml" && config.has_android())
+    {
+        "android-renderer"
+    } else if value.starts_with("crates/desktop/") {
+        "desktop-host"
+    } else if value.starts_with("crates/app/") || value.starts_with("assets/") {
+        "app-runtime"
+    } else if value == "Cargo.toml" || value == "gpui.toml" {
+        "project-config"
+    } else {
+        "project-support"
+    }
+}
+
+fn manifest_groups() -> Vec<ManifestGroup> {
+    [
+        ("android-renderer", true),
+        ("app-runtime", true),
+        ("desktop-host", true),
+        ("ios-host", true),
+        ("project-config", true),
+        ("project-support", true),
+    ]
+    .into_iter()
+    .map(|(id, atomic)| ManifestGroup {
+        id: id.to_string(),
+        atomic,
+    })
+    .collect()
+}
+
+pub(crate) fn build_template_manifest(
+    root: &Path,
+    config: &ProjectConfig,
+) -> Result<TemplateManifest> {
+    let mut paths = Vec::new();
+    collect_files(root, &mut paths)?;
+
+    let mut files = Vec::new();
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .with_context(|| format!("cannot relativize generated file {}", path.display()))?;
+        if slash_path(relative) == crate::template_manifest::MANIFEST_RELATIVE_PATH {
+            continue;
+        }
+        let template_path = template_path_for_output(relative).with_context(|| {
+            format!(
+                "generated file '{}' has no embedded template source",
+                relative.display()
+            )
+        })?;
+        let bytes = fs::read(&path)?;
+        files.push(ManifestFile {
+            path: slash_path(relative),
+            group: manifest_group_for(relative, config).to_string(),
+            base_sha256: sha256(&bytes),
+            template_path,
+        });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let mut platforms: Vec<String> = config
+        .targets
+        .iter()
+        .map(|platform| platform.as_str().to_string())
+        .collect();
+    platforms.sort();
+    platforms.dedup();
+
+    let content_id = current_template_content_id().to_string();
+    Ok(TemplateManifest {
+        schema_version: crate::template_manifest::SCHEMA_VERSION,
+        generator: GeneratorInfo {
+            name: env!("CARGO_PKG_NAME").to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        template_version: TEMPLATE_VERSION.to_string(),
+        platforms,
+        dependencies: DependencyInfo {
+            gpui_pre_version: GPUI_PRE_VERSION.to_string(),
+            gpui_kit_revision: GPUI_KIT_REV.to_string(),
+            gpui_mobile_revision: GPUI_MOBILE_REV.to_string(),
+        },
+        baseline: BaselineInfo {
+            template_version: TEMPLATE_VERSION.to_string(),
+            content_id,
+            distribution: "embedded-version-package".to_string(),
+        },
+        groups: manifest_groups(),
+        files,
+    })
+}
+
+pub fn read_template_baseline(
+    config: &ProjectConfig,
+    manifest: &TemplateManifest,
+    relative: &Path,
+) -> Result<Vec<u8>> {
+    let content_id = current_template_content_id();
+    if manifest.template_version != TEMPLATE_VERSION
+        || manifest.baseline.template_version != TEMPLATE_VERSION
+        || manifest.baseline.content_id != content_id
+    {
+        bail!(
+            "baseline_unavailable: template '{}' is not embedded in this CLI",
+            manifest.template_version
+        );
+    }
+    let relative_string = slash_path(relative);
+    let Some(entry) = manifest.file(&relative_string) else {
+        bail!(
+            "baseline_unavailable: '{}' is not managed by the template",
+            relative_string
+        );
+    };
+    let scratch = tempfile::tempdir().context("cannot prepare template baseline")?;
+    scaffold_files(scratch.path(), config)?;
+    let path = scratch.path().join(relative);
+    let bytes = fs::read(&path)
+        .with_context(|| format!("baseline file '{}' is unavailable", relative_string))?;
+    if sha256(&bytes) != entry.base_sha256 {
+        bail!(
+            "baseline_unavailable: embedded content for '{}' does not match its manifest hash",
+            relative_string
+        );
+    }
+    Ok(bytes)
+}
+
 /// Writes the project described by `config` into `target_dir`.
 pub fn scaffold(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
+    scaffold_files(target_dir, config)?;
+    let manifest = build_template_manifest(target_dir, config)?;
+    manifest.write(target_dir)
+}
+
+fn scaffold_files(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
     if config.targets.is_empty() {
         bail!("at least one target platform is required");
     }
@@ -653,13 +924,14 @@ pub fn add_platforms(
     let scratch = tempfile::tempdir().context("cannot prepare platform update")?;
     let previous = scratch.path().join("previous");
     let updated = scratch.path().join("updated");
-    scaffold(&previous, before)?;
-    scaffold(&updated, after)?;
+    scaffold_files(&previous, before)?;
+    scaffold_files(&updated, after)?;
 
     let mut files = Vec::new();
     collect_files(&updated, &mut files)?;
     files.sort();
     let mut writes = Vec::new();
+    let mut base_updates = std::collections::BTreeSet::new();
     for source in files {
         let relative = source.strip_prefix(&updated)?;
         let old_file = previous.join(relative);
@@ -670,11 +942,19 @@ pub fn add_platforms(
         } else {
             None
         };
-        if old.as_ref() == Some(&desired) {
-            // This file does not need an update; keep any user customization.
+        let current = if destination.exists() {
+            Some(
+                fs::read(&destination)
+                    .with_context(|| format!("cannot read existing '{}'", relative.display()))?,
+            )
+        } else {
+            None
+        };
+        let legacy_gitignore = slash_path(relative) == ".gitignore"
+            && current.as_deref().is_some_and(is_legacy_gitignore);
+        if old.as_ref() == Some(&desired) && !legacy_gitignore {
             continue;
         }
-
         let mut parent = target_dir.to_path_buf();
         for component in relative.components() {
             parent.push(component);
@@ -685,24 +965,17 @@ pub fn add_platforms(
                 );
             }
         }
-        let current = if destination.exists() {
-            Some(
-                fs::read(&destination)
-                    .with_context(|| format!("cannot read existing '{}'", relative.display()))?,
-            )
-        } else {
-            None
-        };
         if current.as_ref() == Some(&desired) {
             continue;
         }
-        if current != old {
+        if current != old && !legacy_gitignore {
             bail!(
                 "Adding platforms would overwrite changes in '{}'. \
                  No project files were changed. Merge the platform files manually.",
                 relative.display()
             );
         }
+        base_updates.insert(slash_path(relative));
         writes.push((source, destination));
     }
 
@@ -715,6 +988,44 @@ pub fn add_platforms(
             set_executable(&destination)?;
         }
     }
+
+    let previous_manifest = build_template_manifest(&previous, before)?;
+    let updated_manifest = build_template_manifest(&updated, after)?;
+    let existing_manifest = TemplateManifest::read(target_dir)?;
+    if let Some(existing) = &existing_manifest
+        && (existing.template_version != TEMPLATE_VERSION
+            || existing.baseline.content_id != updated_manifest.baseline.content_id)
+    {
+        bail!(
+            "baseline_unavailable: cannot add platforms to template '{}'",
+            existing.template_version
+        );
+    }
+
+    let mut manifest = existing_manifest.unwrap_or(previous_manifest);
+    manifest.generator = updated_manifest.generator.clone();
+    manifest.template_version = updated_manifest.template_version.clone();
+    manifest.platforms = updated_manifest.platforms.clone();
+    manifest.dependencies = updated_manifest.dependencies.clone();
+    manifest.baseline = updated_manifest.baseline.clone();
+    manifest.groups = updated_manifest.groups.clone();
+    for desired in &updated_manifest.files {
+        if let Some(current) = manifest
+            .files
+            .iter_mut()
+            .find(|entry| entry.path == desired.path)
+        {
+            if base_updates.contains(&desired.path) {
+                *current = desired.clone();
+            }
+        } else {
+            manifest.files.push(desired.clone());
+        }
+    }
+    manifest
+        .files
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    manifest.write(target_dir)?;
     Ok(())
 }
 
@@ -767,6 +1078,96 @@ mod tests {
             undefined.is_empty(),
             "templates use placeholders with no variable: {undefined:?}"
         );
+    }
+
+    #[test]
+    fn scaffold_writes_trackable_template_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(vec![Platform::MacOs, Platform::Android]);
+        scaffold(dir.path(), &config).unwrap();
+
+        let manifest = TemplateManifest::read(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            manifest.schema_version,
+            crate::template_manifest::SCHEMA_VERSION
+        );
+        assert_eq!(manifest.platforms, vec!["android", "macos"]);
+        assert!(manifest.file("crates/app/src/lib.rs").is_some());
+        assert!(
+            manifest
+                .file("vendor/gpui-pre-wgpu-0.3.5/src/shaders.wgsl")
+                .is_some()
+        );
+
+        let baseline =
+            read_template_baseline(&config, &manifest, Path::new("crates/app/src/lib.rs")).unwrap();
+        assert_eq!(
+            baseline,
+            fs::read(dir.path().join("crates/app/src/lib.rs")).unwrap()
+        );
+
+        let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains(".gpui/*"));
+        assert!(gitignore.contains("!.gpui/template-manifest.json"));
+        let manifest_text = fs::read_to_string(TemplateManifest::path(dir.path())).unwrap();
+        assert!(!manifest_text.contains("dev-token"));
+    }
+
+    #[test]
+    fn adding_platform_updates_manifest_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = config(vec![Platform::MacOs]);
+        let after = config(vec![Platform::MacOs, Platform::Android]);
+        scaffold(dir.path(), &before).unwrap();
+
+        add_platforms(dir.path(), &before, &after).unwrap();
+
+        let manifest = TemplateManifest::read(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest.platforms, vec!["android", "macos"]);
+        let renderer = manifest
+            .file("vendor/gpui-pre-wgpu-0.3.5/src/shaders.wgsl")
+            .unwrap();
+        assert_eq!(renderer.group, "android-renderer");
+        assert!(dir.path().join("mobile/android/gradle/gradlew").exists());
+    }
+
+    #[test]
+    fn customized_shared_file_is_not_registered_as_a_new_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = config(vec![Platform::MacOs]);
+        let after = config(vec![Platform::MacOs, Platform::Android]);
+        scaffold(dir.path(), &before).unwrap();
+        let manifest_before = TemplateManifest::read(dir.path()).unwrap().unwrap();
+        let view = dir.path().join("crates/app/src/lib.rs");
+        fs::write(&view, "// user customization\n").unwrap();
+
+        let error = add_platforms(dir.path(), &before, &after).unwrap_err();
+        assert!(error.to_string().contains("lib.rs"));
+        assert_eq!(
+            TemplateManifest::read(dir.path()).unwrap().unwrap(),
+            manifest_before
+        );
+        assert_eq!(fs::read_to_string(view).unwrap(), "// user customization\n");
+        assert!(!dir.path().join("mobile/android").exists());
+    }
+
+    #[test]
+    fn adding_platform_migrates_legacy_gitignore_before_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = config(vec![Platform::MacOs]);
+        let after = config(vec![Platform::MacOs, Platform::Android]);
+        scaffold(dir.path(), &before).unwrap();
+        fs::remove_file(TemplateManifest::path(dir.path())).unwrap();
+
+        let escaped_tick = format!("{}{}", '\\', '\u{60}');
+        let old_gitignore = LEGACY_GITIGNORE.replace(&escaped_tick, "\u{60}");
+        fs::write(dir.path().join(".gitignore"), old_gitignore).unwrap();
+
+        add_platforms(dir.path(), &before, &after).unwrap();
+
+        let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains("!.gpui/template-manifest.json"));
+        assert!(TemplateManifest::path(dir.path()).is_file());
     }
 
     fn collect_placeholders(dir: &Dir<'_>, out: &mut std::collections::BTreeSet<String>) {
