@@ -12,6 +12,9 @@ pub struct Project {
     pub root: PathBuf,
     pub name: String,
     pub title: String,
+    /// Targets recorded by `gpui init`; doctor uses these when no target is
+    /// supplied explicitly.
+    pub targets: Vec<String>,
     /// Per-project device defaults from the `[run]` section.
     pub defaults: inventory::Defaults,
 }
@@ -41,11 +44,13 @@ impl Project {
         let manifest = crate::config::Manifest::parse(&manifest)?;
         let name = manifest.app.name;
         let title = manifest.app.title.unwrap_or_else(|| name.clone());
+        let targets = manifest.app.targets;
         let defaults = manifest.run;
         Ok(Self {
             root,
             name,
             title,
+            targets,
             defaults,
         })
     }
@@ -595,6 +600,7 @@ mod tests {
             root: root.into(),
             name: "probe".into(),
             title: "Probe".into(),
+            targets: vec!["macos".into()],
             defaults: Default::default(),
         }
     }

@@ -1,6 +1,6 @@
 # 设计契约：工具链、开发支持库、模板升级与构建效率
 
-状态：拟议，未实现。任务：T01–T06、F02。基线：`6d091b6`。
+状态：T01 的规则、probe 和 CLI 已实现；T02–T06、F02 仍拟议。基线：`6d091b6`。
 
 ## 1. 工程基础的目标
 
@@ -8,7 +8,7 @@
 
 ## 2. Doctor v2：检查实际可用性 T01
 
-拟议命令：
+当前命令（T01）：
 
 ```bash
 gpui doctor --target desktop --json
@@ -16,7 +16,7 @@ gpui doctor --target ios --sim "iPhone 17 Pro@26.2" --json
 gpui doctor --target android --device emulator-5554 --json
 ```
 
-未指定 target 时读取项目已选择的平台；不在项目内则报告 host基础信息和各平台 availability。只有选中目标的 required检查失败才导致非零退出；可选工具缺失单列 warning。
+未指定 target 时读取项目已选择的平台；不在项目内则生成 host-only desktop 报告。只有选中目标的 required检查失败才导致非零退出；可选工具缺失单列 warning。T01 的报告和 probe 已经共享 schema-v2 模型，完整平台矩阵仍需后续验收。
 
 ### 2.1 检查项
 

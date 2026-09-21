@@ -20,7 +20,7 @@
 | ID | 门槛 | 优先级 | 规模 | 前置任务 | 验收 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
 | F01 | G0 | core | M | — | P-01, P-02 | in_review |
-| T01 | G0 | core | M | — | T-01, T-02, T-03 | planned |
+| T01 | G0 | core | M | — | T-01, T-02, T-03 | in_review |
 | P01 | G0 | core | L | F01, T01 | O-05, O-10, O-11, P-03 | planned |
 | T02 | G1 | core | M | F01 | T-04 | planned |
 | F02 | G1 | core | L | P01, T02 | C-01, C-02, C-03, C-04, C-05 | planned |
@@ -105,6 +105,11 @@ PR 拆分：夹具/基线契约 → span 和有界记录 → 重跑脚本及报�
 PR 拆分：纯报告/规则测试 → 实际 probes/超时 → CLI 和真实 SDK 验证。验收 T-01/T-02/T-03。输出 `doctor.json`、探测命令与 host matrix。
 
 回退：保持原人类命令可用，去掉有问题的 probe 并标 unknown。禁止顺手安装 SDK、接受许可或修改签名。
+
+当前代码交付了 schema-v2 target-aware doctor、required/optional 退出规则、bounded
+command probe、项目默认 target、显式 iOS/Android 设备选择和 JSON/人类共用报告模型。
+完整 SDK/JDK/AGP/build-tools 组合、真实多设备矩阵和敏感日志筛除仍需平台验收后再改为
+`done`。
 
 ### P01 · macOS GPUI 观察 PoC
 

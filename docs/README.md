@@ -23,6 +23,17 @@ python3 scripts/live-baseline.py --gpui target/debug/gpui --output /tmp/gpui-f01
 `spans.ndjson`、`summary.json` 以及保留原始命令的 `commands.ndjson`。完整 UI、设备和
 GPU 能力仍以对应验收用例为准。
 
+T01 的 doctor 已支持按目标诊断并输出 schema-v2 JSON：
+
+```bash
+gpui doctor --target desktop --json
+gpui doctor --target ios --sim "iPhone 17 Pro@26.2" --json
+gpui doctor --target android --device emulator-5554 --json
+```
+
+它只读探测工具链和已选择设备，不自动安装 SDK、接受许可或修改签名；完整真实设备
+矩阵仍属于后续验收。
+
 ## 专项设计
 
 | 主题 | 设计 |

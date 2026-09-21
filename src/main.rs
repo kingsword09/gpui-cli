@@ -154,8 +154,8 @@ pub enum Commands {
         #[command(flatten)]
         args: InitArgs,
     },
-    /// Check the Rust toolchain and mobile build prerequisites
-    Doctor,
+    /// Check the selected target's Rust/toolchain prerequisites
+    Doctor(commands::doctor::DoctorArgs),
     /// Run the app: desktop, ios or android
     Run {
         /// Target: desktop, ios, android
@@ -225,7 +225,12 @@ fn main() -> anyhow::Result<()> {
                 bundle_id: args.bundle_id,
             })?
         }
-        Some(Commands::Doctor) => commands::doctor::handle_doctor()?,
+        Some(Commands::Doctor(args)) => {
+            let exit_code = commands::doctor::handle_doctor(args)?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
         Some(Commands::Run {
             target,
             release,

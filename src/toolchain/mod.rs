@@ -5,6 +5,7 @@ pub mod report;
 pub mod requirements;
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -30,5 +31,14 @@ impl Target {
             Self::Ios => "ios",
             Self::Android => "android",
         }
+    }
+}
+
+impl FromStr for Target {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+            .ok_or_else(|| format!("unknown target '{value}' (expected desktop, ios or android)"))
     }
 }
