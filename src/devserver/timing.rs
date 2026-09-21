@@ -354,6 +354,30 @@ mod tests {
     }
 
     #[test]
+    fn dropped_span_is_recorded_as_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let timing = Arc::new(Timing::new(dir.path(), "session-cancel").unwrap());
+        let span = timing.start(
+            "cargo.compile",
+            &Scope::default(),
+            None,
+            serde_json::json!({}),
+        );
+        drop(span);
+        let line = fs::read_to_string(dir.path().join("spans.ndjson")).unwrap();
+        let record: SpanRecord = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(record.status, "cancelled");
+        assert!(record.duration_ns.is_some());
+    }
+
+    #[test]
+    fn stable_stage_names_keep_install_and_launch_separate() {
+        assert_eq!(stage_name("ios.install"), "device.install");
+        assert_eq!(stage_name("android.launch"), "app.launch");
+        assert_eq!(stage_name("cargo.build"), "cargo.compile");
+    }
+
+    #[test]
     fn span_log_is_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let timing = Arc::new(Timing::new(dir.path(), "session-3").unwrap());

@@ -22,6 +22,12 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo x check-design-docs
 
+  baseline-driver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/live-baseline.py --self-test
+
   desktop-template:
     runs-on: macos-latest
     timeout-minutes: 30
