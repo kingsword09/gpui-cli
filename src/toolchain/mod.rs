@@ -1,5 +1,6 @@
 //! Target-aware toolchain requirements and machine-readable doctor reports.
 
+pub mod probe;
 pub mod report;
 pub mod requirements;
 
