@@ -18,6 +18,12 @@ Use `target/debug/gpui init` to generate a project in a temporary directory.
 Check the selected targets, run their builds with the relevant platform
 toolchains, and inspect the resulting applications when changing native assets.
 
+CI also checks generated macOS projects in debug and release mode, and builds
+the generated Android host in both modes with multiple ABIs. These checks use
+titles containing quotes, XML characters and backslashes to exercise template
+escaping. Android host packaging is separate from GPUI's Rust cross-compilation
+and device execution; it does not validate native runtime behavior.
+
 ## Artwork
 
 The default window mark is original project artwork. Its palette and geometry

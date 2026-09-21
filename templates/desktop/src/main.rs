@@ -1,4 +1,4 @@
-//! Desktop entry point for {{APP_TITLE}}.
+//! Desktop entry point for {{APP_TITLE_COMMENT}}.
 //!
 //! `gpui_kit::application()` opens the native platform (AppKit / Win32 /
 //! Wayland or X11) and `gpui_kit::init` wires up the component layer.

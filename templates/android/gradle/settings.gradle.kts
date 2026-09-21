@@ -1,4 +1,4 @@
-// Android host for {{APP_TITLE}}.
+// Android host for {{APP_TITLE_COMMENT}}.
 
 pluginManagement {
     repositories {

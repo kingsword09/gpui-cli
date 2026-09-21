@@ -6,6 +6,17 @@ plugins {
     id("com.android.application")
 }
 
+// The CLI passes the same ABI list to cargo-ndk and Gradle. The environment
+// fallback also supports building this host directly with the wrapper.
+val gpuiAbis = providers.gradleProperty("gpui.abis")
+    .orElse(providers.environmentVariable("GPUI_ANDROID_ABIS"))
+    .orElse("arm64-v8a")
+    .get().split(',').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+require(gpuiAbis.isNotEmpty()) { "At least one GPUI Android ABI is required" }
+require(gpuiAbis.all { it in setOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") }) {
+    "Unsupported GPUI Android ABI: $gpuiAbis"
+}
+
 android {
     namespace = "dev.gpui.mobile"
     compileSdk = 34
@@ -34,7 +45,7 @@ android {
         // Tell NativeActivity which .so to load.
         // This must match the cdylib / example output name.
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            abiFilters += gpuiAbis
         }
 
         // Forward the library name to the manifest via a placeholder.

@@ -31,6 +31,14 @@ notify-debouncer-full = "0.6"
 getrandom = "0.4"
 sha2 = "0.10"
 ctrlc = { version = "3.5", features = ["termination"] }
+toml = "1.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+process-wrap = { version = "10.0", default-features = false, features = ["std", "job-object"] }
+
+[dev-dependencies]
+roxmltree = "0.21"
+syn = { version = "2.0", features = ["full"] }

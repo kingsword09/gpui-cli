@@ -20,8 +20,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::error;
 use super::run::{
-    IosTarget, Project, android_abis, apk_path, bundle_id_of, bundle_id_of_android, ensure_tool,
-    gradle_task, resolve_ios_target, xcode_app_path, xcode_destination,
+    IosTarget, Project, android_abis, android_rust_target, apk_path, bundle_id_of,
+    bundle_id_of_android, check_android_libraries, ensure_tool, gradle_command, gradle_task,
+    resolve_ios_target, xcode_app_path, xcode_destination,
 };
 use crate::device::{self, DeviceFlags, android, inventory, ios};
 use crate::devserver::DevServer;
@@ -623,13 +624,14 @@ fn build_android_apk_live(project: &Project, build: &Build) -> Result<Option<std
         "cargo-ndk",
         "Install it with `cargo install cargo-ndk`, then set ANDROID_NDK_HOME.",
     )?;
-    output::step(
-        "rustup.target",
-        Command::new("rustup").args(["target", "add", "aarch64-linux-android"]),
-        build,
-    )?;
-
-    let abis = android_abis();
+    let abis = android_abis()?;
+    for abi in &abis {
+        output::step(
+            "rustup.target",
+            Command::new("rustup").args(["target", "add", android_rust_target(abi)?]),
+            build,
+        )?;
+    }
     let mut ndk = Command::new("cargo");
     ndk.current_dir(&project.root).args(["ndk"]);
     for abi in &abis {
@@ -646,32 +648,15 @@ fn build_android_apk_live(project: &Project, build: &Build) -> Result<Option<std
         return Ok(None);
     }
 
-    let expected = project
-        .android_jni_libs_dir()
-        .join(&abis[0])
-        .join(format!("lib{}.so", project.app_lib_name()));
-    if !expected.exists() {
-        bail!(
-            "cargo-ndk finished but '{}' is missing. Check the `[lib] name` in crates/app/Cargo.toml.",
-            expected.display()
-        );
-    }
+    check_android_libraries(project, &abis)?;
 
     run_tool(
         &format!("gradlew {}", gradle_task(false)),
-        Command::new("./gradlew")
-            .current_dir(project.android_gradle_dir())
-            .arg(gradle_task(false)),
+        &mut gradle_command(project, false, &abis),
         build,
     )?;
 
-    let apk = apk_path(project, false);
-    if !apk.exists() {
-        bail!(
-            "Gradle finished but no APK was found at '{}'.",
-            apk.display()
-        );
-    }
+    let apk = apk_path(project, false)?;
     println!("  {} {}", "✓".green(), apk.display());
     Ok(Some(apk))
 }

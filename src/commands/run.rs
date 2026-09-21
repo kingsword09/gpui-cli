@@ -38,9 +38,10 @@ impl Project {
             );
         }
         let manifest = fs::read_to_string(&manifest_path)?;
-        let name = read_string(&manifest, "name").context("gpui.toml has no `name`")?;
-        let title = read_string(&manifest, "title").unwrap_or_else(|| name.clone());
-        let defaults = inventory::Defaults::from_manifest(&manifest);
+        let manifest = crate::config::Manifest::parse(&manifest)?;
+        let name = manifest.app.name;
+        let title = manifest.app.title.unwrap_or_else(|| name.clone());
+        let defaults = manifest.run;
         Ok(Self {
             root,
             name,
@@ -91,20 +92,6 @@ impl Project {
     pub fn android_jni_libs_dir(&self) -> PathBuf {
         self.android_gradle_dir().join("app/src/main/jniLibs")
     }
-}
-
-fn read_string(contents: &str, key: &str) -> Option<String> {
-    let section = contents.split("[app]").nth(1)?;
-    let section = section.split("\n[").next()?;
-    for line in section.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(key)
-            && let Some(rest) = rest.trim_start().strip_prefix('=')
-        {
-            return Some(rest.trim().trim_matches('"').to_string());
-        }
-    }
-    None
 }
 
 fn run_step(label: &str, cmd: &mut Command) -> Result<()> {
@@ -352,13 +339,32 @@ pub(crate) fn bundle_id_of(project: &Project) -> String {
 // ── Android ──────────────────────────────────────────────────────────────────
 
 /// ABIs to build, overridable with `GPUI_ANDROID_ABIS` (comma separated).
-pub(crate) fn android_abis() -> Vec<String> {
-    std::env::var("GPUI_ANDROID_ABIS")
-        .unwrap_or_else(|_| "arm64-v8a".to_string())
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+pub(crate) fn android_abis() -> Result<Vec<String>> {
+    parse_android_abis(&std::env::var("GPUI_ANDROID_ABIS").unwrap_or_else(|_| "arm64-v8a".into()))
+}
+
+fn parse_android_abis(value: &str) -> Result<Vec<String>> {
+    let mut abis = Vec::new();
+    for abi in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        android_rust_target(abi)?;
+        if !abis.iter().any(|existing| existing == abi) {
+            abis.push(abi.to_owned());
+        }
+    }
+    if abis.is_empty() {
+        bail!("GPUI_ANDROID_ABIS must contain at least one ABI (e.g. arm64-v8a or x86_64)");
+    }
+    Ok(abis)
+}
+
+pub(crate) fn android_rust_target(abi: &str) -> Result<&'static str> {
+    match abi {
+        "arm64-v8a" => Ok("aarch64-linux-android"),
+        "armeabi-v7a" => Ok("armv7-linux-androideabi"),
+        "x86" => Ok("i686-linux-android"),
+        "x86_64" => Ok("x86_64-linux-android"),
+        _ => bail!("Unknown Android ABI '{abi}'. Use arm64-v8a, armeabi-v7a, x86 or x86_64."),
+    }
 }
 
 pub(crate) fn gradle_task(release: bool) -> &'static str {
@@ -369,11 +375,93 @@ pub(crate) fn gradle_task(release: bool) -> &'static str {
     }
 }
 
-pub(crate) fn apk_path(project: &Project, release: bool) -> PathBuf {
+pub(crate) fn apk_path(project: &Project, release: bool) -> Result<PathBuf> {
     let variant = if release { "release" } else { "debug" };
-    project
+    let dir = project
         .android_gradle_dir()
-        .join(format!("app/build/outputs/apk/{variant}/app-{variant}.apk"))
+        .join(format!("app/build/outputs/apk/{variant}"));
+    let metadata_path = dir.join("output-metadata.json");
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        elements: Vec<Element>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Element {
+        #[serde(rename = "outputFile")]
+        output_file: String,
+    }
+    let metadata: Metadata =
+        serde_json::from_slice(&fs::read(&metadata_path).with_context(|| {
+            format!("reading Gradle APK metadata at {}", metadata_path.display())
+        })?)
+        .context("invalid Gradle APK metadata")?;
+    let [element] = metadata.elements.as_slice() else {
+        bail!(
+            "Expected one APK in {}; split APK outputs are not supported",
+            metadata_path.display()
+        );
+    };
+    let name = Path::new(&element.output_file);
+    if element.output_file.contains(['/', '\\'])
+        || name.file_name() != Some(name.as_os_str())
+        || name.extension().is_none_or(|ext| ext != "apk")
+    {
+        bail!(
+            "Invalid APK filename in Gradle metadata: {}",
+            element.output_file
+        );
+    }
+    let apk = dir.join(name);
+    if !apk.is_file() {
+        bail!(
+            "Gradle reported an APK but it is missing: {}",
+            apk.display()
+        );
+    }
+    Ok(apk)
+}
+
+fn ensure_installable_apk(apk: &Path) -> Result<()> {
+    if apk
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with("-unsigned.apk"))
+    {
+        bail!(
+            "{} is unsigned and cannot be installed. Configure a release signingConfig in mobile/android/gradle/app/build.gradle.kts, or use `gpui run android` for a debug build. `gpui build android --release` can produce an unsigned APK for signing separately.",
+            apk.display()
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn gradle_command(project: &Project, release: bool, abis: &[String]) -> Command {
+    let wrapper = if cfg!(windows) {
+        "gradlew.bat"
+    } else {
+        "gradlew"
+    };
+    let mut cmd = Command::new(project.android_gradle_dir().join(wrapper));
+    cmd.current_dir(project.android_gradle_dir())
+        .arg(gradle_task(release))
+        .arg(format!("-Pgpui.abis={}", abis.join(",")))
+        .env("GPUI_ANDROID_ABIS", abis.join(","));
+    cmd
+}
+
+pub(crate) fn check_android_libraries(project: &Project, abis: &[String]) -> Result<()> {
+    for abi in abis {
+        let expected = project
+            .android_jni_libs_dir()
+            .join(abi)
+            .join(format!("lib{}.so", project.app_lib_name()));
+        if !expected.is_file() {
+            bail!(
+                "cargo-ndk finished but '{}' is missing. Check the `[lib] name` in crates/app/Cargo.toml.",
+                expected.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Compiles the Rust `cdylib` into `jniLibs`, then assembles the APK.
@@ -385,9 +473,10 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
         "cargo-ndk",
         "Install it with `cargo install cargo-ndk`, then set ANDROID_NDK_HOME.",
     )?;
-    ensure_rust_target("aarch64-linux-android")?;
-
-    let abis = android_abis();
+    let abis = android_abis()?;
+    for abi in &abis {
+        ensure_rust_target(android_rust_target(abi)?)?;
+    }
 
     // 1. Rust shared library via cargo-ndk.
     let mut ndk = Command::new("cargo");
@@ -407,32 +496,15 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     }
     run_step(&format!("cargo ndk ({})", abis.join(", ")), &mut ndk)?;
 
-    let expected = project
-        .android_jni_libs_dir()
-        .join(&abis[0])
-        .join(format!("lib{}.so", project.app_lib_name()));
-    if !expected.exists() {
-        bail!(
-            "cargo-ndk finished but '{}' is missing. Check the `[lib] name` in crates/app/Cargo.toml.",
-            expected.display()
-        );
-    }
+    check_android_libraries(project, &abis)?;
 
     // 2. Gradle: package the APK.
     run_step(
         &format!("gradlew {}", gradle_task(release)),
-        Command::new("./gradlew")
-            .current_dir(project.android_gradle_dir())
-            .arg(gradle_task(release)),
+        &mut gradle_command(project, release, &abis),
     )?;
 
-    let apk = apk_path(project, release);
-    if !apk.exists() {
-        bail!(
-            "Gradle finished but no APK was found at '{}'.",
-            apk.display()
-        );
-    }
+    let apk = apk_path(project, release)?;
     println!("  {} {}", "✓".green(), apk.display());
     Ok(apk)
 }
@@ -441,12 +513,13 @@ pub fn run_android(project: &Project, flags: &DeviceFlags, release: bool) -> Res
     let chosen =
         device::inventory::resolve_device(DevicePlatform::Android, flags, &project.defaults, None)?;
 
+    let apk = build_android_apk(project, release)?;
+    ensure_installable_apk(&apk)?;
     let target = device::inventory::ensure_running(chosen)?;
     let serial = target.serial().context(
         "The selected Android device has no adb serial; re-run `gpui device list` to check it.",
     )?;
 
-    let apk = build_android_apk(project, release)?;
     let bundle_id = bundle_id_of_android(project);
 
     println!("  {} installing on {}", "→".blue(), target.label());
@@ -510,5 +583,108 @@ pub fn handle_run(
                 None => "",
             }
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(root: &Path) -> Project {
+        Project {
+            root: root.into(),
+            name: "probe".into(),
+            title: "Probe".into(),
+            defaults: Default::default(),
+        }
+    }
+
+    fn metadata(project: &Project, name: &str) -> PathBuf {
+        let dir = project
+            .android_gradle_dir()
+            .join("app/build/outputs/apk/release");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("output-metadata.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "elements": [{"outputFile": name}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        dir.join(name)
+    }
+
+    #[test]
+    fn release_apk_uses_gradle_metadata_and_requires_signing_to_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project(dir.path());
+        let unsigned = metadata(&project, "app-release-unsigned.apk");
+        fs::write(&unsigned, "apk fixture").unwrap();
+        assert_eq!(apk_path(&project, true).unwrap(), unsigned);
+        assert!(
+            ensure_installable_apk(&unsigned)
+                .unwrap_err()
+                .to_string()
+                .contains("signingConfig")
+        );
+
+        let signed = metadata(&project, "custom-release.apk");
+        fs::write(&signed, "apk fixture").unwrap();
+        assert_eq!(apk_path(&project, true).unwrap(), signed);
+        assert!(ensure_installable_apk(&signed).is_ok());
+    }
+
+    #[test]
+    fn apk_metadata_rejects_missing_files_and_escaping_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project(dir.path());
+        metadata(&project, "absent.apk");
+        assert!(
+            apk_path(&project, true)
+                .unwrap_err()
+                .to_string()
+                .contains("missing")
+        );
+        for name in ["../outside.apk", "..\\outside.apk", "/outside.apk"] {
+            metadata(&project, name);
+            assert!(
+                apk_path(&project, true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Invalid APK filename")
+            );
+        }
+    }
+
+    #[test]
+    fn android_abis_are_validated_and_all_libraries_are_required() {
+        let abis = parse_android_abis(" arm64-v8a, x86_64,arm64-v8a ").unwrap();
+        assert_eq!(abis, ["arm64-v8a", "x86_64"]);
+        assert_eq!(
+            android_rust_target("x86_64").unwrap(),
+            "x86_64-linux-android"
+        );
+        assert!(parse_android_abis(" , ").is_err());
+        assert!(parse_android_abis("aarch64").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let project = project(dir.path());
+        let lib = project
+            .android_jni_libs_dir()
+            .join("arm64-v8a/libprobe_app.so");
+        fs::create_dir_all(lib.parent().unwrap()).unwrap();
+        fs::write(lib, "library fixture").unwrap();
+        assert!(
+            check_android_libraries(&project, &abis)
+                .unwrap_err()
+                .to_string()
+                .contains("x86_64")
+        );
+        let command = gradle_command(&project, false, &abis);
+        assert!(
+            command
+                .get_args()
+                .any(|arg| arg == "-Pgpui.abis=arm64-v8a,x86_64")
+        );
     }
 }

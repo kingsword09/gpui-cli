@@ -361,3 +361,98 @@ fn compiler_diagnostics_arrive_before_exit_and_capture_both_pipes() {
             .any(|e| e.kind == Kind::Output && e.data["stream"] == "stderr")
     );
 }
+
+// Also runs as a subprocess to reproduce a leader exiting with a helper
+// still holding both inherited output pipes. No shell/platform tools needed.
+#[test]
+#[allow(clippy::zombie_processes)] // The supervisor under test must own cleanup.
+fn process_tree_fixture() {
+    match std::env::var("GPUI_PROCESS_FIXTURE").as_deref() {
+        Ok("helper") => thread::sleep(Duration::from_secs(10)),
+        Ok("parent") => {
+            process_tree_command("helper").spawn().unwrap();
+            println!("parent stdout before exit");
+            eprintln!("parent stderr before exit");
+            std::process::exit(7);
+        }
+        _ => {}
+    }
+}
+
+fn process_tree_command(role: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "devserver::tests::process_tree_fixture",
+            "--nocapture",
+        ])
+        .env("GPUI_PROCESS_FIXTURE", role);
+    command
+}
+
+#[test]
+fn build_completion_cleans_up_helpers_holding_output_pipes() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let build = session.begin_build().unwrap();
+    let start = Instant::now();
+    let outcome = super::output::run(
+        &mut process_tree_command("parent"),
+        &build,
+        "fixture",
+        false,
+    )
+    .unwrap();
+    assert!(!outcome.success);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "waited for the helper instead of cleaning it up"
+    );
+    let state = session.store.state();
+    assert!(
+        state.build.unwrap().last_output["stderr"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("parent stderr")
+    );
+    let finished = session
+        .store
+        .events(0, Duration::ZERO)
+        .events
+        .into_iter()
+        .find(|event| event.kind == Kind::StageFinished)
+        .unwrap();
+    assert_eq!(finished.data["exit_code"], 7);
+}
+
+#[test]
+fn app_exit_and_drop_do_not_wait_for_orphaned_helpers() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let build = session.begin_build().unwrap();
+    let scope = session.begin_run(&build);
+    let start = Instant::now();
+    let app = super::output::AppProcess::spawn(
+        &mut process_tree_command("parent"),
+        session.clone(),
+        scope,
+    )
+    .unwrap();
+    wait_until(|| {
+        session
+            .store
+            .state()
+            .running
+            .is_some_and(|run| run.process == "exited")
+    });
+    assert_eq!(
+        session.store.state().running.unwrap().exit.unwrap()["exit_code"],
+        7
+    );
+    drop(app);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "app cleanup waited for the helper"
+    );
+}
