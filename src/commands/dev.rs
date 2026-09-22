@@ -59,12 +59,14 @@ pub fn handle_dev(args: DevArgs) -> Result<()> {
             }
             if args.json {
                 let result = write_value(
-                    &Reply::error(
+                    &Reply::failure(
                         args.session.as_deref().unwrap_or(""),
-                        ApiError {
+                        control::next_request_id("cli.error"),
+                        gpui_dev_protocol::V2Error {
                             code: error.code.clone(),
                             message: error.message.clone(),
                             details: error.details,
+                            retryable: false,
                         },
                     ),
                     false,
@@ -82,6 +84,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
     let root =
         control::project_root().map_err(|e| ApiError::new("invalid_project", e.to_string()))?;
     let registration = control::discover(&root, args.session.as_deref())?;
+    let request_id = control::next_request_id("dev");
     let (mut after, timeout, follow) = match args.command {
         DevCommand::Events {
             after,
@@ -103,7 +106,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
                 },
             },
         };
-        let reply = match control::request(&registration, command) {
+        let reply = match control::request(&registration, &request_id, command) {
             Ok(reply) => reply,
             // The supervisor is gone. If the session actually ended, following
             // ends here: its closing events are already journaled on disk, so
@@ -139,6 +142,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         if !reply.ok {
             return Err(reply
                 .error
+                .map(Into::into)
                 .unwrap_or_else(|| ApiError::new("request_failed", "Control request failed")));
         }
         if matches!(args.command, DevCommand::Events { .. }) {

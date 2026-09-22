@@ -44,11 +44,11 @@ fn connect(server: &DevServer, token: &str) -> TcpStream {
 }
 
 #[test]
-fn registration_advertises_supported_schema_versions() {
+fn registration_advertises_current_control_schema() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
     let server = ControlServer::start(session).unwrap();
-    assert_eq!(server.registration.supported_schema_versions, vec![1]);
+    assert_eq!(server.registration.schema_version, 2);
 }
 
 fn send(socket: &mut TcpStream, message: &ClientMessage) {
@@ -219,13 +219,14 @@ fn control_authentication_selection_and_long_poll_are_independent_of_builds() {
     let server = ControlServer::start(session.clone()).unwrap();
     let mut wrong = server.registration.clone();
     wrong.token = "wrong".into();
-    let reply = control::request(&wrong, Command::Status).unwrap();
+    let reply = control::request(&wrong, "test.status", Command::Status).unwrap();
     assert_eq!(reply.error.unwrap().code, "unauthorized");
     let registration = server.registration.clone();
     let after = session.store.state().seq;
     let waiting = thread::spawn(move || {
         control::request(
             &registration,
+            "test.events",
             Command::Events {
                 after,
                 timeout_ms: 5000,
@@ -233,7 +234,7 @@ fn control_authentication_selection_and_long_poll_are_independent_of_builds() {
         )
         .unwrap()
     });
-    let status = control::request(&server.registration, Command::Status).unwrap();
+    let status = control::request(&server.registration, "test.status", Command::Status).unwrap();
     assert_eq!(status.result.unwrap()["build"]["status"], "building");
     session.emit(
         Kind::Diagnostic,
