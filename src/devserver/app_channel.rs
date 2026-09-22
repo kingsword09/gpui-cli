@@ -272,16 +272,22 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    let hello =
-        protocol::read_frame(&mut stream).and_then(|p| protocol::decode::<ClientMessage>(&p));
-    let Ok(ClientMessage::Hello {
-        proto,
-        token,
-        project,
-        pid,
-        platform,
-        asset_reload,
-    }) = hello
+    let hello = protocol::read_frame(&mut stream).and_then(|payload| {
+        let metadata = protocol::decode::<protocol::HelloMetadata>(&payload).unwrap_or_default();
+        let hello = protocol::decode::<ClientMessage>(&payload)?;
+        Ok((hello, metadata))
+    });
+    let Ok((
+        ClientMessage::Hello {
+            proto,
+            token,
+            project,
+            pid,
+            platform,
+            asset_reload,
+        },
+        metadata,
+    )) = hello
     else {
         return;
     };
@@ -358,7 +364,10 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
         Kind::AppConnected,
         &scope,
         json!({"project": project, "platform": platform, "pid": pid,
-        "asset_reload": asset_reload, "connection_id": id}),
+        "asset_reload": asset_reload, "connection_id": id,
+        "runtime_version": metadata.runtime_version.as_deref().map(|value| clip(value, 128)),
+        "gpui_version": metadata.gpui_version.as_deref().map(|value| clip(value, 64)),
+        "capabilities": metadata.capabilities.iter().take(16).map(|value| clip(value, 64)).collect::<Vec<_>>()}),
     );
     if let Some(span) = &connect_span {
         span.finish("ok", None);
