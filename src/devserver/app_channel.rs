@@ -285,9 +285,6 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
     else {
         return;
     };
-    if proto != PROTO_VERSION {
-        return;
-    }
     let scope = {
         let expected = shared.expected.lock().unwrap_or_else(|e| e.into_inner());
         match expected.as_ref() {
@@ -304,6 +301,15 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
             _ => return,
         }
     };
+    if proto != PROTO_VERSION {
+        let _ = protocol::encode(&ServerMessage::HelloError {
+            code: "unsupported_version".to_owned(),
+            message: format!("app protocol {proto} is not supported by this supervisor"),
+            supported_proto: PROTO_VERSION,
+        })
+        .and_then(|payload| protocol::write_frame(&mut stream, &payload));
+        return;
+    }
     let connect_span = shared.session.as_ref().map(|session| {
         session.start_span(
             "app.connect",
@@ -512,6 +518,36 @@ mod tests {
         let ok: ServerMessage = protocol::decode(&reply).unwrap();
         assert!(matches!(ok, ServerMessage::HelloOk { proto: 1 }));
         drop(stream);
+    }
+
+    #[test]
+    fn valid_token_with_unknown_protocol_gets_an_upgrade_error() {
+        let server = DevServer::start().unwrap();
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let hello = protocol::encode(&ClientMessage::Hello {
+            proto: PROTO_VERSION + 1,
+            token: server.token.clone(),
+            project: "test".to_string(),
+            pid: 1,
+            platform: "test".to_string(),
+            asset_reload: false,
+        })
+        .unwrap();
+        protocol::write_frame(&mut stream, &hello).unwrap();
+
+        let reply = protocol::read_frame(&mut stream).unwrap();
+        let error: ServerMessage = protocol::decode(&reply).unwrap();
+        assert!(matches!(
+            error,
+            ServerMessage::HelloError {
+                code,
+                supported_proto,
+                ..
+            } if code == "unsupported_version" && supported_proto == PROTO_VERSION
+        ));
     }
 
     #[test]
