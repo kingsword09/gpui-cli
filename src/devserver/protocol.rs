@@ -52,6 +52,14 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     /// Reply to a valid `hello`.
     HelloOk { proto: u32 },
+    /// The token was valid, but this supervisor cannot speak the requested
+    /// app-channel protocol. Authentication failures never receive this
+    /// detail.
+    HelloError {
+        code: String,
+        message: String,
+        supported_proto: u32,
+    },
     /// An asset file changed on disk; the app should drop its cache entry.
     AssetChanged { path: String },
     /// The new bytes for an asset (base64), used for platforms whose app
@@ -136,6 +144,19 @@ mod tests {
         .unwrap();
         let text = String::from_utf8(payload).unwrap();
         assert!(text.starts_with("{\"type\":\"log\""));
+    }
+
+    #[test]
+    fn unsupported_protocol_replies_are_structured() {
+        let payload = encode(&ServerMessage::HelloError {
+            code: "unsupported_version".into(),
+            message: "upgrade required".into(),
+            supported_proto: PROTO_VERSION,
+        })
+        .unwrap();
+        let text = String::from_utf8(payload).unwrap();
+        assert!(text.contains("\"type\":\"hello_error\""));
+        assert!(text.contains("\"supported_proto\":1"));
     }
 }
 
