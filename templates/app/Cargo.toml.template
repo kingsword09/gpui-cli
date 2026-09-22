@@ -9,6 +9,11 @@ name = "{{APP_LIB_NAME}}"
 # The plain `lib` target keeps the crate usable from the desktop binary.
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+default = []
+gpui-dev = []
+gpui-profile = []
+
 [dependencies]
 gpui.workspace = true
 gpui-kit.workspace = true

@@ -5,6 +5,12 @@
 
 use gpui::*;
 
+#[cfg(all(feature = "gpui-dev", feature = "gpui-profile"))]
+compile_error!("features `gpui-dev` and `gpui-profile` cannot be enabled together");
+
+#[cfg(all(feature = "gpui-dev", not(debug_assertions)))]
+compile_error!("feature `gpui-dev` is debug-only; use a debug build");
+
 #[cfg(debug_assertions)]
 pub mod live;
 
@@ -15,9 +21,9 @@ pub mod live;
 /// credentials into the app's internal files dir (apps have no environment to
 /// inherit there).
 pub fn init_live(config_file: Option<&std::path::Path>) {
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "gpui-dev"))]
     live::init(config_file);
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(all(debug_assertions, feature = "gpui-dev")))]
     let _ = config_file;
 }
 
@@ -25,7 +31,7 @@ pub fn init_live(config_file: Option<&std::path::Path>) {
 /// evicts the affected images from GPUI's cache so the next render reloads
 /// them from disk without a rebuild. Call once from the app's run closure.
 pub fn pump_live_assets(cx: &mut App) {
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "gpui-dev"))]
     {
         cx.spawn(async move |cx| {
             loop {
@@ -57,8 +63,25 @@ pub fn pump_live_assets(cx: &mut App) {
         })
         .detach();
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(all(debug_assertions, feature = "gpui-dev")))]
     let _ = cx;
+}
+
+/// Returns the live asset source when `gpui-dev` is explicitly enabled.
+/// Normal debug builds retain an empty source and therefore no dev channel.
+#[cfg(debug_assertions)]
+pub fn dev_asset_source(
+    extra_root: Option<std::path::PathBuf>,
+) -> live::DevAssetSource {
+    #[cfg(feature = "gpui-dev")]
+    {
+        live::dev_asset_source(extra_root)
+    }
+    #[cfg(not(feature = "gpui-dev"))]
+    {
+        let _ = extra_root;
+        live::disabled_asset_source()
+    }
 }
 
 /// Root view of the application.
@@ -73,9 +96,9 @@ pub struct MainView {
 /// Snapshot bytes from the previous process, when building with live support.
 /// Release builds have no `live` module — they always start cold.
 fn restored_state() -> Option<String> {
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, feature = "gpui-dev"))]
     let restored = crate::live::take_restored_state();
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(all(debug_assertions, feature = "gpui-dev")))]
     let restored = None;
     restored
 }

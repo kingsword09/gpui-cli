@@ -1,8 +1,8 @@
 # 设计契约：工具链、开发支持库、模板升级与构建效率
 
 状态：T01 的规则、probe 和 CLI 已实现；T02 已实现 manifest/嵌入基线记录；
-T03 已实现只读三方 plan；T04 已开始 journal/recovery 核心；
-T05、T06、F02 仍拟议。基线：`6d091b6`。
+T03 已实现只读三方 plan；T04 已实现 journal/recovery 的多阶段子集；F02 已开始
+feature/release 边界子集；协议/runtime 拆分、T05、T06 仍拟议。基线：`6d091b6`。
 
 ## 1. 工程基础的目标
 

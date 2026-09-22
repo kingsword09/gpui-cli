@@ -1,6 +1,7 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态：全部任务为 `planned`，本文不是已实现功能列表。基线：`6d091b6`；日期：2026-09-21。
+状态：任务表反映当前实现进度；F02、T04 已进入 `in_progress`，本文不是已完成
+功能列表。基线：`6d091b6`；日期：2026-09-21。
 
 入口：[总路线](../ROADMAP-agent-native-development.md)。验收编号的完整步骤见 [验收矩阵](acceptance-matrix.md)，接口语义以各 [专项设计](../ROADMAP-agent-native-development.md) 为准。
 
@@ -23,7 +24,7 @@
 | T01 | G0 | core | M | — | T-01, T-02, T-03 | in_review |
 | P01 | G0 | core | L | F01, T01 | O-05, O-10, O-11, P-03 | in_review |
 | T02 | G1 | core | M | F01 | T-04 | in_review |
-| F02 | G1 | core | L | P01, T02 | C-01, C-02, C-03, C-04, C-05 | planned |
+| F02 | G1 | core | L | P01, T02 | C-01, C-02, C-03, C-04, C-05 | in_progress |
 | T03 | G1 | core | M | T02 | T-04, T-05 | in_review |
 | T04 | G1 | core | L | T03, F02 | T-06, T-07, C-02 | in_progress |
 | O01 | G1 | core | M | F02, P01 | O-04, O-05 | planned |

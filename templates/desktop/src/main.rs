@@ -17,7 +17,7 @@ fn main() {
     // the asset-reload capability the CLI relies on.
     #[cfg(debug_assertions)]
     let application = gpui_kit::application()
-        .with_assets({{APP_LIB_NAME}}::live::dev_asset_source(None));
+        .with_assets({{APP_LIB_NAME}}::dev_asset_source(None));
     #[cfg(not(debug_assertions))]
     let application = gpui_kit::application();
 

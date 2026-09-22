@@ -232,6 +232,11 @@ pub fn dev_asset_source(extra_root: Option<std::path::PathBuf>) -> DevAssetSourc
     DevAssetSource { roots }
 }
 
+/// Asset source used when a debug build does not explicitly enable gpui-dev.
+pub fn disabled_asset_source() -> DevAssetSource {
+    DevAssetSource { roots: Vec::new() }
+}
+
 impl DevAssetSource {
     /// `img("assets/x.png")` keys carry the `assets/` prefix, but every root
     /// already *is* the assets dir — strip it before joining.

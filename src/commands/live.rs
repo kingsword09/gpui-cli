@@ -212,8 +212,13 @@ fn run_iteration(
     match plan {
         Plan::Desktop => {
             let mut cmd = Command::new("cargo");
-            cmd.current_dir(&project.root)
-                .args(["build", "-p", &project.desktop_crate()]);
+            cmd.current_dir(&project.root).args([
+                "build",
+                "-p",
+                &project.desktop_crate(),
+                "--features",
+                "gpui-dev",
+            ]);
             let outcome = error::run_cargo_json(&mut cmd, build, "cargo.build")?;
             if !outcome.success {
                 return Ok(Iteration::BuildFailed);
@@ -582,6 +587,8 @@ fn build_ios_app_live(
         &project.app_crate(),
         "--target",
         rust_target,
+        "--features",
+        "gpui-dev",
     ]);
     let outcome = error::run_cargo_json(&mut cargo, build, "cargo.build")?;
     if !outcome.success {
@@ -659,6 +666,8 @@ fn build_android_apk_live(project: &Project, build: &Build) -> Result<Option<std
         "build",
         "-p",
         &project.app_crate(),
+        "--features",
+        "gpui-dev",
     ]);
     if !error::run_cargo_json(&mut ndk, build, "cargo.ndk")?.success {
         return Ok(None);
