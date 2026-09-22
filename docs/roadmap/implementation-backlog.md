@@ -25,7 +25,7 @@
 | T02 | G1 | core | M | F01 | T-04 | in_review |
 | F02 | G1 | core | L | P01, T02 | C-01, C-02, C-03, C-04, C-05 | planned |
 | T03 | G1 | core | M | T02 | T-04, T-05 | in_review |
-| T04 | G1 | core | L | T03, F02 | T-06, T-07, C-02 | planned |
+| T04 | G1 | core | L | T03, F02 | T-06, T-07, C-02 | in_progress |
 | O01 | G1 | core | M | F02, P01 | O-04, O-05 | planned |
 | O02 | G1 | core | M | F02 | O-06, O-07 | planned |
 | O03 | G1 | core | M | F02 | O-08, O-12, C-05 | planned |

@@ -3,6 +3,8 @@
 //! T03 deliberately stops at a plan. It never writes a project file, updates
 //! a manifest, or acquires an upgrade lock; those are T04 responsibilities.
 
+pub mod transaction;
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
