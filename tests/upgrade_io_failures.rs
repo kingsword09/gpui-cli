@@ -23,6 +23,16 @@ fn run(root: &Path, args: &[&str], io_failure: Option<&str>) -> Output {
     command.output().unwrap()
 }
 
+fn run_validation_failure(root: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_gpui"))
+        .current_dir(root)
+        .args(args)
+        .env("GPUI_UPGRADE_VALIDATION_FAILURE", "1")
+        .env_remove("GPUI_UPGRADE_IO_FAILURE")
+        .output()
+        .unwrap()
+}
+
 fn assert_success(output: &Output, context: &str) {
     assert!(
         output.status.success(),
@@ -179,4 +189,80 @@ fn storage_and_permission_failures_roll_back_real_multifile_apply() {
         let journal = fs::read_to_string(transactions[0].path().join("journal.json")).unwrap();
         assert!(journal.contains("\"state\": \"rolled_back\""));
     }
+}
+
+#[test]
+fn validation_failure_rolls_back_real_multifile_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("validation-probe");
+    let project_string = project.to_str().unwrap();
+    let init = run(
+        dir.path(),
+        &[
+            "init",
+            "validation-probe",
+            "--path",
+            project_string,
+            "--targets",
+            "macos",
+            "--bundle-id",
+            "com.example.validationprobe",
+        ],
+        None,
+    );
+    assert_success(&init, "init");
+
+    let legacy_plan = run(
+        &project,
+        ["upgrade", "plan", "--to", LEGACY_TEMPLATE_VERSION, "--json"].as_slice(),
+        None,
+    );
+    assert_success(&legacy_plan, "legacy target plan");
+    let legacy_json: Value = serde_json::from_slice(&legacy_plan.stdout).unwrap();
+    convert_project_to_legacy(
+        &project,
+        legacy_json["target"]["content_id"].as_str().unwrap(),
+    );
+
+    let plan = run(
+        &project,
+        [
+            "upgrade",
+            "plan",
+            "--to",
+            CURRENT_TEMPLATE_VERSION,
+            "--json",
+        ]
+        .as_slice(),
+        None,
+    );
+    assert_success(&plan, "upgrade plan");
+    let plan_json: Value = serde_json::from_slice(&plan.stdout).unwrap();
+    let plan_id = plan_json["plan_id"].as_str().unwrap();
+    let before = snapshot(&project);
+
+    let apply = run_validation_failure(
+        &project,
+        ["upgrade", "apply", "--plan", plan_id, "--json"].as_slice(),
+    );
+    assert!(!apply.status.success());
+    let stderr = String::from_utf8_lossy(&apply.stderr);
+    assert!(
+        stderr.contains("injected_validation_failure"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("recovery_state=RolledBack"),
+        "stderr={stderr}"
+    );
+    assert_eq!(snapshot(&project), before);
+    assert!(!project.join(".gpui/upgrade/upgrade.lock").exists());
+
+    let transactions = fs::read_dir(project.join(".gpui/upgrade/transactions"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(transactions.len(), 1);
+    let journal = fs::read_to_string(transactions[0].path().join("journal.json")).unwrap();
+    assert!(journal.contains("\"state\": \"rolled_back\""));
 }
