@@ -360,6 +360,13 @@ fn validate_result(
     target: &TemplateManifest,
     platforms: &[Platform],
 ) -> Result<ValidationReport> {
+    if std::env::var("GPUI_UPGRADE_VALIDATION_FAILURE")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        bail!("injected_validation_failure");
+    }
     let current = TemplateManifest::read(root)?.context("manifest missing after apply")?;
     if current != *target {
         bail!("manifest validation failed after apply");
