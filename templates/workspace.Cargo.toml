@@ -20,9 +20,9 @@ panic = "unwind"
 # iOS/Android builds deliberately avoid the desktop-only platform crate.
 [workspace.dependencies]
 gpui = { package = "gpui-pre", version = "={{GPUI_PRE_VERSION}}" }
-gpui-kit = { git = "{{GPUI_KIT_GIT}}", rev = "{{GPUI_KIT_REV}}", default-features = false, features = ["component"] }
+gpui-kit = { version = "={{GPUI_KIT_VERSION}}", git = "{{GPUI_KIT_GIT}}", rev = "{{GPUI_KIT_REV}}", default-features = false, features = ["component"] }
 # Root crate of the gpui-mobile repository; the `package` key is required
 # because the repository is named differently from the crate inside it.
-gpui-mobile = { package = "{{GPUI_MOBILE_PKG}}", git = "{{GPUI_MOBILE_GIT}}", rev = "{{GPUI_MOBILE_REV}}" }
+gpui-mobile = { package = "{{GPUI_MOBILE_PKG}}", version = "={{GPUI_MOBILE_VERSION}}", git = "{{GPUI_MOBILE_GIT}}", rev = "{{GPUI_MOBILE_REV}}" }
 log = "0.4"
 {{ANDROID_PATCH}}

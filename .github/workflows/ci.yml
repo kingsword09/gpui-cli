@@ -57,6 +57,31 @@ jobs:
             echo 'gpui-dev + gpui-profile unexpectedly compiled'
             exit 1
           fi
+      - name: Package and check from a clean directory
+        run: |
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/gpui-package-target"
+          clean_root="$RUNNER_TEMP/gpui-package-clean"
+          mkdir -p "$clean_root"
+          cargo package --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --allow-dirty --no-verify
+          cargo package --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --allow-dirty --no-verify --list > "$RUNNER_TEMP/package-list.txt"
+          for archive in "$CARGO_TARGET_DIR/package"/*.crate; do
+            name="$(basename "$archive" .crate)"
+            mkdir "$clean_root/$name"
+            tar -xzf "$archive" -C "$clean_root/$name"
+          done
+          app_dir="$clean_root/template-probe-app-0.1.0/template-probe-app-0.1.0"
+          cat > "$clean_root/Cargo.toml" <<EOF
+          [workspace]
+          members = [
+            "template-probe-app-0.1.0/template-probe-app-0.1.0",
+            "template-probe-desktop-0.1.0/template-probe-desktop-0.1.0",
+          ]
+          resolver = "2"
+
+          [patch.crates-io]
+          template-probe-app = { path = "$app_dir" }
+          EOF
+          cargo check --manifest-path "$clean_root/Cargo.toml"
 
   android-template:
     runs-on: ubuntu-latest
