@@ -403,4 +403,106 @@ mod tests {
         assert!(error.to_string().contains("injected_failure"));
         assert!(!dir.path().join(".gpui/upgrade/upgrade.lock").exists());
     }
+
+    fn journal_file(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> JournalFile {
+        JournalFile {
+            path: path.to_owned(),
+            old_sha256: old.map(hash_bytes),
+            new_sha256: new.map(hash_bytes),
+            backup_path: old.map(|_| TransactionStore::backup_path_for(path)),
+            state: FileState::BackedUp,
+        }
+    }
+
+    #[test]
+    fn prepared_writer_applies_replace_add_and_delete_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("replace.txt"), b"old replace").unwrap();
+        fs::write(dir.path().join("delete.txt"), b"old delete").unwrap();
+        let files = vec![
+            journal_file("replace.txt", Some(b"old replace"), Some(b"new replace")),
+            journal_file("add.txt", None, Some(b"new add")),
+            journal_file("delete.txt", Some(b"old delete"), None),
+        ];
+        let (store, mut journal) =
+            TransactionStore::create(dir.path(), "tx-write-matrix", "sha256:plan", files).unwrap();
+        store
+            .write_backup(
+                &journal.files[0].backup_path.clone().unwrap(),
+                b"old replace",
+            )
+            .unwrap();
+        store
+            .write_backup(
+                &journal.files[2].backup_path.clone().unwrap(),
+                b"old delete",
+            )
+            .unwrap();
+        journal.state = TransactionState::Writing;
+        store.write(&journal).unwrap();
+
+        let targets = BTreeMap::from([
+            ("replace.txt".to_owned(), Some(b"new replace".to_vec())),
+            ("add.txt".to_owned(), Some(b"new add".to_vec())),
+            ("delete.txt".to_owned(), None),
+        ]);
+        let applied = write_files(&store, &mut journal, &targets, None).unwrap();
+
+        assert_eq!(applied, 3);
+        assert_eq!(
+            fs::read(dir.path().join("replace.txt")).unwrap(),
+            b"new replace"
+        );
+        assert_eq!(fs::read(dir.path().join("add.txt")).unwrap(), b"new add");
+        assert!(!dir.path().join("delete.txt").exists());
+        assert!(
+            journal
+                .files
+                .iter()
+                .all(|file| file.state == FileState::Replaced)
+        );
+    }
+
+    #[test]
+    fn manifest_failure_before_and_after_write_recovers_exactly() {
+        for failure in [FailurePoint::BeforeManifest, FailurePoint::AfterManifest] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(MANIFEST_RELATIVE_PATH);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"old manifest").unwrap();
+            let file = journal_file(
+                MANIFEST_RELATIVE_PATH,
+                Some(b"old manifest"),
+                Some(b"new manifest"),
+            );
+            let (store, mut journal) = TransactionStore::create(
+                dir.path(),
+                format!("tx-manifest-{failure:?}"),
+                "sha256:plan",
+                vec![file],
+            )
+            .unwrap();
+            store
+                .write_backup(
+                    &journal.files[0].backup_path.clone().unwrap(),
+                    b"old manifest",
+                )
+                .unwrap();
+            journal.state = TransactionState::Writing;
+            store.write(&journal).unwrap();
+
+            let targets = BTreeMap::from([(
+                MANIFEST_RELATIVE_PATH.to_owned(),
+                Some(b"new manifest".to_vec()),
+            )]);
+            let error = write_files(&store, &mut journal, &targets, Some(failure)).unwrap_err();
+            let recovery_error = abort_transaction(dir.path(), &store, &mut journal, error)
+                .unwrap_err()
+                .to_string();
+
+            assert!(recovery_error.contains("injected_failure"));
+            assert_eq!(fs::read(&path).unwrap(), b"old manifest");
+            assert_eq!(store.read().unwrap().state, TransactionState::RolledBack);
+        }
+    }
 }
