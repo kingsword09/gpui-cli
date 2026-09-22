@@ -46,6 +46,8 @@ pub const GPUI_MOBILE_GIT: &str = "https://github.com/longbridge/gpui-mobile.git
 pub const GPUI_MOBILE_REV: &str = "b4e3ab258f271003b7d4b874f7c5ebe3a77fac60";
 /// Stable identifier for the template layout represented by this CLI.
 pub const TEMPLATE_VERSION: &str = "agent-native-v1-draft";
+/// Historical baseline retained so upgrade apply can exercise real migrations.
+pub const LEGACY_TEMPLATE_VERSION: &str = "agent-native-v0-legacy";
 /// Package name of the crate at the root of `GPUI_MOBILE_GIT`.
 pub const GPUI_MOBILE_PKG: &str = "gpui-pre-mobile";
 
@@ -621,6 +623,18 @@ fn current_template_content_id() -> &'static str {
     })
 }
 
+fn legacy_template_content_id() -> String {
+    let mut digest = Sha256::new();
+    digest.update(LEGACY_TEMPLATE_VERSION.as_bytes());
+    digest.update([0]);
+    digest.update(current_template_content_id().as_bytes());
+    digest.update([0]);
+    digest.update(LEGACY_LIB_PREFIX.as_bytes());
+    digest.update([0]);
+    digest.update(LEGACY_RUNTIME_SOURCE.as_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
 fn template_path_for_output(relative: &Path) -> Option<String> {
     let value = slash_path(relative);
     let direct = match value.as_str() {
@@ -632,6 +646,8 @@ fn template_path_for_output(relative: &Path) -> Option<String> {
         "crates/app/Cargo.toml" => Some("app/Cargo.toml.template"),
         "crates/app/src/lib.rs" => Some("app/src/lib.rs"),
         "crates/app/src/live.rs" => Some("app/src/live.rs"),
+        "crates/app/src/agent_runtime.rs" => Some("app/src/agent_runtime.rs"),
+        "crates/app/src/legacy_runtime.rs" => Some("legacy/app/src/legacy_runtime.rs"),
         "crates/desktop/Cargo.toml" => Some("desktop/Cargo.toml.template"),
         "crates/desktop/src/main.rs" => Some("desktop/src/main.rs"),
         "mobile/android/.cargo/config.toml" => Some("cargo-config.toml"),
@@ -706,6 +722,20 @@ pub(crate) fn build_template_manifest(
     root: &Path,
     config: &ProjectConfig,
 ) -> Result<TemplateManifest> {
+    build_template_manifest_for_version(root, config, TEMPLATE_VERSION)
+}
+
+pub(crate) fn build_template_manifest_for_version(
+    root: &Path,
+    config: &ProjectConfig,
+    version: &str,
+) -> Result<TemplateManifest> {
+    if !is_supported_template_version(version) {
+        bail!(
+            "baseline_unavailable: template '{}' is not embedded in this CLI",
+            version
+        );
+    }
     let mut paths = Vec::new();
     collect_files(root, &mut paths)?;
 
@@ -741,14 +771,14 @@ pub(crate) fn build_template_manifest(
     platforms.sort();
     platforms.dedup();
 
-    let content_id = current_template_content_id().to_string();
+    let content_id = template_content_id(version);
     Ok(TemplateManifest {
         schema_version: crate::template_manifest::SCHEMA_VERSION,
         generator: GeneratorInfo {
             name: env!("CARGO_PKG_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
-        template_version: TEMPLATE_VERSION.to_string(),
+        template_version: version.to_string(),
         platforms,
         dependencies: DependencyInfo {
             gpui_pre_version: GPUI_PRE_VERSION.to_string(),
@@ -756,7 +786,7 @@ pub(crate) fn build_template_manifest(
             gpui_mobile_revision: GPUI_MOBILE_REV.to_string(),
         },
         baseline: BaselineInfo {
-            template_version: TEMPLATE_VERSION.to_string(),
+            template_version: version.to_string(),
             content_id,
             distribution: "embedded-version-package".to_string(),
         },
@@ -770,10 +800,9 @@ pub fn read_template_baseline(
     manifest: &TemplateManifest,
     relative: &Path,
 ) -> Result<Vec<u8>> {
-    let content_id = current_template_content_id();
-    if manifest.template_version != TEMPLATE_VERSION
-        || manifest.baseline.template_version != TEMPLATE_VERSION
-        || manifest.baseline.content_id != content_id
+    if !is_supported_template_version(&manifest.template_version)
+        || manifest.baseline.template_version != manifest.template_version
+        || manifest.baseline.content_id != template_content_id(&manifest.template_version)
     {
         bail!(
             "baseline_unavailable: template '{}' is not embedded in this CLI",
@@ -788,7 +817,7 @@ pub fn read_template_baseline(
         );
     };
     let scratch = tempfile::tempdir().context("cannot prepare template baseline")?;
-    scaffold_files(scratch.path(), config)?;
+    scaffold_files_for_version(scratch.path(), config, &manifest.template_version)?;
     let path = scratch.path().join(relative);
     let bytes = fs::read(&path)
         .with_context(|| format!("baseline file '{}' is unavailable", relative_string))?;
@@ -803,10 +832,59 @@ pub fn read_template_baseline(
 
 /// Writes the project described by `config` into `target_dir`.
 pub fn scaffold(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
-    scaffold_files(target_dir, config)?;
-    let manifest = build_template_manifest(target_dir, config)?;
+    scaffold_version(target_dir, config, TEMPLATE_VERSION)
+}
+
+/// Writes a supported version of the project template into `target_dir`.
+pub fn scaffold_version(target_dir: &Path, config: &ProjectConfig, version: &str) -> Result<()> {
+    scaffold_files_for_version(target_dir, config, version)?;
+    let manifest = build_template_manifest_for_version(target_dir, config, version)?;
     manifest.write(target_dir)
 }
+
+pub fn is_supported_template_version(version: &str) -> bool {
+    matches!(version, TEMPLATE_VERSION | LEGACY_TEMPLATE_VERSION)
+}
+
+pub fn template_content_id(version: &str) -> String {
+    match version {
+        TEMPLATE_VERSION => current_template_content_id().to_owned(),
+        LEGACY_TEMPLATE_VERSION => legacy_template_content_id(),
+        _ => String::new(),
+    }
+}
+
+fn scaffold_files_for_version(
+    target_dir: &Path,
+    config: &ProjectConfig,
+    version: &str,
+) -> Result<()> {
+    if !is_supported_template_version(version) {
+        bail!(
+            "baseline_unavailable: template '{}' is not embedded in this CLI",
+            version
+        );
+    }
+    scaffold_files(target_dir, config)?;
+    if version == LEGACY_TEMPLATE_VERSION {
+        fs::remove_file(target_dir.join("crates/app/src/agent_runtime.rs"))?;
+        fs::write(
+            target_dir.join("crates/app/src/legacy_runtime.rs"),
+            LEGACY_RUNTIME_SOURCE,
+        )?;
+        let lib = target_dir.join("crates/app/src/lib.rs");
+        let bytes = fs::read(&lib)?;
+        let mut legacy = Vec::with_capacity(LEGACY_LIB_PREFIX.len() + bytes.len());
+        legacy.extend_from_slice(LEGACY_LIB_PREFIX.as_bytes());
+        legacy.extend_from_slice(&bytes);
+        fs::write(lib, legacy)?;
+    }
+    Ok(())
+}
+
+const LEGACY_LIB_PREFIX: &str = "// Historical agent-native-v0 baseline.\n";
+const LEGACY_RUNTIME_SOURCE: &str = "//! Runtime marker removed by the agent-native-v1 template.\n\n\
+pub const LEGACY_RUNTIME_REVISION: &str = \"agent-native-v0-legacy\";\n";
 
 fn scaffold_files(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
     if config.targets.is_empty() {
@@ -872,6 +950,11 @@ fn scaffold_files(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
     render_file(
         "app/src/live.rs",
         &target_dir.join("crates/app/src/live.rs"),
+        &vars,
+    )?;
+    render_file(
+        "app/src/agent_runtime.rs",
+        &target_dir.join("crates/app/src/agent_runtime.rs"),
         &vars,
     )?;
     render_subtree("assets", &target_dir.join("assets"), &HashMap::new())?;
