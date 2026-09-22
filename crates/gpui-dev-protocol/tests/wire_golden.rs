@@ -59,7 +59,7 @@ fn unsupported_version_reply_keeps_structured_error_shape() {
         message,
         ServerMessage::HelloError {
             ref code,
-            supported_proto: PROTO_VERSION,
+            current_proto: PROTO_VERSION,
             ..
         } if code == "unsupported_version"
     ));

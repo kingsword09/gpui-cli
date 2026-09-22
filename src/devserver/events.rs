@@ -75,6 +75,12 @@ pub enum Kind {
     WatchError,
     #[serde(rename = "assets.sent")]
     AssetsSent,
+    #[serde(rename = "window.registered")]
+    WindowRegistered,
+    #[serde(rename = "window.closed")]
+    WindowClosed,
+    #[serde(rename = "ui.probe_result")]
+    UiProbeResult,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,1 +1,1 @@
-{"type":"hello_error","code":"unsupported_version","message":"upgrade required","supported_proto":1}
+{"type":"hello_error","code":"unsupported_version","message":"protocol 2 required","current_proto":2}
