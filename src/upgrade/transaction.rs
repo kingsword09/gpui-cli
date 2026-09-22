@@ -272,6 +272,10 @@ pub fn recover_transaction(root: &Path, transaction_id: &str) -> Result<Recovery
     let mut errors = Vec::new();
 
     for file in &mut journal.files {
+        if file.state == FileState::UserModified {
+            preserved_user_changes.push(file.path.clone());
+            continue;
+        }
         if !matches!(
             file.state,
             FileState::Replaced | FileState::RecoveryRequired
