@@ -15,7 +15,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::Manifest;
-use crate::template::{Platform, ProjectConfig, TEMPLATE_VERSION, UiFramework, scaffold};
+use crate::template::{
+    Platform, ProjectConfig, UiFramework, is_supported_template_version, scaffold_version,
+    template_content_id,
+};
 use crate::template_manifest::{ManifestFile, TemplateManifest};
 
 pub const PLAN_SCHEMA_VERSION: u32 = 1;
@@ -174,7 +177,7 @@ pub fn plan_project(root: &Path, target_version: &str) -> Result<UpgradePlan> {
         distribution: None,
     };
 
-    if target_version != TEMPLATE_VERSION {
+    if !is_supported_template_version(target_version) {
         return Ok(finalize_plan(UpgradePlan {
             schema_version: PLAN_SCHEMA_VERSION,
             plan_id: String::new(),
@@ -200,7 +203,7 @@ pub fn plan_project(root: &Path, target_version: &str) -> Result<UpgradePlan> {
     }
 
     let target_root = tempfile::tempdir().context("preparing embedded target template")?;
-    scaffold(target_root.path(), &project.config)?;
+    scaffold_version(target_root.path(), &project.config, target_version)?;
     let target_manifest = TemplateManifest::read(target_root.path())?
         .context("embedded target did not produce a template manifest")?;
 
@@ -224,7 +227,7 @@ pub fn plan_project(root: &Path, target_version: &str) -> Result<UpgradePlan> {
     }
 
     let base_manifest = base_manifest.expect("resolved base must have a manifest");
-    if let Err(error) = validate_baseline(&base_manifest, &target_manifest) {
+    if let Err(error) = validate_baseline(&base_manifest, &target_manifest, &project.config) {
         notes.push(format!("baseline_unavailable: {error:#}"));
         return Ok(finalize_plan(UpgradePlan {
             schema_version: PLAN_SCHEMA_VERSION,
@@ -356,30 +359,48 @@ fn resolve_base(
     }
 }
 
-fn validate_baseline(base: &TemplateManifest, target: &TemplateManifest) -> Result<()> {
-    if base.template_version != TEMPLATE_VERSION
-        || base.baseline.content_id != target.baseline.content_id
+fn validate_baseline(
+    base: &TemplateManifest,
+    target: &TemplateManifest,
+    config: &ProjectConfig,
+) -> Result<()> {
+    if !is_supported_template_version(&base.template_version)
+        || base.baseline.template_version != base.template_version
+        || base.baseline.content_id != template_content_id(&base.template_version)
     {
         bail!(
-            "template '{}' is not available from the current embedded baseline",
+            "template '{}' is not available from the current embedded baselines",
             base.template_version
         );
     }
-    for entry in &base.files {
-        let Some(target_entry) = target.file(&entry.path) else {
-            bail!(
-                "managed file '{}' is absent from the embedded baseline",
-                entry.path
-            );
-        };
-        if target_entry.base_sha256 != entry.base_sha256
-            || target_entry.template_path != entry.template_path
-        {
-            bail!(
-                "embedded content for '{}' does not match its manifest hash",
-                entry.path
-            );
-        }
+    if target.baseline.template_version != target.template_version
+        || target.baseline.content_id != template_content_id(&target.template_version)
+    {
+        bail!(
+            "target template '{}' is not available from the current embedded baselines",
+            target.template_version
+        );
+    }
+
+    let embedded_root = tempfile::tempdir().context("preparing embedded base template")?;
+    scaffold_version(embedded_root.path(), config, &base.template_version)?;
+    let embedded = TemplateManifest::read(embedded_root.path())?
+        .context("embedded base template did not produce a manifest")?;
+
+    let mut actual_files = base.files.clone();
+    actual_files.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut embedded_files = embedded.files.clone();
+    embedded_files.sort_by(|left, right| left.path.cmp(&right.path));
+    if actual_files != embedded_files
+        || base.platforms != embedded.platforms
+        || base.dependencies != embedded.dependencies
+        || base.groups != embedded.groups
+        || base.baseline != embedded.baseline
+    {
+        bail!(
+            "embedded content for template '{}' does not match its manifest",
+            base.template_version
+        );
     }
     Ok(())
 }
@@ -613,7 +634,7 @@ fn finalize_plan(mut plan: UpgradePlan) -> UpgradePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::template::{Platform, ProjectConfig, UiFramework, scaffold};
+    use crate::template::{Platform, ProjectConfig, TEMPLATE_VERSION, UiFramework, scaffold};
 
     fn h(value: &str) -> String {
         format!("sha256:{value}")
@@ -754,6 +775,43 @@ mod tests {
         let plan = plan_project(dir.path(), TEMPLATE_VERSION).unwrap();
         assert_eq!(plan.status, PlanStatus::Ready);
         assert_eq!(plan.base_resolution, BaseResolution::InferredExact);
+    }
+
+    #[test]
+    fn legacy_embedded_baseline_produces_real_replace_add_and_delete_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ProjectConfig {
+            name: "upgrade-legacy-fixture".into(),
+            title: "Upgrade Legacy Fixture".into(),
+            bundle_id: "com.example.upgradelegacy".into(),
+            ui_framework: UiFramework::GpuiKit,
+            targets: vec![Platform::MacOs],
+        };
+        crate::template::scaffold_version(
+            dir.path(),
+            &config,
+            crate::template::LEGACY_TEMPLATE_VERSION,
+        )
+        .unwrap();
+
+        let plan = plan_project(dir.path(), TEMPLATE_VERSION).unwrap();
+        assert_eq!(plan.status, PlanStatus::Ready);
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| file.action == FileAction::Replace)
+        );
+        assert!(plan.files.iter().any(|file| file.action == FileAction::Add));
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| file.action == FileAction::Delete)
+        );
+        assert_eq!(
+            plan.base.template_version,
+            crate::template::LEGACY_TEMPLATE_VERSION
+        );
+        assert_eq!(plan.target.template_version, TEMPLATE_VERSION);
     }
 
     #[cfg(unix)]

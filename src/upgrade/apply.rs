@@ -14,7 +14,7 @@ use super::transaction::{
 };
 use super::{FileAction, PlanStatus, hash_file, load_plan, load_project, plan_project};
 use crate::commands::doctor::diagnose_project;
-use crate::template::{Platform, scaffold};
+use crate::template::{Platform, scaffold_version};
 use crate::template_manifest::{MANIFEST_RELATIVE_PATH, TemplateManifest};
 use crate::toolchain::Target as ToolchainTarget;
 use crate::toolchain::report::CheckStatus;
@@ -99,7 +99,11 @@ pub(crate) fn apply_cached_plan_with_failure(
 
     let project = load_project(root)?;
     let target_root = tempfile::tempdir().context("preparing target template")?;
-    scaffold(target_root.path(), &project.config)?;
+    scaffold_version(
+        target_root.path(),
+        &project.config,
+        &stored.target.template_version,
+    )?;
     let target_manifest = TemplateManifest::read(target_root.path())?
         .context("target template did not produce a manifest")?;
 
