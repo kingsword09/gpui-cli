@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "gui"]
 include = ["/src/**", "/tests/**", "/templates/**", "/assets/**", "/scripts/**", "/docs/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/CONTRIBUTING.md", "/LICENSE-*", "/THIRD_PARTY_NOTICES.md"]
 
 [workspace]
-members = ["xtask"]
+members = ["xtask", "crates/gpui-dev-protocol"]
 resolver = "3"
 
 [[bin]]
