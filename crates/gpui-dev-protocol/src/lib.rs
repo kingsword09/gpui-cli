@@ -24,11 +24,11 @@ pub enum ClientMessage {
         platform: String,
         #[serde(default)]
         asset_reload: bool,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         runtime_version: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         gpui_version: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         capabilities: Vec<String>,
     },
     Log {

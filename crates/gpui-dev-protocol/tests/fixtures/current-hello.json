@@ -1,0 +1,1 @@
+{"type":"hello","proto":1,"token":"token","project":"project","pid":7,"platform":"macos","asset_reload":true,"runtime_version":"agent-native-dev-runtime-v1","gpui_version":"0.3.5","capabilities":["logs","state"]}
