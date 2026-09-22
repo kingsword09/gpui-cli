@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::lock::UpgradeLock;
@@ -179,6 +181,9 @@ pub(crate) fn apply_cached_plan_with_failure(
         Ok(applied) => applied,
         Err(error) => return abort_transaction(root, &store, &mut journal, error),
     };
+    if let Err(error) = verify_written_files(&store, &journal) {
+        return abort_transaction(root, &store, &mut journal, error);
+    }
 
     journal.state = TransactionState::Validating;
     store.write(&journal)?;
@@ -275,9 +280,43 @@ fn write_files(
         if hash_file(&project_path)? != expected_new {
             bail!("post_write_hash_mismatch: '{}'", path);
         }
+        maybe_pause_after_write(&path)?;
         applied += 1;
     }
     Ok(applied)
+}
+
+fn verify_written_files(store: &TransactionStore, journal: &TransactionJournal) -> Result<()> {
+    for file in &journal.files {
+        if file.state != FileState::Replaced {
+            continue;
+        }
+        let current = hash_file(&store.path(&file.path)?)?;
+        if current != file.new_sha256 {
+            bail!("concurrent_edit: '{}' changed during upgrade", file.path);
+        }
+    }
+    Ok(())
+}
+
+fn maybe_pause_after_write(path: &str) -> Result<()> {
+    let Some(expected_path) = std::env::var_os("GPUI_UPGRADE_PAUSE_AFTER_PATH") else {
+        return Ok(());
+    };
+    if expected_path != path {
+        return Ok(());
+    }
+    let Some(gate_path) = std::env::var_os("GPUI_UPGRADE_PAUSE_CONTINUE_FILE") else {
+        return Ok(());
+    };
+    if let Some(ready_path) = std::env::var_os("GPUI_UPGRADE_PAUSE_READY_FILE") {
+        fs::write(ready_path, b"ready")?;
+    }
+    let gate_path = std::path::PathBuf::from(gate_path);
+    while !gate_path.is_file() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 fn maybe_fail(failure: Option<FailurePoint>, point: FailurePoint) -> Result<()> {
