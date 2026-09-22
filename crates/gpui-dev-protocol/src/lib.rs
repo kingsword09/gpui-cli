@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 
 /// Current app-channel protocol version.
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 /// Maximum payload for one length-prefixed frame.
 pub const MAX_FRAME_LEN: u32 = 1024 * 1024;
 /// Control API schema used by the planned v2 observation surface.
@@ -49,6 +49,26 @@ pub enum ClientMessage {
         session: String,
         data: String,
     },
+    WindowRegistered {
+        window_id: String,
+        title: String,
+        width: u32,
+        height: u32,
+        scale_milli: u32,
+        foreground: bool,
+    },
+    WindowClosed {
+        window_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    UiProbeResult {
+        request_id: String,
+        window_id: String,
+        responsive: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        latency_ms: Option<u64>,
+    },
 }
 
 #[derive(Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -60,7 +80,7 @@ pub enum ServerMessage {
     HelloError {
         code: String,
         message: String,
-        supported_proto: u32,
+        current_proto: u32,
     },
     AssetChanged {
         path: String,
@@ -71,6 +91,10 @@ pub enum ServerMessage {
     },
     PrepareRestart {
         session: String,
+    },
+    ProbeUi {
+        request_id: String,
+        window_id: String,
     },
 }
 
@@ -206,9 +230,9 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn legacy_hello_without_metadata_decodes() {
+    fn hello_without_optional_metadata_decodes() {
         let message: ClientMessage = decode(
-            br#"{"type":"hello","proto":1,"token":"t","project":"p","pid":1,"platform":"macos","asset_reload":false}"#,
+            br#"{"type":"hello","proto":2,"token":"t","project":"p","pid":1,"platform":"macos","asset_reload":false}"#,
         )
         .unwrap();
         assert!(matches!(
@@ -241,7 +265,7 @@ mod tests {
         let error = ServerMessage::HelloError {
             code: "unsupported_version".into(),
             message: "upgrade required".into(),
-            supported_proto: PROTO_VERSION,
+            current_proto: PROTO_VERSION,
         };
         assert_eq!(
             decode::<ServerMessage>(&encode(&error).unwrap()).unwrap(),

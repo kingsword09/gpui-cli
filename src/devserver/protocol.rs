@@ -74,18 +74,18 @@ mod tests {
         let payload = encode(&ServerMessage::HelloError {
             code: "unsupported_version".into(),
             message: "upgrade required".into(),
-            supported_proto: PROTO_VERSION,
+            current_proto: PROTO_VERSION,
         })
         .unwrap();
         let text = String::from_utf8(payload).unwrap();
         assert!(text.contains("\"type\":\"hello_error\""));
-        assert!(text.contains("\"supported_proto\":1"));
+        assert!(text.contains("\"current_proto\":2"));
     }
 
     #[test]
     fn hello_metadata_is_optional_for_legacy_clients() {
         let legacy: ClientMessage = decode(
-            br#"{"type":"hello","proto":1,"token":"t","project":"p","pid":1,"platform":"macos"}"#,
+            br#"{"type":"hello","proto":2,"token":"t","project":"p","pid":1,"platform":"macos"}"#,
         )
         .unwrap();
         assert!(matches!(
@@ -99,7 +99,7 @@ mod tests {
         ));
 
         let current: ClientMessage = decode(
-            br#"{"type":"hello","proto":1,"token":"t","project":"p","pid":1,"platform":"macos","runtime_version":"agent-native-dev-runtime-v1","gpui_version":"0.3.5","capabilities":["logs","state"]}"#,
+            br#"{"type":"hello","proto":2,"token":"t","project":"p","pid":1,"platform":"macos","runtime_version":"agent-native-dev-runtime-v1","gpui_version":"0.3.5","capabilities":["logs","state"]}"#,
         )
         .unwrap();
         assert!(matches!(

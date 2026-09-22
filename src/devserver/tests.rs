@@ -26,7 +26,7 @@ fn connect(server: &DevServer, token: &str) -> TcpStream {
     send(
         &mut socket,
         &ClientMessage::Hello {
-            proto: 1,
+            proto: 2,
             token: token.into(),
             project: "test".into(),
             pid: 123,
@@ -49,6 +49,61 @@ fn registration_advertises_current_control_schema() {
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
     let server = ControlServer::start(session).unwrap();
     assert_eq!(server.registration.schema_version, 2);
+}
+
+#[test]
+fn current_app_channel_routes_window_and_ui_probe_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    let token = server.expect_run(run).unwrap();
+    let mut socket = connect(&server, &token);
+
+    send(
+        &mut socket,
+        &ClientMessage::WindowRegistered {
+            window_id: "w-main".into(),
+            title: "Counter".into(),
+            width: 800,
+            height: 600,
+            scale_milli: 2000,
+            foreground: true,
+        },
+    );
+    send(
+        &mut socket,
+        &ClientMessage::UiProbeResult {
+            request_id: "probe.1".into(),
+            window_id: "w-main".into(),
+            responsive: true,
+            latency_ms: Some(4),
+        },
+    );
+    send(
+        &mut socket,
+        &ClientMessage::WindowClosed {
+            window_id: "w-main".into(),
+            reason: Some("user".into()),
+        },
+    );
+
+    wait_until(|| {
+        let events = session.store.events(0, Duration::ZERO);
+        events
+            .events
+            .iter()
+            .any(|event| event.kind == Kind::UiProbeResult && event.data["request_id"] == "probe.1")
+            && events
+                .events
+                .iter()
+                .any(|event| event.kind == Kind::WindowClosed)
+    });
+    let events = session.store.events(0, Duration::ZERO);
+    assert!(events.events.iter().any(|event| {
+        event.kind == Kind::WindowRegistered && event.data["scale_milli"] == 2000
+    }));
 }
 
 fn send(socket: &mut TcpStream, message: &ClientMessage) {

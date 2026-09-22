@@ -126,8 +126,7 @@ impl DevServer {
         })
     }
 
-    /// Rotating the token also binds legacy v1 clients to an exact launch:
-    /// they already read the injected token, without needing new message fields.
+    /// Rotating the token binds each current app launch to an exact run.
     pub fn expect_run(&self, scope: Scope) -> Result<String> {
         let token = random_token()?;
         *self
@@ -308,7 +307,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
         let _ = protocol::encode(&ServerMessage::HelloError {
             code: "unsupported_version".to_owned(),
             message: format!("app protocol {proto} is not supported by this supervisor"),
-            supported_proto: PROTO_VERSION,
+            current_proto: PROTO_VERSION,
         })
         .and_then(|payload| protocol::write_frame(&mut stream, &payload));
         return;
@@ -451,6 +450,44 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                         let _ = waiter.try_send(data);
                     }
                 }
+                ClientMessage::WindowRegistered {
+                    window_id,
+                    title,
+                    width,
+                    height,
+                    scale_milli,
+                    foreground,
+                } => {
+                    shared.emit(
+                        Kind::WindowRegistered,
+                        &scope,
+                        json!({"window_id": clip(&window_id, 128), "title": clip(&title, 256),
+                            "width": width, "height": height, "scale_milli": scale_milli,
+                            "foreground": foreground}),
+                    );
+                }
+                ClientMessage::WindowClosed { window_id, reason } => {
+                    shared.emit(
+                        Kind::WindowClosed,
+                        &scope,
+                        json!({"window_id": clip(&window_id, 128),
+                            "reason": reason.as_deref().map(|value| clip(value, 256))}),
+                    );
+                }
+                ClientMessage::UiProbeResult {
+                    request_id,
+                    window_id,
+                    responsive,
+                    latency_ms,
+                } => {
+                    shared.emit(
+                        Kind::UiProbeResult,
+                        &scope,
+                        json!({"request_id": clip(&request_id, 128),
+                            "window_id": clip(&window_id, 128), "responsive": responsive,
+                            "latency_ms": latency_ms}),
+                    );
+                }
                 ClientMessage::Hello { .. } => {}
             }
         }
@@ -528,7 +565,7 @@ mod tests {
         // Right token: hello_ok comes back.
         let (stream, reply) = connect(&server, &server.token);
         let ok: ServerMessage = protocol::decode(&reply).unwrap();
-        assert!(matches!(ok, ServerMessage::HelloOk { proto: 1 }));
+        assert!(matches!(ok, ServerMessage::HelloOk { proto: 2 }));
         drop(stream);
     }
 
@@ -559,9 +596,9 @@ mod tests {
             error,
             ServerMessage::HelloError {
                 code,
-                supported_proto,
+                current_proto,
                 ..
-            } if code == "unsupported_version" && supported_proto == PROTO_VERSION
+            } if code == "unsupported_version" && current_proto == PROTO_VERSION
         ));
     }
 

@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-const PROTO_VERSION: u32 = 1;
+const PROTO_VERSION: u32 = 2;
 const RUNTIME_VERSION: &str = "agent-native-dev-runtime-v1";
 const GPUI_VERSION: &str = "{{GPUI_PRE_VERSION}}";
 /// Mirrors the CLI's `MAX_FRAME_LEN`.
