@@ -14,6 +14,19 @@ pub const PROTO_VERSION: u32 = 1;
 /// Hard cap for one frame (panic reports carry a truncated backtrace).
 pub const MAX_FRAME_LEN: u32 = 1024 * 1024;
 
+/// Optional metadata carried by newer app runtimes in the v1 hello JSON.
+/// Keeping this separate from `ClientMessage::Hello` lets old clients that do
+/// not send these fields continue to decode unchanged.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct HelloMetadata {
+    #[serde(default)]
+    pub runtime_version: Option<String>,
+    #[serde(default)]
+    pub gpui_version: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
 /// Messages sent by the running app to the CLI.
 #[derive(Debug, Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -157,6 +170,26 @@ mod tests {
         let text = String::from_utf8(payload).unwrap();
         assert!(text.contains("\"type\":\"hello_error\""));
         assert!(text.contains("\"supported_proto\":1"));
+    }
+
+    #[test]
+    fn hello_metadata_is_optional_for_legacy_clients() {
+        let legacy: HelloMetadata = serde_json::from_slice(
+            br#"{"type":"hello","proto":1,"token":"t","project":"p","pid":1,"platform":"macos"}"#,
+        )
+        .unwrap();
+        assert!(legacy.runtime_version.is_none());
+        assert!(legacy.capabilities.is_empty());
+
+        let current: HelloMetadata = serde_json::from_slice(
+            br#"{"runtime_version":"agent-native-dev-runtime-v1","gpui_version":"0.3.5","capabilities":["logs","state"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            current.runtime_version.as_deref(),
+            Some("agent-native-dev-runtime-v1")
+        );
+        assert_eq!(current.capabilities, vec!["logs", "state"]);
     }
 }
 

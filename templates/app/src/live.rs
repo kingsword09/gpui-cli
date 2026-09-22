@@ -17,6 +17,8 @@ use std::thread;
 use std::time::Duration;
 
 const PROTO_VERSION: u32 = 1;
+const RUNTIME_VERSION: &str = "agent-native-dev-runtime-v1";
+const GPUI_VERSION: &str = "{{GPUI_PRE_VERSION}}";
 /// Mirrors the CLI's `MAX_FRAME_LEN`.
 const MAX_FRAME_LEN: u32 = 1024 * 1024;
 /// Outbound queue bound: when the CLI is gone or slow, drop logs instead of
@@ -296,11 +298,16 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
     };
 
     let hello = format!(
-        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{}}}",
+        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\"{}]}}",
         json_escape(&config.token),
         json_escape(&config.project),
         std::process::id(),
         ASSET_SOURCE_INSTALLED.load(std::sync::atomic::Ordering::SeqCst),
+        if ASSET_SOURCE_INSTALLED.load(std::sync::atomic::Ordering::SeqCst) {
+            ",\"asset_reload\""
+        } else {
+            ""
+        },
     );
     if write_frame(&mut stream, hello.as_bytes()).is_err() {
         return;
