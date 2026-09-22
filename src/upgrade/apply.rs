@@ -13,8 +13,11 @@ use super::transaction::{
     recover_transaction, safe_project_path,
 };
 use super::{FileAction, PlanStatus, hash_file, load_plan, load_project, plan_project};
-use crate::template::scaffold;
+use crate::commands::doctor::diagnose_project;
+use crate::template::{Platform, scaffold};
 use crate::template_manifest::{MANIFEST_RELATIVE_PATH, TemplateManifest};
+use crate::toolchain::Target as ToolchainTarget;
+use crate::toolchain::report::CheckStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ValidationReport {
@@ -161,7 +164,7 @@ pub(crate) fn apply_cached_plan_with_failure(
     if let Err(error) = maybe_fail(failure, FailurePoint::BeforeValidate) {
         return abort_transaction(root, &store, &mut journal, error);
     }
-    let validation = match validate_result(root, &target_manifest) {
+    let validation = match validate_result(root, &target_manifest, &project.config.targets) {
         Ok(validation) => validation,
         Err(error) => return abort_transaction(root, &store, &mut journal, error),
     };
@@ -276,16 +279,81 @@ fn abort_transaction(
     );
 }
 
-fn validate_result(root: &Path, target: &TemplateManifest) -> Result<ValidationReport> {
+fn validate_result(
+    root: &Path,
+    target: &TemplateManifest,
+    platforms: &[Platform],
+) -> Result<ValidationReport> {
     let current = TemplateManifest::read(root)?.context("manifest missing after apply")?;
     if current != *target {
         bail!("manifest validation failed after apply");
     }
+
+    let mut commands = Vec::new();
+    let mut notes = Vec::new();
+    let mut validation_not_run = false;
+    for target in validation_targets(platforms) {
+        let report = diagnose_project(root, target)?;
+        for check in &report.checks {
+            if let Some(command) = &check.command {
+                commands.push(command.argv());
+            }
+        }
+        let failed = report
+            .checks
+            .iter()
+            .filter(|check| check.required)
+            .any(|check| check.status == CheckStatus::Fail);
+        if failed {
+            let failed_checks = report
+                .checks
+                .iter()
+                .filter(|check| check.required && check.status == CheckStatus::Fail)
+                .map(|check| check.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "toolchain validation failed for {}: {}",
+                target.label(),
+                failed_checks
+            );
+        }
+        if !report.required_ok() {
+            validation_not_run = true;
+            notes.push(format!(
+                "{} toolchain validation not_run: required tool unavailable or unknown",
+                target.label()
+            ));
+        } else {
+            notes.push(format!("{} toolchain checks passed", target.label()));
+        }
+    }
     Ok(ValidationReport {
-        status: "not_run".to_owned(),
-        commands: vec![],
-        notes: vec!["native/toolchain validation is not run by this transaction core".to_owned()],
+        status: if validation_not_run {
+            "not_run".to_owned()
+        } else {
+            "passed".to_owned()
+        },
+        commands,
+        notes,
     })
+}
+
+fn validation_targets(platforms: &[Platform]) -> Vec<ToolchainTarget> {
+    let mut targets = Vec::new();
+    for platform in platforms {
+        let target = if platform.is_desktop() {
+            ToolchainTarget::Desktop
+        } else if *platform == Platform::IOs {
+            ToolchainTarget::Ios
+        } else {
+            ToolchainTarget::Android
+        };
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    targets
 }
 
 fn new_transaction_id() -> Result<String> {
@@ -335,6 +403,11 @@ mod tests {
         let report = apply_cached_plan(dir.path(), &plan.plan_id).unwrap();
         assert_eq!(report.state, TransactionState::Committed);
         assert_eq!(report.files_applied, 0);
+        assert!(matches!(
+            report.validation.status.as_str(),
+            "passed" | "not_run"
+        ));
+        assert!(!report.validation.commands.is_empty());
         assert!(!dir.path().join(".gpui/upgrade/upgrade.lock").exists());
         assert!(
             dir.path()
@@ -574,5 +647,22 @@ mod tests {
         assert!(error.to_string().contains("upgrade_busy"));
         assert!(!dir.path().join(".gpui/upgrade/transactions").exists());
         drop(lock);
+    }
+
+    #[test]
+    fn validation_targets_deduplicate_desktop_and_preserve_mobile_targets() {
+        assert_eq!(
+            validation_targets(&[
+                Platform::MacOs,
+                Platform::Windows,
+                Platform::IOs,
+                Platform::Android,
+            ]),
+            vec![
+                ToolchainTarget::Desktop,
+                ToolchainTarget::Ios,
+                ToolchainTarget::Android
+            ]
+        );
     }
 }
