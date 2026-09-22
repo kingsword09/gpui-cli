@@ -3,6 +3,11 @@ name = "{{DESKTOP_CRATE}}"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+gpui-dev = ["{{APP_CRATE}}/gpui-dev"]
+gpui-profile = ["{{APP_CRATE}}/gpui-profile"]
+
 [dependencies]
 gpui.workspace = true
 gpui-kit.workspace = true

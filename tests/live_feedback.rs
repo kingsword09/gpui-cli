@@ -28,7 +28,7 @@ impl Fixture {
             "[app]\nname = \"feedback-probe\"\ntitle = \"Feedback probe\"\n",
         )
         .unwrap();
-        fs::write(root.join("crates/desktop/Cargo.toml"), "[package]\nname = \"feedback-probe-desktop\"\nversion = \"0.1.0\"\nedition = \"2024\"\n").unwrap();
+        fs::write(root.join("crates/desktop/Cargo.toml"), "[package]\nname = \"feedback-probe-desktop\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[features]\ngpui-dev = []\n").unwrap();
         fs::write(
             root.join("crates/desktop/src/main.rs"),
             good_source("first"),

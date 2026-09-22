@@ -327,7 +327,7 @@ pub fn android_main(app: android_activity::AndroidApp) {{
     // CLI; release builds keep the default asset source.
     #[cfg(debug_assertions)]
     let application = Application::with_platform(shared.into_rc()).with_assets(
-        crate::live::dev_asset_source(app.internal_data_path().map(|p| p.join("assets"))),
+        crate::dev_asset_source(app.internal_data_path().map(|p| p.join("assets"))),
     );
     #[cfg(not(debug_assertions))]
     let application = Application::with_platform(shared.into_rc());
@@ -1194,6 +1194,14 @@ mod tests {
         assert!(gitignore.contains("!.gpui/template-manifest.json"));
         let manifest_text = fs::read_to_string(TemplateManifest::path(dir.path())).unwrap();
         assert!(!manifest_text.contains("dev-token"));
+
+        let app_cargo = fs::read_to_string(dir.path().join("crates/app/Cargo.toml")).unwrap();
+        assert!(app_cargo.contains("gpui-dev = []"));
+        assert!(app_cargo.contains("gpui-profile = []"));
+        let desktop_cargo =
+            fs::read_to_string(dir.path().join("crates/desktop/Cargo.toml")).unwrap();
+        assert!(desktop_cargo.contains("gpui-dev = [\"delta-mobile-app/gpui-dev\"]"));
+        assert!(desktop_cargo.contains("gpui-profile = [\"delta-mobile-app/gpui-profile\"]"));
     }
 
     #[test]

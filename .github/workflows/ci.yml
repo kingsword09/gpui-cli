@@ -47,7 +47,16 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/template-check
         run: |
           cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace
+          cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --features gpui-dev --locked
           cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --release --locked
+          if cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --release --features gpui-dev --locked; then
+            echo 'release + gpui-dev unexpectedly compiled'
+            exit 1
+          fi
+          if cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --features gpui-dev,gpui-profile --locked; then
+            echo 'gpui-dev + gpui-profile unexpectedly compiled'
+            exit 1
+          fi
 
   android-template:
     runs-on: ubuntu-latest
