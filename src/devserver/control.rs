@@ -1,16 +1,17 @@
 //! Authenticated read-only control connections, separate from app connections.
 
-use super::events::{SCHEMA_VERSION, atomic_json, now_ms};
+use super::events::{atomic_json, now_ms};
 use super::protocol;
 use super::session::{Session, random_token};
 use anyhow::{Context, Result, bail};
+use gpui_dev_protocol::{CONTROL_SCHEMA_VERSION, V2Envelope, V2Error, valid_request_id};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -20,10 +21,6 @@ pub const MAX_WAIT_MS: u64 = 30_000;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Registration {
     pub schema_version: u32,
-    /// Schema versions this supervisor can actually serve. Older
-    /// registrations omit the field and deserialize as an empty list.
-    #[serde(default)]
-    pub supported_schema_versions: Vec<u32>,
     pub session_id: String,
     pub project_root: PathBuf,
     pub target_id: String,
@@ -45,6 +42,7 @@ pub enum Command {
 #[derive(Serialize, Deserialize)]
 struct Request {
     schema_version: u32,
+    request_id: String,
     role: String,
     session_id: String,
     token: String,
@@ -70,37 +68,51 @@ impl ApiError {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Reply {
-    pub schema_version: u32,
-    pub session_id: String,
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<ApiError>,
+impl From<ApiError> for V2Error {
+    fn from(error: ApiError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            details: error.details,
+            retryable: false,
+        }
+    }
 }
 
-impl Reply {
-    pub fn error(session: &str, error: ApiError) -> Self {
+impl From<V2Error> for ApiError {
+    fn from(error: V2Error) -> Self {
         Self {
-            schema_version: SCHEMA_VERSION,
-            session_id: session.into(),
-            ok: false,
-            result: None,
-            error: Some(error),
+            code: error.code,
+            message: error.message,
+            details: error.details,
         }
     }
+}
 
-    fn success(session: &str, result: Value) -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION,
-            session_id: session.into(),
-            ok: true,
-            result: Some(result),
-            error: None,
-        }
+pub type Reply = V2Envelope<Value>;
+
+const INVALID_REQUEST_ID: &str = "control.invalid";
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_request_id(prefix: &str) -> String {
+    let sequence = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}.{}.{}", std::process::id(), sequence)
+}
+
+fn reply_id(request_id: &str) -> &str {
+    if valid_request_id(request_id) {
+        request_id
+    } else {
+        INVALID_REQUEST_ID
     }
+}
+
+fn error_reply(session: &str, request_id: &str, error: ApiError) -> Reply {
+    V2Envelope::failure(session, reply_id(request_id), error.into())
+}
+
+fn success_reply(session: &str, request_id: &str, result: Value) -> Reply {
+    V2Envelope::success(session, reply_id(request_id), result)
 }
 
 pub struct ControlServer {
@@ -117,8 +129,7 @@ impl ControlServer {
         socket.set_nonblocking(true)?;
         let state = session.store.state();
         let registration = Registration {
-            schema_version: SCHEMA_VERSION,
-            supported_schema_versions: vec![SCHEMA_VERSION],
+            schema_version: CONTROL_SCHEMA_VERSION,
             session_id: session.id.clone(),
             project_root: session.root.clone(),
             target_id: state.target_id,
@@ -145,8 +156,9 @@ impl ControlServer {
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                             let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                             if connections.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-                                let reply = Reply::error(
+                                let reply = error_reply(
                                     &auth.session_id,
+                                    "control.busy",
                                     ApiError::new("busy", "Too many control connections"),
                                 );
                                 let _ = send_reply(&mut stream, &reply);
@@ -209,8 +221,9 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
     let request = match request {
         Ok(request) => request,
         Err(_) => {
-            return Reply::error(
+            return error_reply(
                 &session.id,
+                INVALID_REQUEST_ID,
                 ApiError::new("invalid_request", "Expected a framed control request"),
             );
         }
@@ -219,20 +232,36 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
         || request.token != registration.token
         || request.session_id != registration.session_id
     {
-        return Reply::error(
+        return error_reply(
             &session.id,
+            &request.request_id,
             ApiError::new(
                 "unauthorized",
                 "Invalid control credentials or session identity",
             ),
         );
     }
-    if request.schema_version != SCHEMA_VERSION {
-        return Reply::error(
+    if request.schema_version != CONTROL_SCHEMA_VERSION {
+        return error_reply(
             &session.id,
-            ApiError::new("unsupported_version", "Unsupported control schema version"),
+            &request.request_id,
+            ApiError::new(
+                "invalid_schema",
+                "Control requests must use schema version 2",
+            ),
         );
     }
+    if !valid_request_id(&request.request_id) {
+        return error_reply(
+            &session.id,
+            INVALID_REQUEST_ID,
+            ApiError::new(
+                "invalid_request_id",
+                "request_id must be 1-128 ASCII identifier characters",
+            ),
+        );
+    }
+    let request_id = request.request_id.clone();
     let result = match request.command {
         Command::Ping => json!({"lifecycle": session.store.state().lifecycle}),
         Command::Status => session.store.state().status_json(),
@@ -245,8 +274,9 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
         }
         Command::Events { after, timeout_ms } => {
             if timeout_ms > MAX_WAIT_MS || after > session.store.state().seq {
-                return Reply::error(
+                return error_reply(
                     &session.id,
+                    &request_id,
                     ApiError::new(
                         "invalid_cursor_or_timeout",
                         "Cursor exceeds this session's seq or timeout exceeds 30s",
@@ -259,10 +289,13 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
             serde_json::to_value(page).expect("serializable event page")
         }
     };
-    Reply::success(&session.id, result)
+    success_reply(&session.id, &request_id, result)
 }
 
-pub fn request(registration: &Registration, command: Command) -> Result<Reply> {
+pub fn request(registration: &Registration, request_id: &str, command: Command) -> Result<Reply> {
+    if !valid_request_id(request_id) {
+        bail!("invalid control request id");
+    }
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, registration.port));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
     let timeout = match command {
@@ -272,7 +305,8 @@ pub fn request(registration: &Registration, command: Command) -> Result<Reply> {
     stream.set_read_timeout(Some(Duration::from_millis(timeout + 3000)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let payload = Request {
-        schema_version: SCHEMA_VERSION,
+        schema_version: CONTROL_SCHEMA_VERSION,
+        request_id: request_id.into(),
         role: "control".into(),
         token: registration.token.clone(),
         session_id: registration.session_id.clone(),
@@ -280,7 +314,11 @@ pub fn request(registration: &Registration, command: Command) -> Result<Reply> {
     };
     protocol::write_frame(&mut stream, &protocol::encode(&payload)?)?;
     let reply: Reply = protocol::decode(&protocol::read_frame(&mut stream)?)?;
-    if reply.session_id != registration.session_id || reply.schema_version != SCHEMA_VERSION {
+    if reply.session_id != registration.session_id
+        || reply.schema_version != CONTROL_SCHEMA_VERSION
+        || reply.request_id != request_id
+        || !reply.is_valid()
+    {
         bail!("control endpoint identity no longer matches the selected session");
     }
     Ok(reply)
@@ -320,7 +358,7 @@ pub fn discover(
         {
             continue;
         }
-        if let Ok(reply) = request(&registration, Command::Ping)
+        if let Ok(reply) = request(&registration, &next_request_id("discover"), Command::Ping)
             && reply.ok
             && reply
                 .result
@@ -360,9 +398,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_registration_without_capabilities_still_deserializes() {
+    fn registration_uses_the_current_control_schema() {
         let registration: Registration = serde_json::from_value(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "session_id": "s1",
             "project_root": ".",
             "target_id": "desktop:test",
@@ -372,6 +410,15 @@ mod tests {
             "token": "token"
         }))
         .unwrap();
-        assert!(registration.supported_schema_versions.is_empty());
+        assert_eq!(registration.schema_version, CONTROL_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn generated_request_ids_are_unique_and_valid() {
+        let first = next_request_id("test");
+        let second = next_request_id("test");
+        assert_ne!(first, second);
+        assert!(valid_request_id(&first));
+        assert!(valid_request_id(&second));
     }
 }
