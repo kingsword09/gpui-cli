@@ -38,12 +38,18 @@ mobile/android/gradle/local.properties
 /// version. These constants centralise the pins the generated projects use.
 pub const GPUI_PRE_VERSION: &str = "0.3.5";
 pub const GPUI_KIT_GIT: &str = "https://github.com/longbridge/gpui-kit";
+/// Published package version paired with the immutable gpui-kit revision.
+pub const GPUI_KIT_VERSION: &str = "0.6.1";
 /// `gpui-kit` needs a git revision rather than the published crate: on
 /// iOS/Android it must not pull in the desktop-only `gpui-pre-platform` crate.
 pub const GPUI_KIT_REV: &str = "9504b4658d57c59024a664f22b5ab55e070a24b4";
 pub const GPUI_MOBILE_GIT: &str = "https://github.com/longbridge/gpui-mobile.git";
 /// Mobile platform revision validated with the pinned GPUI family and renderer patch.
 pub const GPUI_MOBILE_REV: &str = "b4e3ab258f271003b7d4b874f7c5ebe3a77fac60";
+/// Published package version paired with the immutable gpui-mobile revision.
+pub const GPUI_MOBILE_VERSION: &str = "0.1.0";
+/// Version shared by generated workspace packages and path dependencies.
+pub const TEMPLATE_PACKAGE_VERSION: &str = "0.1.0";
 /// Stable identifier for the template layout represented by this CLI.
 pub const TEMPLATE_VERSION: &str = "agent-native-v1-draft";
 /// Historical baseline retained so upgrade apply can exercise real migrations.
@@ -393,6 +399,12 @@ fn vars_for(config: &ProjectConfig) -> HashMap<&'static str, String> {
         String::new()
     };
     vars.insert("MOBILE_DEP", mobile_dep);
+    vars.insert("GPUI_KIT_VERSION", GPUI_KIT_VERSION.to_string());
+    vars.insert("GPUI_MOBILE_VERSION", GPUI_MOBILE_VERSION.to_string());
+    vars.insert(
+        "TEMPLATE_PACKAGE_VERSION",
+        TEMPLATE_PACKAGE_VERSION.to_string(),
+    );
 
     let android_section = if config.has_android() {
         r#"
@@ -1198,8 +1210,17 @@ mod tests {
         let app_cargo = fs::read_to_string(dir.path().join("crates/app/Cargo.toml")).unwrap();
         assert!(app_cargo.contains("gpui-dev = []"));
         assert!(app_cargo.contains("gpui-profile = []"));
+        let workspace_cargo = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        assert!(
+            workspace_cargo
+                .contains("version = \"=0.6.1\", git = \"https://github.com/longbridge/gpui-kit\"")
+        );
+        assert!(workspace_cargo.contains(
+            "version = \"=0.1.0\", git = \"https://github.com/longbridge/gpui-mobile.git\""
+        ));
         let desktop_cargo =
             fs::read_to_string(dir.path().join("crates/desktop/Cargo.toml")).unwrap();
+        assert!(desktop_cargo.contains("version = \"0.1.0\", path = \"../app\""));
         assert!(desktop_cargo.contains("gpui-dev = [\"delta-mobile-app/gpui-dev\"]"));
         assert!(desktop_cargo.contains("gpui-profile = [\"delta-mobile-app/gpui-profile\"]"));
     }

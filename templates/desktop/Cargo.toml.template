@@ -11,4 +11,4 @@ gpui-profile = ["{{APP_CRATE}}/gpui-profile"]
 [dependencies]
 gpui.workspace = true
 gpui-kit.workspace = true
-{{APP_CRATE}} = { path = "../app" }
+{{APP_CRATE}} = { version = "{{TEMPLATE_PACKAGE_VERSION}}", path = "../app" }
