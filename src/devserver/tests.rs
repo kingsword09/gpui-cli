@@ -40,6 +40,14 @@ fn connect(server: &DevServer, token: &str) -> TcpStream {
     socket
 }
 
+#[test]
+fn registration_advertises_supported_schema_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let server = ControlServer::start(session).unwrap();
+    assert_eq!(server.registration.supported_schema_versions, vec![1]);
+}
+
 fn send(socket: &mut TcpStream, message: &ClientMessage) {
     protocol::write_frame(socket, &protocol::encode(message).unwrap()).unwrap();
 }

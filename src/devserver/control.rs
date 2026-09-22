@@ -20,6 +20,10 @@ pub const MAX_WAIT_MS: u64 = 30_000;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Registration {
     pub schema_version: u32,
+    /// Schema versions this supervisor can actually serve. Older
+    /// registrations omit the field and deserialize as an empty list.
+    #[serde(default)]
+    pub supported_schema_versions: Vec<u32>,
     pub session_id: String,
     pub project_root: PathBuf,
     pub target_id: String,
@@ -114,6 +118,7 @@ impl ControlServer {
         let state = session.store.state();
         let registration = Registration {
             schema_version: SCHEMA_VERSION,
+            supported_schema_versions: vec![SCHEMA_VERSION],
             session_id: session.id.clone(),
             project_root: session.root.clone(),
             target_id: state.target_id,
@@ -348,4 +353,25 @@ pub fn project_root() -> Result<PathBuf> {
         .find(|p| p.join("gpui.toml").is_file() && p.join("Cargo.toml").is_file())
         .map(Path::to_owned)
         .context("Run inside a project created by `gpui init`.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_registration_without_capabilities_still_deserializes() {
+        let registration: Registration = serde_json::from_value(json!({
+            "schema_version": 1,
+            "session_id": "s1",
+            "project_root": ".",
+            "target_id": "desktop:test",
+            "supervisor_pid": 1,
+            "created_at_ms": 0,
+            "port": 1234,
+            "token": "token"
+        }))
+        .unwrap();
+        assert!(registration.supported_schema_versions.is_empty());
+    }
 }
