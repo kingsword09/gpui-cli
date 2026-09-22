@@ -372,6 +372,7 @@ dependencies = [
  "colored",
  "ctrlc",
  "getrandom",
+ "gpui-dev-protocol",
  "include_dir",
  "inquire",
  "libc",

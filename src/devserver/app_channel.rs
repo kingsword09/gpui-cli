@@ -272,22 +272,19 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    let hello = protocol::read_frame(&mut stream).and_then(|payload| {
-        let metadata = protocol::decode::<protocol::HelloMetadata>(&payload).unwrap_or_default();
-        let hello = protocol::decode::<ClientMessage>(&payload)?;
-        Ok((hello, metadata))
-    });
-    let Ok((
-        ClientMessage::Hello {
-            proto,
-            token,
-            project,
-            pid,
-            platform,
-            asset_reload,
-        },
-        metadata,
-    )) = hello
+    let hello = protocol::read_frame(&mut stream)
+        .and_then(|payload| protocol::decode::<ClientMessage>(&payload));
+    let Ok(ClientMessage::Hello {
+        proto,
+        token,
+        project,
+        pid,
+        platform,
+        asset_reload,
+        runtime_version,
+        gpui_version,
+        capabilities,
+    }) = hello
     else {
         return;
     };
@@ -365,9 +362,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
         &scope,
         json!({"project": project, "platform": platform, "pid": pid,
         "asset_reload": asset_reload, "connection_id": id,
-        "runtime_version": metadata.runtime_version.as_deref().map(|value| clip(value, 128)),
-        "gpui_version": metadata.gpui_version.as_deref().map(|value| clip(value, 64)),
-        "capabilities": metadata.capabilities.iter().take(16).map(|value| clip(value, 64)).collect::<Vec<_>>()}),
+        "runtime_version": runtime_version.as_deref().map(|value| clip(value, 128)),
+        "gpui_version": gpui_version.as_deref().map(|value| clip(value, 64)),
+        "capabilities": capabilities.iter().take(16).map(|value| clip(value, 64)).collect::<Vec<_>>()}),
     );
     if let Some(span) = &connect_span {
         span.finish("ok", None);
@@ -490,6 +487,9 @@ mod tests {
             pid: 1,
             platform: "test".to_string(),
             asset_reload: true,
+            runtime_version: None,
+            gpui_version: None,
+            capabilities: Vec::new(),
         })
         .unwrap();
         protocol::write_frame(&mut stream, &hello).unwrap();
@@ -516,6 +516,9 @@ mod tests {
             pid: 1,
             platform: "test".to_string(),
             asset_reload: false,
+            runtime_version: None,
+            gpui_version: None,
+            capabilities: Vec::new(),
         })
         .unwrap();
         protocol::write_frame(&mut bad, &hello).unwrap();
@@ -543,6 +546,9 @@ mod tests {
             pid: 1,
             platform: "test".to_string(),
             asset_reload: false,
+            runtime_version: None,
+            gpui_version: None,
+            capabilities: Vec::new(),
         })
         .unwrap();
         protocol::write_frame(&mut stream, &hello).unwrap();
@@ -613,6 +619,9 @@ mod tests {
             pid: 1,
             platform: "test".to_string(),
             asset_reload: true,
+            runtime_version: None,
+            gpui_version: None,
+            capabilities: Vec::new(),
         })
         .unwrap();
         protocol::write_frame(&mut raw, &hello).unwrap();
