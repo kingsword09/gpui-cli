@@ -3,7 +3,9 @@ use clap::{Args, Subcommand};
 use colored::*;
 
 use crate::upgrade::{
-    PlanStatus, UpgradePlan, plan_project, save_plan,
+    PlanStatus, UpgradePlan,
+    lock::UpgradeLock,
+    plan_project, save_plan,
     transaction::{RecoveryReport, recover_transaction},
 };
 
@@ -94,6 +96,7 @@ fn handle_apply(args: UpgradeApplyArgs) -> Result<i32> {
 fn handle_recover(args: UpgradeRecoverArgs) -> Result<i32> {
     let root = std::env::current_dir()?;
     let report: RecoveryReport = recover_transaction(&root, &args.transaction)?;
+    UpgradeLock::release_owned(&root, &args.transaction)?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {

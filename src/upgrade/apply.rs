@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::lock::UpgradeLock;
 use super::transaction::{
     FileState, JournalFile, TransactionJournal, TransactionState, TransactionStore,
-    recover_transaction,
+    recover_transaction, safe_project_path,
 };
 use super::{FileAction, PlanStatus, hash_file, load_plan, load_project, plan_project};
 use crate::template::scaffold;
@@ -119,7 +119,7 @@ pub(crate) fn apply_cached_plan_with_failure(
     }
 
     let target_manifest_bytes = fs::read(TemplateManifest::path(target_root.path()))?;
-    let current_manifest_path = root.join(MANIFEST_RELATIVE_PATH);
+    let current_manifest_path = safe_project_path(root, MANIFEST_RELATIVE_PATH)?;
     let current_manifest_hash = hash_file(&current_manifest_path)?;
     let target_manifest_hash = hash_bytes(&target_manifest_bytes);
     if current_manifest_hash.as_deref() != Some(target_manifest_hash.as_str()) {
@@ -151,7 +151,7 @@ pub(crate) fn apply_cached_plan_with_failure(
         return abort_transaction(root, &store, &mut journal, error);
     }
 
-    let applied = match write_files(root, &store, &mut journal, &target_bytes, failure) {
+    let applied = match write_files(&store, &mut journal, &target_bytes, failure) {
         Ok(applied) => applied,
         Err(error) => return abort_transaction(root, &store, &mut journal, error),
     };
@@ -211,7 +211,6 @@ fn backup_files(
 }
 
 fn write_files(
-    root: &Path,
     store: &TransactionStore,
     journal: &mut TransactionJournal,
     target_bytes: &BTreeMap<String, Option<Vec<u8>>>,
@@ -221,7 +220,8 @@ fn write_files(
     for index in 0..journal.files.len() {
         let path = journal.files[index].path.clone();
         let expected_old = journal.files[index].old_sha256.clone();
-        if hash_file(&root.join(&path))? != expected_old {
+        let project_path = store.path(&path)?;
+        if hash_file(&project_path)? != expected_old {
             bail!("concurrent_edit: '{}' changed before replacement", path);
         }
         if path == MANIFEST_RELATIVE_PATH {
@@ -242,7 +242,7 @@ fn write_files(
             maybe_fail(failure, FailurePoint::AfterManifest)?;
         }
         let expected_new = journal.files[index].new_sha256.clone();
-        if hash_file(&root.join(&path))? != expected_new {
+        if hash_file(&project_path)? != expected_new {
             bail!("post_write_hash_mismatch: '{}'", path);
         }
         applied += 1;

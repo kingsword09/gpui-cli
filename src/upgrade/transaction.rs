@@ -232,10 +232,7 @@ impl TransactionStore {
     }
 
     pub fn path(&self, relative: &str) -> Result<PathBuf> {
-        validate_relative_path(relative)?;
-        let path = self.root.join(relative);
-        ensure_no_symlink_parent(&self.root, relative)?;
-        Ok(path)
+        safe_project_path(&self.root, relative)
     }
 
     pub fn write_project_file(&self, relative: &str, bytes: &[u8]) -> Result<()> {
@@ -247,6 +244,13 @@ impl TransactionStore {
         let path = self.path(relative)?;
         remove_owned_file(&path)
     }
+}
+
+pub(crate) fn safe_project_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    validate_relative_path(relative)?;
+    let path = root.join(relative);
+    ensure_no_symlink_component(root, relative)?;
+    Ok(path)
 }
 
 pub fn recover_transaction(root: &Path, transaction_id: &str) -> Result<RecoveryReport> {
@@ -282,7 +286,14 @@ pub fn recover_transaction(root: &Path, transaction_id: &str) -> Result<Recovery
                 continue;
             }
         };
-        let current = hash_file(&path)?;
+        let current = match hash_file(&path) {
+            Ok(current) => current,
+            Err(error) => {
+                file.state = FileState::RecoveryRequired;
+                errors.push(format!("{}: {error:#}", file.path));
+                continue;
+            }
+        };
         if current.as_deref() == file.old_sha256.as_deref() {
             file.state = FileState::Restored;
             restored.push(file.path.clone());
@@ -384,8 +395,19 @@ fn remove_owned_file(path: &Path) -> Result<()> {
 }
 
 fn hash_file(path: &Path) -> Result<Option<String>> {
-    if !path.exists() {
-        return Ok(None);
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        bail!("transaction path '{}' is a symbolic link", path.display());
+    }
+    if !metadata.is_file() {
+        bail!(
+            "transaction path '{}' is not a regular file",
+            path.display()
+        );
     }
     Ok(Some(hash_bytes(&fs::read(path)?)))
 }
@@ -431,13 +453,14 @@ fn validate_relative_path(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_no_symlink_parent(root: &Path, relative: &str) -> Result<()> {
+fn ensure_no_symlink_component(root: &Path, relative: &str) -> Result<()> {
     let mut current = root.to_path_buf();
-    let path = Path::new(relative);
-    let mut components = path.components().peekable();
-    while let Some(component) = components.next() {
+    for component in Path::new(relative).components() {
         current.push(component.as_os_str());
-        if components.peek().is_some() && current.is_symlink() {
+        if current
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
             bail!("transaction path '{}' crosses a symbolic link", relative);
         }
     }
@@ -558,5 +581,25 @@ mod tests {
             TransactionJournal::new("tx-duplicate", "sha256:plan", vec![file.clone(), file])
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_rejects_symlinked_parent_and_final_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("file.txt"), b"outside").unwrap();
+        symlink(&outside, dir.path().join("linked-dir")).unwrap();
+
+        let (store, _) =
+            TransactionStore::create(dir.path(), "tx-symlink-parent", "sha256:plan", vec![])
+                .unwrap();
+        assert!(store.path("linked-dir/file.txt").is_err());
+
+        symlink(outside.join("file.txt"), dir.path().join("linked-file.txt")).unwrap();
+        assert!(store.path("linked-file.txt").is_err());
     }
 }
