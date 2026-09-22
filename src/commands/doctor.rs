@@ -39,9 +39,37 @@ pub fn handle_doctor(args: DoctorArgs) -> Result<i32> {
         Err(error) => return Err(error),
     };
     let (target, explicit, source) = select_target(args.target, project.as_ref())?;
-    let context = requirements_context(project.as_ref());
+    let mut report = probe_report(project.as_ref(), target, explicit, source)?;
+    if let Some(device_check) = device_check(target, &args.device, project.as_ref()) {
+        report.checks.push(device_check);
+        report = DoctorReport::new(report.project, report.target, report.checks);
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        render_human(&report);
+    }
+    Ok(report.exit_code())
+}
+
+/// Runs the non-device portion of doctor for an existing generated project.
+/// Upgrade validation uses this shared path so a missing native toolchain is
+/// reported with the same bounded probe semantics as `gpui doctor`.
+pub(crate) fn diagnose_project(root: &Path, target: Target) -> Result<DoctorReport> {
+    let project = Project::load(Some(root.to_path_buf()))?;
+    probe_report(Some(&project), target, false, "upgrade")
+}
+
+fn probe_report(
+    project: Option<&Project>,
+    target: Target,
+    explicit: bool,
+    source: &'static str,
+) -> Result<DoctorReport> {
+    let context = requirements_context(project);
     let requirements = requirements_for(&context, target)?;
-    let probe_cwd = project.as_ref().map(|project| {
+    let probe_cwd = project.map(|project| {
         if target == Target::Android {
             project.android_gradle_dir()
         } else {
@@ -49,26 +77,16 @@ pub fn handle_doctor(args: DoctorArgs) -> Result<i32> {
         }
     });
     let mut runner = ProbeRunner::new(ProbeConfig::default());
-    let mut checks = runner.probe(&requirements, probe_cwd.as_deref());
-    if let Some(device_check) = device_check(target, &args.device, project.as_ref()) {
-        checks.push(device_check);
-    }
-
-    let report = DoctorReport::new(
-        project_summary(project.as_ref()),
+    let checks = runner.probe(&requirements, probe_cwd.as_deref());
+    Ok(DoctorReport::new(
+        project_summary(project),
         TargetSummary {
             id: target,
             explicit,
             source: source.into(),
         },
         checks,
-    );
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        render_human(&report);
-    }
-    Ok(report.exit_code())
+    ))
 }
 
 fn select_target(
