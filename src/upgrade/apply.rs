@@ -505,4 +505,74 @@ mod tests {
             assert_eq!(store.read().unwrap().state, TransactionState::RolledBack);
         }
     }
+
+    #[test]
+    fn user_edit_after_partial_write_is_preserved_by_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("first.txt"), b"old first").unwrap();
+        fs::write(dir.path().join("second.txt"), b"old second").unwrap();
+        let files = vec![
+            journal_file("first.txt", Some(b"old first"), Some(b"new first")),
+            journal_file("second.txt", Some(b"old second"), Some(b"new second")),
+        ];
+        let (store, mut journal) =
+            TransactionStore::create(dir.path(), "tx-concurrent-edit", "sha256:plan", files)
+                .unwrap();
+        store
+            .write_backup(&journal.files[0].backup_path.clone().unwrap(), b"old first")
+            .unwrap();
+        store
+            .write_backup(
+                &journal.files[1].backup_path.clone().unwrap(),
+                b"old second",
+            )
+            .unwrap();
+        journal.state = TransactionState::Writing;
+        store.write(&journal).unwrap();
+
+        let targets = BTreeMap::from([
+            ("first.txt".to_owned(), Some(b"new first".to_vec())),
+            ("second.txt".to_owned(), Some(b"new second".to_vec())),
+        ]);
+        let error = write_files(
+            &store,
+            &mut journal,
+            &targets,
+            Some(FailurePoint::AfterReplace),
+        )
+        .unwrap_err();
+        fs::write(dir.path().join("first.txt"), b"user edit after write").unwrap();
+
+        let recovery_error = abort_transaction(dir.path(), &store, &mut journal, error)
+            .unwrap_err()
+            .to_string();
+        assert!(recovery_error.contains("preserved_user_changes"));
+        assert!(recovery_error.contains("first.txt"));
+        assert_eq!(
+            fs::read(dir.path().join("first.txt")).unwrap(),
+            b"user edit after write"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("second.txt")).unwrap(),
+            b"old second"
+        );
+        assert_eq!(
+            store.read().unwrap().state,
+            TransactionState::RecoveryRequired
+        );
+    }
+
+    #[test]
+    fn apply_refuses_a_second_transaction_while_the_project_is_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold(dir.path(), &config()).unwrap();
+        let plan = plan_project(dir.path(), crate::template::TEMPLATE_VERSION).unwrap();
+        save_plan(dir.path(), &plan).unwrap();
+        let lock = UpgradeLock::acquire(dir.path(), "tx-existing").unwrap();
+
+        let error = apply_cached_plan(dir.path(), &plan.plan_id).unwrap_err();
+        assert!(error.to_string().contains("upgrade_busy"));
+        assert!(!dir.path().join(".gpui/upgrade/transactions").exists());
+        drop(lock);
+    }
 }
