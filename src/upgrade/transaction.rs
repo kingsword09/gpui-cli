@@ -237,6 +237,16 @@ impl TransactionStore {
         ensure_no_symlink_parent(&self.root, relative)?;
         Ok(path)
     }
+
+    pub fn write_project_file(&self, relative: &str, bytes: &[u8]) -> Result<()> {
+        let path = self.path(relative)?;
+        atomic_bytes(&path, bytes)
+    }
+
+    pub fn remove_project_file(&self, relative: &str) -> Result<()> {
+        let path = self.path(relative)?;
+        remove_owned_file(&path)
+    }
 }
 
 pub fn recover_transaction(root: &Path, transaction_id: &str) -> Result<RecoveryReport> {

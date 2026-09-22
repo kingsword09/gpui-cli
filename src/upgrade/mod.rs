@@ -3,6 +3,8 @@
 //! T03 deliberately stops at a plan. It never writes a project file, updates
 //! a manifest, or acquires an upgrade lock; those are T04 responsibilities.
 
+pub mod apply;
+pub mod lock;
 pub mod transaction;
 
 use anyhow::{Context, Result, bail};
@@ -17,6 +19,7 @@ use crate::template::{Platform, ProjectConfig, TEMPLATE_VERSION, UiFramework, sc
 use crate::template_manifest::{ManifestFile, TemplateManifest};
 
 pub const PLAN_SCHEMA_VERSION: u32 = 1;
+const PLAN_ROOT: &str = ".gpui/upgrade/plans";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -113,10 +116,47 @@ pub struct UpgradePlan {
     pub notes: Vec<String>,
 }
 
+pub fn save_plan(root: &Path, plan: &UpgradePlan) -> Result<PathBuf> {
+    validate_plan_id(&plan.plan_id)?;
+    let path = plan_path(root, &plan.plan_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(plan)?;
+    bytes.push(b'\n');
+    fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+pub fn load_plan(root: &Path, plan_id: &str) -> Result<UpgradePlan> {
+    let path = plan_path(root, plan_id)?;
+    let bytes =
+        fs::read(&path).with_context(|| format!("reading upgrade plan '{}'", path.display()))?;
+    let plan: UpgradePlan = serde_json::from_slice(&bytes)
+        .with_context(|| format!("invalid upgrade plan '{}'", path.display()))?;
+    if plan.plan_id != plan_id {
+        bail!("upgrade plan id does not match its stored content");
+    }
+    Ok(plan)
+}
+
+fn plan_path(root: &Path, plan_id: &str) -> Result<PathBuf> {
+    let hex = plan_id
+        .strip_prefix("sha256:")
+        .filter(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .context("invalid upgrade plan id")?;
+    Ok(root.join(PLAN_ROOT).join(format!("{hex}.json")))
+}
+
+fn validate_plan_id(plan_id: &str) -> Result<()> {
+    let _ = plan_path(Path::new("."), plan_id)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
-struct ResolvedProject {
-    root: PathBuf,
-    config: ProjectConfig,
+pub(crate) struct ResolvedProject {
+    pub(crate) root: PathBuf,
+    pub(crate) config: ProjectConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,7 +279,7 @@ pub fn plan_project(root: &Path, target_version: &str) -> Result<UpgradePlan> {
     }))
 }
 
-fn load_project(root: &Path) -> Result<ResolvedProject> {
+pub(crate) fn load_project(root: &Path) -> Result<ResolvedProject> {
     if !root.join("Cargo.toml").is_file() || !root.join("gpui.toml").is_file() {
         bail!(
             "upgrade plan must run at a generated project root containing Cargo.toml and gpui.toml"
@@ -465,7 +505,7 @@ fn build_group_plans(
         .collect()
 }
 
-fn hash_file(path: &Path) -> Result<Option<String>> {
+pub(crate) fn hash_file(path: &Path) -> Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
