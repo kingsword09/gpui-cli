@@ -326,7 +326,7 @@ fn resolve_base(
         None => {
             let mut mismatches = Vec::new();
             for entry in &target_manifest.files {
-                let actual = hash_file(&project.root.join(&entry.path))?;
+                let actual = project_hash_file(&project.root, &entry.path)?;
                 if actual.as_deref() != Some(entry.base_sha256.as_str()) {
                     mismatches.push(entry.path.clone());
                 }
@@ -402,7 +402,7 @@ fn build_file_plans(
     for (path, (base_entry, target_entry)) in entries {
         let base_hash = base_entry.map(|entry| entry.base_sha256.clone());
         let target_hash = target_entry.map(|entry| entry.base_sha256.clone());
-        let local_hash = hash_file(&root.join(&path))?;
+        let local_hash = project_hash_file(root, &path)?;
         let group = target_entry
             .or(base_entry)
             .map(|entry| entry.group.clone())
@@ -506,14 +506,24 @@ fn build_group_plans(
 }
 
 pub(crate) fn hash_file(path: &Path) -> Result<Option<String>> {
-    if !path.exists() {
-        return Ok(None);
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        bail!("managed path '{}' is a symbolic link", path.display());
     }
-    if !path.is_file() {
+    if !metadata.is_file() {
         bail!("managed path '{}' is not a regular file", path.display());
     }
     let bytes = fs::read(path)?;
     Ok(Some(hash_bytes(&bytes)))
+}
+
+fn project_hash_file(root: &Path, relative: &str) -> Result<Option<String>> {
+    let path = transaction::safe_project_path(root, relative)?;
+    hash_file(&path)
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -539,8 +549,7 @@ fn local_inputs(root: &Path, target: &TemplateManifest) -> Result<Vec<PlanInput>
         .files
         .iter()
         .map(|entry| {
-            let path = root.join(&entry.path);
-            let hash = hash_file(&path)?;
+            let hash = project_hash_file(root, &entry.path)?;
             Ok(PlanInput {
                 kind: "local_file".to_owned(),
                 path: entry.path.clone(),
@@ -745,5 +754,51 @@ mod tests {
         let plan = plan_project(dir.path(), TEMPLATE_VERSION).unwrap();
         assert_eq!(plan.status, PlanStatus::Ready);
         assert_eq!(plan.base_resolution, BaseResolution::InferredExact);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planning_rejects_a_symlinked_managed_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = ProjectConfig {
+            name: "upgrade-fixture".into(),
+            title: "Upgrade Fixture".into(),
+            bundle_id: "com.example.upgradefixture".into(),
+            ui_framework: UiFramework::GpuiKit,
+            targets: vec![Platform::MacOs],
+        };
+        scaffold(dir.path(), &config).unwrap();
+        let managed = dir.path().join("crates/app/src/lib.rs");
+        let outside = dir.path().join("outside.rs");
+        fs::rename(&managed, &outside).unwrap();
+        symlink(&outside, &managed).unwrap();
+
+        let error = plan_project(dir.path(), TEMPLATE_VERSION).unwrap_err();
+        assert!(error.to_string().contains("symbolic link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planning_rejects_a_symlinked_managed_parent() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = ProjectConfig {
+            name: "upgrade-fixture".into(),
+            title: "Upgrade Fixture".into(),
+            bundle_id: "com.example.upgradefixture".into(),
+            ui_framework: UiFramework::GpuiKit,
+            targets: vec![Platform::MacOs],
+        };
+        scaffold(dir.path(), &config).unwrap();
+        let source = dir.path().join("crates");
+        let outside = dir.path().join("outside");
+        fs::rename(&source, &outside).unwrap();
+        symlink(&outside, &source).unwrap();
+
+        let error = plan_project(dir.path(), TEMPLATE_VERSION).unwrap_err();
+        assert!(error.to_string().contains("symbolic link"));
     }
 }
