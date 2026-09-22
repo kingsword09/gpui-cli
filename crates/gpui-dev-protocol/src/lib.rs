@@ -6,12 +6,16 @@
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 
 /// Current app-channel protocol version.
 pub const PROTO_VERSION: u32 = 1;
 /// Maximum payload for one length-prefixed frame.
 pub const MAX_FRAME_LEN: u32 = 1024 * 1024;
+/// Control API schema used by the planned v2 observation surface.
+pub const CONTROL_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -68,6 +72,91 @@ pub enum ServerMessage {
     PrepareRestart {
         session: String,
     },
+}
+
+/// Stable outer shape for v2 control responses. The CLI can carry this DTO
+/// without coupling the transport crate to any observation implementation.
+#[derive(Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct V2Envelope<T> {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<V2Error>,
+}
+
+impl<T> V2Envelope<T> {
+    pub fn success(
+        session_id: impl Into<String>,
+        request_id: impl Into<String>,
+        result: T,
+    ) -> Self {
+        Self {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            session_id: session_id.into(),
+            request_id: request_id.into(),
+            ok: true,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    pub fn failure(
+        session_id: impl Into<String>,
+        request_id: impl Into<String>,
+        error: V2Error,
+    ) -> Self {
+        Self {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            session_id: session_id.into(),
+            request_id: request_id.into(),
+            ok: false,
+            result: None,
+            error: Some(error),
+        }
+    }
+
+    /// Checks the invariants that cannot be expressed by serde attributes.
+    pub fn is_valid(&self) -> bool {
+        self.schema_version == CONTROL_SCHEMA_VERSION
+            && valid_request_id(&self.request_id)
+            && if self.ok {
+                self.result.is_some() && self.error.is_none()
+            } else {
+                self.result.is_none() && self.error.is_some()
+            }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct V2Error {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+    #[serde(default)]
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct Capability {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub provider: String,
+    #[serde(default)]
+    pub constraints: BTreeMap<String, Value>,
+}
+
+pub fn valid_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
 pub fn encode<T: Serialize>(message: &T) -> serde_json::Result<Vec<u8>> {
