@@ -33,6 +33,26 @@ pub struct ApplyReport {
 }
 
 pub fn apply_cached_plan(root: &Path, plan_id: &str) -> Result<ApplyReport> {
+    apply_cached_plan_with_failure(root, plan_id, None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailurePoint {
+    AfterJournal,
+    AfterBackup,
+    BeforeReplace,
+    AfterReplace,
+    BeforeManifest,
+    AfterManifest,
+    BeforeValidate,
+    AfterValidate,
+}
+
+pub(crate) fn apply_cached_plan_with_failure(
+    root: &Path,
+    plan_id: &str,
+    failure: Option<FailurePoint>,
+) -> Result<ApplyReport> {
     let stored = load_plan(root, plan_id)?;
     if stored.status != PlanStatus::Ready {
         bail!(
@@ -119,29 +139,35 @@ pub fn apply_cached_plan(root: &Path, plan_id: &str) -> Result<ApplyReport> {
 
     let (store, mut journal) =
         TransactionStore::create(root, &transaction_id, &stored.plan_id, journal_files)?;
-    backup_files(root, &store, &mut journal)?;
+    if let Err(error) = maybe_fail(failure, FailurePoint::AfterJournal) {
+        return abort_transaction(root, &store, &mut journal, error);
+    }
+    if let Err(error) = backup_files(root, &store, &mut journal) {
+        return abort_transaction(root, &store, &mut journal, error);
+    }
     journal.state = TransactionState::Writing;
     store.write(&journal)?;
+    if let Err(error) = maybe_fail(failure, FailurePoint::AfterBackup) {
+        return abort_transaction(root, &store, &mut journal, error);
+    }
 
-    let applied = match write_files(root, &store, &mut journal, &target_bytes) {
+    let applied = match write_files(root, &store, &mut journal, &target_bytes, failure) {
         Ok(applied) => applied,
-        Err(error) => {
-            journal.state = TransactionState::RecoveryRequired;
-            store.write(&journal)?;
-            let recovery = recover_transaction(root, &transaction_id)?;
-            bail!(
-                "upgrade apply failed: {error:#}; recovery_state={:?}, \
-                 preserved_user_changes={:?}, recovery_errors={:?}",
-                recovery.state,
-                recovery.preserved_user_changes,
-                recovery.errors
-            );
-        }
+        Err(error) => return abort_transaction(root, &store, &mut journal, error),
     };
 
     journal.state = TransactionState::Validating;
     store.write(&journal)?;
-    let validation = validate_result(root, &target_manifest)?;
+    if let Err(error) = maybe_fail(failure, FailurePoint::BeforeValidate) {
+        return abort_transaction(root, &store, &mut journal, error);
+    }
+    let validation = match validate_result(root, &target_manifest) {
+        Ok(validation) => validation,
+        Err(error) => return abort_transaction(root, &store, &mut journal, error),
+    };
+    if let Err(error) = maybe_fail(failure, FailurePoint::AfterValidate) {
+        return abort_transaction(root, &store, &mut journal, error);
+    }
 
     journal.state = TransactionState::Committed;
     store.write(&journal)?;
@@ -189,6 +215,7 @@ fn write_files(
     store: &TransactionStore,
     journal: &mut TransactionJournal,
     target_bytes: &BTreeMap<String, Option<Vec<u8>>>,
+    failure: Option<FailurePoint>,
 ) -> Result<usize> {
     let mut applied = 0;
     for index in 0..journal.files.len() {
@@ -197,6 +224,10 @@ fn write_files(
         if hash_file(&root.join(&path))? != expected_old {
             bail!("concurrent_edit: '{}' changed before replacement", path);
         }
+        if path == MANIFEST_RELATIVE_PATH {
+            maybe_fail(failure, FailurePoint::BeforeManifest)?;
+        }
+        maybe_fail(failure, FailurePoint::BeforeReplace)?;
         journal.files[index].state = FileState::Replaced;
         store.write(journal)?;
         match target_bytes
@@ -206,6 +237,10 @@ fn write_files(
             Some(bytes) => store.write_project_file(&path, bytes)?,
             None => store.remove_project_file(&path)?,
         }
+        maybe_fail(failure, FailurePoint::AfterReplace)?;
+        if path == MANIFEST_RELATIVE_PATH {
+            maybe_fail(failure, FailurePoint::AfterManifest)?;
+        }
         let expected_new = journal.files[index].new_sha256.clone();
         if hash_file(&root.join(&path))? != expected_new {
             bail!("post_write_hash_mismatch: '{}'", path);
@@ -213,6 +248,32 @@ fn write_files(
         applied += 1;
     }
     Ok(applied)
+}
+
+fn maybe_fail(failure: Option<FailurePoint>, point: FailurePoint) -> Result<()> {
+    if failure == Some(point) {
+        bail!("injected_failure:{point:?}");
+    }
+    Ok(())
+}
+
+fn abort_transaction(
+    root: &Path,
+    store: &TransactionStore,
+    journal: &mut TransactionJournal,
+    error: anyhow::Error,
+) -> Result<ApplyReport> {
+    journal.state = TransactionState::RecoveryRequired;
+    let journal_error = store.write(journal).err();
+    let recovery = recover_transaction(root, &journal.transaction_id)?;
+    bail!(
+        "upgrade apply failed: {error:#}; recovery_state={:?}, \
+         preserved_user_changes={:?}, recovery_errors={:?}, journal_error={:?}",
+        recovery.state,
+        recovery.preserved_user_changes,
+        recovery.errors,
+        journal_error.map(|error| error.to_string())
+    );
 }
 
 fn validate_result(root: &Path, target: &TemplateManifest) -> Result<ValidationReport> {
@@ -300,5 +361,46 @@ mod tests {
         assert!(error.to_string().contains("stale_plan"));
         assert!(!dir.path().join(".gpui/upgrade/upgrade.lock").exists());
         assert!(!dir.path().join(".gpui/upgrade/transactions").exists());
+    }
+
+    #[test]
+    fn injected_failure_after_journal_recovers_and_releases_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold(dir.path(), &config()).unwrap();
+        let plan = plan_project(dir.path(), crate::template::TEMPLATE_VERSION).unwrap();
+        save_plan(dir.path(), &plan).unwrap();
+
+        let error = apply_cached_plan_with_failure(
+            dir.path(),
+            &plan.plan_id,
+            Some(FailurePoint::AfterJournal),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected_failure"));
+        assert!(!dir.path().join(".gpui/upgrade/upgrade.lock").exists());
+        let transactions = fs::read_dir(dir.path().join(".gpui/upgrade/transactions"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(transactions.len(), 1);
+        let journal = fs::read_to_string(transactions[0].path().join("journal.json")).unwrap();
+        assert!(journal.contains("\"state\": \"rolled_back\""));
+    }
+
+    #[test]
+    fn injected_failure_before_validation_recovers_written_state() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold(dir.path(), &config()).unwrap();
+        let plan = plan_project(dir.path(), crate::template::TEMPLATE_VERSION).unwrap();
+        save_plan(dir.path(), &plan).unwrap();
+
+        let error = apply_cached_plan_with_failure(
+            dir.path(),
+            &plan.plan_id,
+            Some(FailurePoint::BeforeValidate),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected_failure"));
+        assert!(!dir.path().join(".gpui/upgrade/upgrade.lock").exists());
     }
 }
