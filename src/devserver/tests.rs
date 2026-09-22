@@ -32,6 +32,9 @@ fn connect(server: &DevServer, token: &str) -> TcpStream {
             pid: 123,
             platform: "test".into(),
             asset_reload: true,
+            runtime_version: None,
+            gpui_version: None,
+            capabilities: Vec::new(),
         },
     );
     let reply: ServerMessage =
