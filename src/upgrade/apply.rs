@@ -665,4 +665,31 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn conflicting_backup_aborts_without_modifying_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed.txt");
+        fs::write(&path, b"old bytes").unwrap();
+        let file = journal_file("managed.txt", Some(b"old bytes"), Some(b"new bytes"));
+        let (store, mut journal) =
+            TransactionStore::create(dir.path(), "tx-backup-conflict", "sha256:plan", vec![file])
+                .unwrap();
+        let backup_path = journal.files[0].backup_path.clone().unwrap();
+        store
+            .write_backup(&backup_path, b"different bytes")
+            .unwrap();
+        let lock = UpgradeLock::acquire(dir.path(), &journal.transaction_id).unwrap();
+
+        let error = backup_files(dir.path(), &store, &mut journal).unwrap_err();
+        let recovery_error = abort_transaction(dir.path(), &store, &mut journal, error)
+            .unwrap_err()
+            .to_string();
+        drop(lock);
+
+        assert!(recovery_error.contains("already contains different bytes"));
+        assert_eq!(fs::read(&path).unwrap(), b"old bytes");
+        assert_eq!(store.read().unwrap().state, TransactionState::RolledBack);
+        assert!(!dir.path().join(".gpui/upgrade/upgrade.lock").exists());
+    }
 }
