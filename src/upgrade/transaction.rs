@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{self, ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const JOURNAL_SCHEMA_VERSION: u32 = 1;
 const TRANSACTION_ROOT: &str = ".gpui/upgrade/transactions";
@@ -376,6 +377,7 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    maybe_injected_io_failure(path)?;
     let parent = path
         .parent()
         .with_context(|| format!("path '{}' has no parent", path.display()))?;
@@ -389,6 +391,39 @@ fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     fs::rename(temp.path(), path)?;
     Ok(())
+}
+
+static INJECTED_IO_FAILURE: AtomicBool = AtomicBool::new(false);
+
+fn maybe_injected_io_failure(path: &Path) -> io::Result<()> {
+    let Some(spec) = std::env::var("GPUI_UPGRADE_IO_FAILURE").ok() else {
+        return Ok(());
+    };
+    let Some((stage, kind)) = spec.split_once(':') else {
+        return Ok(());
+    };
+    let actual_stage = if path.file_name().is_some_and(|name| name == "journal.json") {
+        "journal"
+    } else if path
+        .components()
+        .any(|component| component.as_os_str() == "backups")
+    {
+        "backup"
+    } else {
+        "project"
+    };
+    if stage != actual_stage || INJECTED_IO_FAILURE.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    let (error_kind, label) = match kind {
+        "storage_full" => (ErrorKind::StorageFull, "storage_full"),
+        "permission_denied" => (ErrorKind::PermissionDenied, "permission_denied"),
+        _ => return Ok(()),
+    };
+    Err(io::Error::new(
+        error_kind,
+        format!("injected_{label} at {}", path.display()),
+    ))
 }
 
 fn remove_owned_file(path: &Path) -> Result<()> {
