@@ -51,6 +51,21 @@ pub enum FailurePoint {
     AfterValidate,
 }
 
+impl FailurePoint {
+    fn crash_env_value(self) -> &'static str {
+        match self {
+            Self::AfterJournal => "after_journal",
+            Self::AfterBackup => "after_backup",
+            Self::BeforeReplace => "before_replace",
+            Self::AfterReplace => "after_replace",
+            Self::BeforeManifest => "before_manifest",
+            Self::AfterManifest => "after_manifest",
+            Self::BeforeValidate => "before_validate",
+            Self::AfterValidate => "after_validate",
+        }
+    }
+}
+
 pub(crate) fn apply_cached_plan_with_failure(
     root: &Path,
     plan_id: &str,
@@ -142,6 +157,7 @@ pub(crate) fn apply_cached_plan_with_failure(
 
     let (store, mut journal) =
         TransactionStore::create(root, &transaction_id, &stored.plan_id, journal_files)?;
+    maybe_crash(FailurePoint::AfterJournal);
     if let Err(error) = maybe_fail(failure, FailurePoint::AfterJournal) {
         return abort_transaction(root, &store, &mut journal, error);
     }
@@ -150,6 +166,7 @@ pub(crate) fn apply_cached_plan_with_failure(
     }
     journal.state = TransactionState::Writing;
     store.write(&journal)?;
+    maybe_crash(FailurePoint::AfterBackup);
     if let Err(error) = maybe_fail(failure, FailurePoint::AfterBackup) {
         return abort_transaction(root, &store, &mut journal, error);
     }
@@ -161,6 +178,7 @@ pub(crate) fn apply_cached_plan_with_failure(
 
     journal.state = TransactionState::Validating;
     store.write(&journal)?;
+    maybe_crash(FailurePoint::BeforeValidate);
     if let Err(error) = maybe_fail(failure, FailurePoint::BeforeValidate) {
         return abort_transaction(root, &store, &mut journal, error);
     }
@@ -171,6 +189,7 @@ pub(crate) fn apply_cached_plan_with_failure(
     if let Err(error) = maybe_fail(failure, FailurePoint::AfterValidate) {
         return abort_transaction(root, &store, &mut journal, error);
     }
+    maybe_crash(FailurePoint::AfterValidate);
 
     journal.state = TransactionState::Committed;
     store.write(&journal)?;
@@ -228,8 +247,10 @@ fn write_files(
             bail!("concurrent_edit: '{}' changed before replacement", path);
         }
         if path == MANIFEST_RELATIVE_PATH {
+            maybe_crash(FailurePoint::BeforeManifest);
             maybe_fail(failure, FailurePoint::BeforeManifest)?;
         }
+        maybe_crash(FailurePoint::BeforeReplace);
         maybe_fail(failure, FailurePoint::BeforeReplace)?;
         journal.files[index].state = FileState::Replaced;
         store.write(journal)?;
@@ -240,8 +261,10 @@ fn write_files(
             Some(bytes) => store.write_project_file(&path, bytes)?,
             None => store.remove_project_file(&path)?,
         }
+        maybe_crash(FailurePoint::AfterReplace);
         maybe_fail(failure, FailurePoint::AfterReplace)?;
         if path == MANIFEST_RELATIVE_PATH {
+            maybe_crash(FailurePoint::AfterManifest);
             maybe_fail(failure, FailurePoint::AfterManifest)?;
         }
         let expected_new = journal.files[index].new_sha256.clone();
@@ -258,6 +281,16 @@ fn maybe_fail(failure: Option<FailurePoint>, point: FailurePoint) -> Result<()> 
         bail!("injected_failure:{point:?}");
     }
     Ok(())
+}
+
+fn maybe_crash(point: FailurePoint) {
+    if std::env::var("GPUI_UPGRADE_CRASH_POINT").ok().as_deref() == Some(point.crash_env_value()) {
+        eprintln!(
+            "injected_crash:{}; transaction remains for explicit recovery",
+            point.crash_env_value()
+        );
+        std::process::exit(75);
+    }
 }
 
 fn abort_transaction(
