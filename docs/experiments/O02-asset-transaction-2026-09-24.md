@@ -14,6 +14,6 @@
 
 ## 边界
 
-本子 PR 仍未实现声明 hash 的实际字节校验、分块 offset/重传、`required_loaded` 或
-`scene_epoch` 绑定；未收到 commit 的临时 iOS 文件也尚未做独立临时文件原子替换。这些
+本子 PR 仍未实现桌面/Android 读取阶段的声明 hash 校验、分块 offset/重传、`required_loaded`
+或 `scene_epoch` 绑定；iOS bytes 的校验和临时文件原子提交属于后续完整性子 PR。这些
 属于后续资源完整性和观察一致性子 PR。
