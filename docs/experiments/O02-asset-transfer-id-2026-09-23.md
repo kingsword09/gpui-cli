@@ -17,9 +17,9 @@
 
 ## 边界
 
-当前 transfer 仍是一组单帧资源消息，没有 `assets_begin`/`assets_commit`、块 offset、
-声明大小和最终 hash 校验；这些属于 O02 后续事务化以及 O03 有界分块传输。transfer ID
-目前用于 fencing/审计，不代表 GPU scene 已经呈现新资源。
+当前 transfer 已由 `assets_begin`/`assets_commit` 标出批次边界，但仍没有块 offset、声明
+大小和最终 hash 校验；这些属于后续资源完整性和 O03 有界分块传输。transfer ID 目前用于
+fencing/审计，不代表 GPU scene 已经呈现新资源。
 
 ## 验证
 

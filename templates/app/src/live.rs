@@ -60,6 +60,17 @@ pub struct AssetEvent {
 
 static ASSET_EVENTS: Mutex<Vec<AssetEvent>> = Mutex::new(Vec::new());
 
+struct PendingAssetBatch {
+    transfer_id: String,
+    asset_revision: u64,
+    events: Vec<AssetEvent>,
+}
+
+/// Asset instructions received between `assets_begin` and `assets_commit`.
+/// They are deliberately withheld from the UI loop so a partial transaction
+/// cannot invalidate only part of a resource set.
+static PENDING_ASSET_BATCH: Mutex<Option<PendingAssetBatch>> = Mutex::new(None);
+
 /// The latest manifest the supervisor declared for this connection's run.
 static DESIRED_ASSETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 static DESIRED_TRANSFER_ID: Mutex<Option<String>> = Mutex::new(None);
@@ -215,6 +226,84 @@ pub fn image_source(name: &str) -> gpui::ImageSource {
 /// Asset paths reported changed by the CLI since the last call.
 pub fn take_asset_events() -> Vec<AssetEvent> {
     std::mem::take(&mut ASSET_EVENTS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+fn begin_asset_batch(
+    transfer_id: String,
+    asset_revision: u64,
+    entries: Vec<(String, String)>,
+    removed: Vec<String>,
+) {
+    {
+        let mut desired = DESIRED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (path, hash) in entries {
+            desired.insert(path, hash);
+        }
+        for path in removed {
+            desired.remove(&path);
+        }
+    }
+    *DESIRED_TRANSFER_ID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(transfer_id.clone());
+    let mut pending = PENDING_ASSET_BATCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if pending.as_ref().is_some_and(|batch| {
+        batch.transfer_id == transfer_id && batch.asset_revision == asset_revision
+    }) {
+        return;
+    }
+    *pending = Some(PendingAssetBatch {
+        transfer_id,
+        asset_revision,
+        events: Vec::new(),
+    });
+}
+
+fn commit_asset_batch(transfer_id: &str, asset_revision: u64) {
+    let events = {
+        let mut pending = PENDING_ASSET_BATCH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(batch) = pending.as_ref() else {
+            return;
+        };
+        if batch.transfer_id != transfer_id || batch.asset_revision != asset_revision {
+            return;
+        }
+        pending.take().map(|batch| batch.events).unwrap_or_default()
+    };
+    ASSET_EVENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .extend(events);
+}
+
+fn discard_pending_asset_batch() {
+    PENDING_ASSET_BATCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+}
+
+fn queue_asset_event(event: AssetEvent) {
+    let mut pending = PENDING_ASSET_BATCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(batch) = pending.as_mut().filter(|batch| {
+        batch.transfer_id == event.transfer_id && batch.asset_revision == event.asset_revision
+    }) {
+        batch.events.push(event);
+        return;
+    }
+    drop(pending);
+    ASSET_EVENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(event);
 }
 
 #[cfg(feature = "gpui-dev")]
@@ -588,6 +677,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
             .filter(|path| !desired.contains_key(*path))
             .cloned()
             .collect::<Vec<_>>();
+        discard_pending_asset_batch();
         *DESIRED_ASSETS.lock().unwrap_or_else(|e| e.into_inner()) = desired;
         *DESIRED_TRANSFER_ID
             .lock()
@@ -603,38 +693,53 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
         if missing.is_empty() && stale.is_empty() && removed.is_empty() {
             report_assets_applied(&transfer_id, asset_revision, &[], &[], true);
         }
+    } else if find_bytes(frame, b"\"assets_begin\"") {
+        let (Some(transfer_id), Some(asset_revision)) = (
+            string_field(frame, "transfer_id"),
+            number_field(frame, "asset_revision"),
+        ) else {
+            return;
+        };
+        begin_asset_batch(
+            transfer_id,
+            asset_revision,
+            object_entries(frame, "entries"),
+            string_array(frame, "removed"),
+        );
+    } else if find_bytes(frame, b"\"assets_commit\"") {
+        let (Some(transfer_id), Some(asset_revision)) = (
+            string_field(frame, "transfer_id"),
+            number_field(frame, "asset_revision"),
+        ) else {
+            return;
+        };
+        commit_asset_batch(&transfer_id, asset_revision);
     } else if find_bytes(frame, b"\"asset_removed\"") {
         if let Some(path) = string_field(frame, "path") {
             let transfer_id = string_field(frame, "transfer_id").unwrap_or_default();
             let asset_revision = number_field(frame, "asset_revision").unwrap_or(0);
-            ASSET_EVENTS
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(AssetEvent {
-                    path: path.clone(),
-                    transfer_id: transfer_id.clone(),
-                    asset_revision,
-                    removed: true,
-                    failed: false,
-                    error: None,
-                });
+            queue_asset_event(AssetEvent {
+                path: path.clone(),
+                transfer_id: transfer_id.clone(),
+                asset_revision,
+                removed: true,
+                failed: false,
+                error: None,
+            });
             report_assets_received(&transfer_id, asset_revision, &[path.clone()], &[]);
         }
     } else if find_bytes(frame, b"\"asset_changed\"") {
         if let Some(path) = string_field(frame, "path") {
             let transfer_id = string_field(frame, "transfer_id").unwrap_or_default();
             let asset_revision = number_field(frame, "asset_revision").unwrap_or(0);
-            ASSET_EVENTS
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(AssetEvent {
-                    path: path.clone(),
-                    transfer_id: transfer_id.clone(),
-                    asset_revision,
-                    removed: false,
-                    failed: false,
-                    error: None,
-                });
+            queue_asset_event(AssetEvent {
+                path: path.clone(),
+                transfer_id: transfer_id.clone(),
+                asset_revision,
+                removed: false,
+                failed: false,
+                error: None,
+            });
             report_assets_received(&transfer_id, asset_revision, &[path.clone()], &[]);
         }
     } else if find_bytes(frame, b"\"asset_data\"") {
@@ -651,49 +756,40 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                 }
                 if std::fs::write(&target, bytes).is_ok() {
                     report_assets_received(&transfer_id, asset_revision, &[path.clone()], &[]);
-                    ASSET_EVENTS
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(AssetEvent {
-                            path,
-                            transfer_id: transfer_id.clone(),
-                            asset_revision,
-                            removed: false,
-                            failed: false,
-                            error: None,
-                        });
+                    queue_asset_event(AssetEvent {
+                        path,
+                        transfer_id: transfer_id.clone(),
+                        asset_revision,
+                        removed: false,
+                        failed: false,
+                        error: None,
+                    });
                 } else {
                     report_assets_received(&transfer_id, asset_revision, &[], &[path.clone()]);
-                    ASSET_EVENTS
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(AssetEvent {
-                            path,
-                            transfer_id: transfer_id.clone(),
-                            asset_revision,
-                            removed: false,
-                            failed: true,
-                            error: Some("write_failed".into()),
-                        });
-                }
-            } else {
-                report_assets_received(&transfer_id, asset_revision, &[], &[path.clone()]);
-                ASSET_EVENTS
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(AssetEvent {
+                    queue_asset_event(AssetEvent {
                         path,
-                        transfer_id,
+                        transfer_id: transfer_id.clone(),
                         asset_revision,
                         removed: false,
                         failed: true,
-                        error: Some(if data.is_some() {
-                            "invalid_base64"
-                        } else {
-                            "missing_data"
-                        }
-                        .into()),
+                        error: Some("write_failed".into()),
                     });
+                }
+            } else {
+                report_assets_received(&transfer_id, asset_revision, &[], &[path.clone()]);
+                queue_asset_event(AssetEvent {
+                    path,
+                    transfer_id,
+                    asset_revision,
+                    removed: false,
+                    failed: true,
+                    error: Some(if data.is_some() {
+                        "invalid_base64"
+                    } else {
+                        "missing_data"
+                    }
+                    .into()),
+                });
             }
         }
     } else if find_bytes(frame, b"\"probe_ui\"") {
@@ -1024,6 +1120,87 @@ fn object_entries(frame: &[u8], key: &str) -> Vec<(String, String)> {
     entries
 }
 
+fn string_array(frame: &[u8], key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\":").into_bytes();
+    let Some(position) = frame
+        .windows(needle.len())
+        .position(|window| window == needle.as_slice())
+    else {
+        return Vec::new();
+    };
+    let mut index = position + needle.len();
+    while frame.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    if frame.get(index) != Some(&b'[') {
+        return Vec::new();
+    }
+    index += 1;
+    let mut values = Vec::new();
+    while index < frame.len() {
+        while frame
+            .get(index)
+            .is_some_and(u8::is_ascii_whitespace)
+            || frame.get(index) == Some(&b',')
+        {
+            index += 1;
+        }
+        if frame.get(index) == Some(&b']') {
+            break;
+        }
+        if frame.get(index) != Some(&b'"') {
+            break;
+        }
+        let start = index + 1;
+        let mut out = Vec::new();
+        index = start;
+        while index < frame.len() {
+            match frame[index] {
+                b'"' => {
+                    let Ok(value) = String::from_utf8(out) else {
+                        return Vec::new();
+                    };
+                    values.push(value);
+                    index += 1;
+                    break;
+                }
+                b'\\' => {
+                    index += 1;
+                    let Some(&escaped) = frame.get(index) else {
+                        return Vec::new();
+                    };
+                    match escaped {
+                        b'n' => out.push(b'\n'),
+                        b'r' => out.push(b'\r'),
+                        b't' => out.push(b'\t'),
+                        b'u' => {
+                            let Some(hex_bytes) = frame.get(index + 1..index + 5) else {
+                                return Vec::new();
+                            };
+                            let Ok(hex) = std::str::from_utf8(hex_bytes) else {
+                                return Vec::new();
+                            };
+                            let code = u32::from_str_radix(hex, 16).unwrap_or(0xFFFD);
+                            let mut buffer = [0u8; 4];
+                            out.extend_from_slice(
+                                char::from_u32(code)
+                                    .unwrap_or('\u{FFFD}')
+                                    .encode_utf8(&mut buffer)
+                                    .as_bytes(),
+                            );
+                            index += 4;
+                        }
+                        other => out.push(other),
+                    }
+                }
+                byte => out.push(byte),
+            }
+            index += 1;
+        }
+    }
+    values
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,6 +1263,7 @@ mod tests {
     #[test]
     fn explicit_asset_removal_is_queued_for_the_ui_thread() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        discard_pending_asset_batch();
         ASSET_EVENTS.lock().unwrap().clear();
         dispatch(
             br#"{"type":"asset_removed","transfer_id":"t8","path":"assets/old.png","asset_revision":8}"#,
@@ -1103,6 +1281,42 @@ mod tests {
         assert_eq!(events[0].asset_revision, 8);
         assert!(events[0].removed);
         assert!(!events[0].failed);
+    }
+
+    #[test]
+    fn asset_transaction_holds_events_until_commit() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *OUTBOUND.lock().unwrap() = None;
+        PENDING_CONTROL.lock().unwrap().clear();
+        discard_pending_asset_batch();
+        ASSET_EVENTS.lock().unwrap().clear();
+        let config = LiveConfig {
+            addr: String::new(),
+            token: String::new(),
+            project: String::new(),
+            session: None,
+            state_file: None,
+        };
+
+        dispatch(
+            br#"{"type":"assets_begin","transfer_id":"t-tx","asset_revision":12,"entries":[{"path":"assets/new.png","hash":"hash"}],"removed":[]}"#,
+            &config,
+        );
+        dispatch(
+            br#"{"type":"asset_changed","transfer_id":"t-tx","path":"assets/new.png","asset_revision":12}"#,
+            &config,
+        );
+        assert!(take_asset_events().is_empty());
+
+        dispatch(
+            br#"{"type":"assets_commit","transfer_id":"t-tx","asset_revision":12}"#,
+            &config,
+        );
+        let events = take_asset_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "assets/new.png");
+        assert_eq!(events[0].transfer_id, "t-tx");
+        PENDING_CONTROL.lock().unwrap().clear();
     }
 
     #[test]

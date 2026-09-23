@@ -16,9 +16,10 @@ reconciliation，解决“socket 曾经写成功”不能证明重连后的 app 
 
 ## 边界
 
-manifest 目前是单帧 bounded DTO，尚未拆成带 `transfer_id` 的多块事务；也没有把
-`received`、`cache_invalidated`、`required_loaded` 三种状态完全分离。超大 manifest 会被
-拒绝，后续需要转入 O03 的有界分块/产物传输设计。
+manifest 目前仍是单帧 bounded DTO；asset-only 和 reconnect 补发已经用带 `transfer_id` 的
+begin/commit 包住，但还没有拆成多块事务，也没有把 `received`、`cache_invalidated`、
+`required_loaded` 三种状态完全分离。超大 manifest 会被拒绝，后续需要转入 O03 的有界
+分块/产物传输设计。
 
 ## 验证
 

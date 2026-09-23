@@ -67,6 +67,36 @@ mod tests {
     }
 
     #[test]
+    fn asset_transaction_uses_begin_and_commit_wire_tags() {
+        let begin = encode(&ServerMessage::AssetsBegin {
+            transfer_id: "t5".into(),
+            asset_revision: 5,
+            entries: vec![AssetManifestEntry {
+                path: "assets/new.png".into(),
+                hash: "hash".into(),
+            }],
+            removed: vec!["assets/old.png".into()],
+        })
+        .unwrap();
+        assert!(
+            String::from_utf8(begin)
+                .unwrap()
+                .starts_with("{\"type\":\"assets_begin\"")
+        );
+
+        let commit = encode(&ServerMessage::AssetsCommit {
+            transfer_id: "t5".into(),
+            asset_revision: 5,
+        })
+        .unwrap();
+        assert!(
+            String::from_utf8(commit)
+                .unwrap()
+                .starts_with("{\"type\":\"assets_commit\"")
+        );
+    }
+
+    #[test]
     fn oversized_frames_are_rejected() {
         let mut fake = Vec::new();
         let len = (MAX_FRAME_LEN + 1).to_be_bytes();

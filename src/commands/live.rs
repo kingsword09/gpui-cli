@@ -30,7 +30,7 @@ use crate::devserver::control::ControlServer;
 use crate::devserver::events::{Kind, Scope};
 use crate::devserver::inputs::{AssetDelta, should_trigger};
 use crate::devserver::output::{self, AppProcess};
-use crate::devserver::protocol::{self, ServerMessage};
+use crate::devserver::protocol::{self, AssetManifestEntry, ServerMessage};
 use crate::devserver::session::{Build, Session};
 use crate::devserver::timing;
 use crate::devserver::{AssetReconciliation, DevServer};
@@ -828,6 +828,33 @@ fn reload_assets(
         return false;
     }
 
+    let Some((_, _, manifest)) = server.current_asset_manifest() else {
+        return false;
+    };
+    let entries = delta
+        .changed
+        .iter()
+        .filter_map(|path| manifest.iter().find(|entry| entry.path == *path).cloned())
+        .collect::<Vec<_>>();
+    if entries.len() != delta.changed.len() {
+        return false;
+    }
+    if !delta.changed.is_empty() || !delta.removed.is_empty() {
+        let begin = ServerMessage::AssetsBegin {
+            transfer_id: transfer_id.to_string(),
+            asset_revision,
+            entries,
+            removed: delta.removed.clone(),
+        };
+        let Ok(payload) = protocol::encode(&begin) else {
+            return false;
+        };
+        if payload.len() > protocol::MAX_FRAME_LEN as usize {
+            return false;
+        }
+        server.broadcast(&begin);
+    }
+
     // Only announce files the app can actually reload — announcing a push or
     // removal that failed would make the client evict a cache entry it cannot
     // refill or leave a stale device-side file behind.
@@ -884,6 +911,10 @@ fn reload_assets(
         );
         return true;
     }
+    server.broadcast(&ServerMessage::AssetsCommit {
+        transfer_id: transfer_id.to_string(),
+        asset_revision,
+    });
     if server.take_write_error() {
         println!(
             "{}",
@@ -948,6 +979,31 @@ fn apply_asset_reconciliation(
 
     let revision = reconciliation.asset_revision;
     let connection_id = reconciliation.connection_id;
+    if changed.is_empty() && reconciliation.removed.is_empty() {
+        return true;
+    }
+    let entries = changed
+        .iter()
+        .filter_map(|path| {
+            manifest.get(path).map(|hash| AssetManifestEntry {
+                path: path.clone(),
+                hash: hash.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if entries.len() != changed.len()
+        || !server.send_to(
+            connection_id,
+            &ServerMessage::AssetsBegin {
+                transfer_id: reconciliation.transfer_id.clone(),
+                asset_revision: revision,
+                entries,
+                removed: reconciliation.removed.clone(),
+            },
+        )
+    {
+        return false;
+    }
     let updated = match plan {
         Plan::Desktop => changed
             .iter()
@@ -998,17 +1054,19 @@ fn apply_asset_reconciliation(
         Plan::Android { serial, .. } => {
             let package = bundle_id_of_android(project);
             let removed = remove_android_assets(serial, &package, &reconciliation.removed);
-            for path in &removed {
-                let _ = server.send_to(
-                    connection_id,
-                    &ServerMessage::AssetRemoved {
-                        transfer_id: reconciliation.transfer_id.clone(),
-                        path: path.clone(),
-                        asset_revision: revision,
-                    },
-                );
-            }
-            removed.len()
+            removed
+                .iter()
+                .filter(|path| {
+                    server.send_to(
+                        connection_id,
+                        &ServerMessage::AssetRemoved {
+                            transfer_id: reconciliation.transfer_id.clone(),
+                            path: (*path).clone(),
+                            asset_revision: revision,
+                        },
+                    )
+                })
+                .count()
         }
         _ => reconciliation
             .removed
@@ -1026,6 +1084,13 @@ fn apply_asset_reconciliation(
             .count(),
     };
     removed == reconciliation.removed.len()
+        && server.send_to(
+            connection_id,
+            &ServerMessage::AssetsCommit {
+                transfer_id: reconciliation.transfer_id.clone(),
+                asset_revision: revision,
+            },
+        )
 }
 
 fn drain_asset_reconciliations(
