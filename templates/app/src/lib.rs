@@ -108,6 +108,7 @@ pub fn pump_live_assets(cx: &mut App) {
                                 .join(&path)
                                 .into(),
                         ));
+                        crate::live::mark_asset_applied(&path, event.removed);
                         batch.0.push(path);
                         has_asset_changes = true;
                     }

@@ -383,7 +383,7 @@ Dioxus 文档显示这是最便宜、确定性最高的一层：**不碰 Rust，
 - **桌面/Android**：模板 `DevAssetSource` 直读磁盘，CLI 在变化时广播 `asset_changed`，删除时广播显式 `asset_removed`；app 侧 `pump_live_assets` 用 `cx.remove_asset::<ImgResourceLoader>` 驱逐缓存键并 `refresh_windows`。Android 的字节由 CLI 先经 adb 写入 app files dir，删除则经 `run-as` 移除对应私有文件，再通知 runtime（app 沙盒读不到项目目录）。入口必须**先装 asset source 再 init_live**，否则 hello 能力位有顺序竞态。
 - **iOS 模拟器（#10，推翻了「iOS 无法做 L1」的初判）**：iOS runner 在内部构造 `Application`，没有 app 侧 `.with_assets` 挂钩——但这只挡住了 *asset source* 路线，不挡 *图片源* 路线。解法在 app 侧：模板新增 `live::image_source(name)`，debug iOS 构建下图片解析为 app 自身 tmp dir 下的文件（`Resource::Path`，gpui 用 `fs::read` 读取），其他平台走原路；字节经新的 `asset_data` 消息（base64，1 MiB 帧上限不变）由 CLI 推送，并在 app（重）连时全量重放；`pump_live_assets` 同时驱逐 Embedded 与 Path 两种缓存键。能力位在 init 时上报（握手先于首次 render，早于图片源解析）。
 - **过程中修复的两个缺陷（#9）**：Android 冷启动（`am start` 会复用持有旧凭证的进程，改为先 `am force-stop`）、`init_live` 传目录而非 `gpui_live.txt` 文件导致客户端静默禁用、资产子目录 staging 缺 mkdir。
-- **通道可靠性加固（2026-09-20）**：超帧限的资产在编码前拒绝并显式告警（iOS 上无法推送也无法热重载）；只对**实际投递成功**的文件广播 `asset_changed`——广播一次失败的推送会让 app 驱逐一个它无法回填的缓存条目；hello 事件改为**先注册连接再上报**，重连触发的全量重放才能命中刚连上的 app；写入失败拆除整条连接（否则读半会永远等帧）并由 `write_failed` 标志上抛到 live 循环。
+- **通道可靠性加固（2026-09-20）**：超帧限的资产在编码前拒绝并显式告警（iOS 上无法推送也无法热重载）；只对**实际投递成功**的文件广播 `asset_changed`——广播一次失败的推送会让 app 驱逐一个它无法回填的缓存条目；hello 事件改为**先注册连接再上报**，重连触发的 manifest/hash 对账和定向补发命中刚连上的 app；写入失败拆除整条连接（否则读半会永远等帧）并由 `write_failed` 标志上抛到 live 循环。
 
 ---
 

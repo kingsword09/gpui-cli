@@ -11,6 +11,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
+use std::collections::BTreeMap;
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
@@ -57,6 +58,11 @@ pub struct AssetEvent {
 }
 
 static ASSET_EVENTS: Mutex<Vec<AssetEvent>> = Mutex::new(Vec::new());
+
+/// The latest manifest the supervisor declared for this connection's run.
+static DESIRED_ASSETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+/// Hashes of assets whose UI-thread cache invalidation has completed.
+static APPLIED_ASSETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Probe requests waiting for the UI thread. The app consumes these from its
 /// render/event loop and answers with `respond_ui_probe`.
@@ -207,6 +213,45 @@ pub fn image_source(name: &str) -> gpui::ImageSource {
 /// Asset paths reported changed by the CLI since the last call.
 pub fn take_asset_events() -> Vec<AssetEvent> {
     std::mem::take(&mut ASSET_EVENTS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+#[cfg(feature = "gpui-dev")]
+pub(crate) fn mark_asset_applied(path: &str, removed: bool) {
+    let mut applied = APPLIED_ASSETS.lock().unwrap_or_else(|e| e.into_inner());
+    if removed {
+        applied.remove(path);
+        return;
+    }
+    let desired = DESIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(hash) = desired.get(path) {
+        applied.insert(path.to_owned(), hash.clone());
+    }
+}
+
+fn report_assets_reconciled(
+    asset_revision: u64,
+    present: &[String],
+    missing: &[String],
+    stale: &[String],
+    removed: &[String],
+) {
+    let strings = |values: &[String]| {
+        values
+            .iter()
+            .take(256)
+            .map(|value| format!("\"{}\"", json_escape(value)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    queue_control(format!(
+        "{{\"type\":\"assets_reconciled\",\"asset_revision\":{asset_revision},\"present\":[{}],\"missing\":[{}],\"stale\":[{}],\"removed\":[{}]}}",
+        strings(present),
+        strings(missing),
+        strings(stale),
+        strings(removed),
+    ));
 }
 
 /// Publishes the current app state as an opaque snapshot (usually JSON).
@@ -416,7 +461,7 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
         std::process::id(),
         ASSET_SOURCE_INSTALLED.load(std::sync::atomic::Ordering::SeqCst),
         if ASSET_SOURCE_INSTALLED.load(std::sync::atomic::Ordering::SeqCst) {
-            ",\"asset_reload\""
+            ",\"asset_reload\",\"asset_manifest\""
         } else {
             ""
         },
@@ -479,7 +524,43 @@ fn connect_with_retry(addr: &str) -> std::io::Result<TcpStream> {
 /// Handles one server message. Frames come from our own CLI, so a targeted
 /// scan for the known fields is enough (no JSON parser).
 fn dispatch(frame: &[u8], config: &LiveConfig) {
-    if find_bytes(frame, b"\"asset_removed\"") {
+    if find_bytes(frame, b"\"asset_manifest\"") {
+        let Some(asset_revision) = number_field(frame, "asset_revision") else {
+            return;
+        };
+        let entries = object_entries(frame, "entries");
+        let desired: BTreeMap<String, String> = entries.into_iter().collect();
+        let applied = APPLIED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut present = Vec::new();
+        let mut missing = Vec::new();
+        let mut stale = Vec::new();
+        for (path, hash) in &desired {
+            match applied.get(path) {
+                Some(previous) if previous == hash => present.push(path.clone()),
+                Some(_) => stale.push(path.clone()),
+                None => missing.push(path.clone()),
+            }
+        }
+        let removed = applied
+            .keys()
+            .filter(|path| !desired.contains_key(*path))
+            .cloned()
+            .collect::<Vec<_>>();
+        *DESIRED_ASSETS.lock().unwrap_or_else(|e| e.into_inner()) = desired;
+        report_assets_reconciled(
+            asset_revision,
+            &present,
+            &missing,
+            &stale,
+            &removed,
+        );
+        if missing.is_empty() && stale.is_empty() && removed.is_empty() {
+            report_assets_applied(asset_revision, &[], &[], true);
+        }
+    } else if find_bytes(frame, b"\"asset_removed\"") {
         if let Some(path) = string_field(frame, "path") {
             ASSET_EVENTS
                 .lock()
@@ -816,6 +897,75 @@ fn string_field(frame: &[u8], key: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Extracts path/hash pairs from the bounded manifest array. Generated apps
+/// deliberately avoid a JSON dependency, so this parser only accepts the
+/// object shape emitted by the supervisor and still respects escaped strings.
+fn object_entries(frame: &[u8], key: &str) -> Vec<(String, String)> {
+    let needle = format!("\"{key}\":").into_bytes();
+    let Some(position) = frame
+        .windows(needle.len())
+        .position(|window| window == needle.as_slice())
+    else {
+        return Vec::new();
+    };
+    let mut start = position + needle.len();
+    while frame.get(start).is_some_and(u8::is_ascii_whitespace) {
+        start += 1;
+    }
+    if frame.get(start) != Some(&b'[') {
+        return Vec::new();
+    }
+    let mut entries = Vec::new();
+    let mut index = start + 1;
+    while index < frame.len() {
+        while frame
+            .get(index)
+            .is_some_and(u8::is_ascii_whitespace)
+            || frame.get(index) == Some(&b',')
+        {
+            index += 1;
+        }
+        if frame.get(index) == Some(&b']') {
+            break;
+        }
+        if frame.get(index) != Some(&b'{') {
+            break;
+        }
+        let object_start = index;
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        while index < frame.len() {
+            let byte = frame[index];
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+            } else if byte == b'"' {
+                in_string = true;
+            } else if byte == b'{' {
+                depth += 1;
+            } else if byte == b'}' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    index += 1;
+                    break;
+                }
+            }
+            index += 1;
+        }
+        let object = &frame[object_start..index.min(frame.len())];
+        if let (Some(path), Some(hash)) = (string_field(object, "path"), string_field(object, "hash")) {
+            entries.push((path, hash));
+        }
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,6 +979,50 @@ mod tests {
         assert_eq!(string_field(frame, "path").as_deref(), Some("assets/a b\"c.png"));
         assert_eq!(string_field(frame, "type").as_deref(), Some("asset_changed"));
         assert_eq!(string_field(frame, "missing"), None);
+    }
+
+    #[test]
+    fn manifest_entries_are_parsed_and_reconciled() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = object_entries(
+            br#"{"type":"asset_manifest","asset_revision":3,"entries":[{"path":"assets/a.png","hash":"aaa"},{"path":"assets/b b.png","hash":"bbb"}]}"#,
+            "entries",
+        );
+        assert_eq!(
+            entries,
+            vec![
+                ("assets/a.png".into(), "aaa".into()),
+                ("assets/b b.png".into(), "bbb".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn manifest_dispatch_reports_missing_and_removed_paths() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::sync_channel(8);
+        *OUTBOUND.lock().unwrap() = Some(tx);
+        DESIRED_ASSETS.lock().unwrap().clear();
+        APPLIED_ASSETS.lock().unwrap().clear();
+        APPLIED_ASSETS
+            .lock()
+            .unwrap()
+            .insert("assets/old.png".into(), "old-hash".into());
+        dispatch(
+            br#"{"type":"asset_manifest","asset_revision":4,"entries":[{"path":"assets/new.png","hash":"new-hash"}]}"#,
+            &LiveConfig {
+                addr: String::new(),
+                token: String::new(),
+                project: String::new(),
+                session: None,
+                state_file: None,
+            },
+        );
+        *OUTBOUND.lock().unwrap() = None;
+        let payload = rx.recv().unwrap();
+        assert!(payload.contains("\"type\":\"assets_reconciled\""));
+        assert!(payload.contains("assets/new.png"));
+        assert!(payload.contains("assets/old.png"));
     }
 
     #[test]

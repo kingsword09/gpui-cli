@@ -75,6 +75,8 @@ pub enum Kind {
     WatchError,
     #[serde(rename = "assets.sent")]
     AssetsSent,
+    #[serde(rename = "assets.reconciled")]
+    AssetsReconciled,
     #[serde(rename = "assets.applied")]
     AssetsApplied,
     #[serde(rename = "window.registered")]

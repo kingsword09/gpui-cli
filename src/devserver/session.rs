@@ -2,6 +2,7 @@
 
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
 use super::inputs::{AssetDelta, Inputs};
+use super::protocol::AssetManifestEntry;
 use super::timing::{SpanGuard, Timing};
 use super::windows::WindowRegistry;
 use anyhow::{Context, Result};
@@ -159,6 +160,19 @@ impl Session {
         }
         scan.finish("ok", None);
         Ok((revision, asset_delta))
+    }
+
+    pub fn asset_manifest(&self) -> Vec<AssetManifestEntry> {
+        self.inputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .assets
+            .iter()
+            .map(|(path, hash)| AssetManifestEntry {
+                path: path.clone(),
+                hash: hash.clone(),
+            })
+            .collect()
     }
 
     pub fn begin_build(self: &Arc<Self>) -> Result<Build> {

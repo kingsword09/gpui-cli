@@ -75,6 +75,13 @@ pub enum ClientMessage {
         failed: Vec<String>,
         cache_invalidated: bool,
     },
+    AssetsReconciled {
+        asset_revision: u64,
+        present: Vec<String>,
+        missing: Vec<String>,
+        stale: Vec<String>,
+        removed: Vec<String>,
+    },
 }
 
 #[derive(Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -101,6 +108,10 @@ pub enum ServerMessage {
         path: String,
         asset_revision: u64,
     },
+    AssetManifest {
+        asset_revision: u64,
+        entries: Vec<AssetManifestEntry>,
+    },
     PrepareRestart {
         session: String,
     },
@@ -108,6 +119,12 @@ pub enum ServerMessage {
         request_id: String,
         window_id: String,
     },
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AssetManifestEntry {
+    pub path: String,
+    pub hash: String,
 }
 
 /// Stable outer shape for v2 control responses. The CLI can carry this DTO
@@ -317,6 +334,33 @@ mod tests {
         assert_eq!(
             decode::<ServerMessage>(&encode(&message).unwrap()).unwrap(),
             message
+        );
+    }
+
+    #[test]
+    fn asset_manifest_and_reconciliation_roundtrip() {
+        let manifest = ServerMessage::AssetManifest {
+            asset_revision: 9,
+            entries: vec![AssetManifestEntry {
+                path: "assets/logo.png".into(),
+                hash: "abc".into(),
+            }],
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&manifest).unwrap()).unwrap(),
+            manifest
+        );
+
+        let reconciliation = ClientMessage::AssetsReconciled {
+            asset_revision: 9,
+            present: vec![],
+            missing: vec!["assets/logo.png".into()],
+            stale: vec![],
+            removed: vec![],
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&reconciliation).unwrap()).unwrap(),
+            reconciliation
         );
     }
 }
