@@ -76,6 +76,12 @@ pub enum ClientMessage {
         failed: Vec<String>,
         cache_invalidated: bool,
     },
+    AssetsReceived {
+        transfer_id: String,
+        asset_revision: u64,
+        received: Vec<String>,
+        failed: Vec<String>,
+    },
     AssetsReconciled {
         transfer_id: String,
         asset_revision: u64,
@@ -372,6 +378,17 @@ mod tests {
         assert_eq!(
             decode::<ClientMessage>(&encode(&reconciliation).unwrap()).unwrap(),
             reconciliation
+        );
+
+        let received = ClientMessage::AssetsReceived {
+            transfer_id: "t9".into(),
+            asset_revision: 9,
+            received: vec!["assets/logo.png".into()],
+            failed: vec![],
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&received).unwrap()).unwrap(),
+            received
         );
     }
 }

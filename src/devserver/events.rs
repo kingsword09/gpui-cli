@@ -77,6 +77,8 @@ pub enum Kind {
     AssetsSent,
     #[serde(rename = "assets.reconciled")]
     AssetsReconciled,
+    #[serde(rename = "assets.received")]
+    AssetsReceived,
     #[serde(rename = "assets.applied")]
     AssetsApplied,
     #[serde(rename = "window.registered")]
