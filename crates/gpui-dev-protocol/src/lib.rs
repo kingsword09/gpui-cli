@@ -69,6 +69,12 @@ pub enum ClientMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         latency_ms: Option<u64>,
     },
+    AssetsApplied {
+        asset_revision: u64,
+        applied: Vec<String>,
+        failed: Vec<String>,
+        cache_invalidated: bool,
+    },
 }
 
 #[derive(Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -84,10 +90,12 @@ pub enum ServerMessage {
     },
     AssetChanged {
         path: String,
+        asset_revision: u64,
     },
     AssetData {
         path: String,
         data: String,
+        asset_revision: u64,
     },
     PrepareRestart {
         session: String,
@@ -275,13 +283,20 @@ mod tests {
 
     #[test]
     fn frame_roundtrip_and_limit_are_bounded() {
-        let payload = encode(&ServerMessage::AssetChanged { path: "a".into() }).unwrap();
+        let payload = encode(&ServerMessage::AssetChanged {
+            path: "a".into(),
+            asset_revision: 1,
+        })
+        .unwrap();
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &payload).unwrap();
         let decoded = read_frame(&mut Cursor::new(bytes)).unwrap();
         assert_eq!(
             decode::<ServerMessage>(&decoded).unwrap(),
-            ServerMessage::AssetChanged { path: "a".into() }
+            ServerMessage::AssetChanged {
+                path: "a".into(),
+                asset_revision: 1,
+            }
         );
 
         let mut oversized = Vec::new();

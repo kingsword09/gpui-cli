@@ -64,14 +64,24 @@ pub fn pump_live_assets(cx: &mut App) {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(200))
                     .await;
-                let paths = crate::live::take_asset_events();
+                let asset_events = crate::live::take_asset_events();
                 let probes = crate::live::take_ui_probe_requests();
-                if paths.is_empty() && probes.is_empty() {
+                if asset_events.is_empty() && probes.is_empty() {
                     continue;
                 }
-                let has_asset_changes = !paths.is_empty();
+                let has_asset_changes = asset_events.iter().any(|event| !event.failed);
                 cx.update(|cx| {
-                    for path in paths {
+                    let mut asset_batches = std::collections::BTreeMap::<
+                        u64,
+                        (Vec<String>, Vec<String>),
+                    >::new();
+                    for event in asset_events {
+                        let batch = asset_batches.entry(event.asset_revision).or_default();
+                        if event.failed {
+                            batch.1.push(event.path);
+                            continue;
+                        }
+                        let path = event.path;
                         // Embedded = the DevAssetSource key (desktop/Android);
                         // Path = the simulator filesystem key used on iOS.
                         cx.remove_asset::<gpui::ImgResourceLoader>(&gpui::Resource::Embedded(
@@ -84,6 +94,15 @@ pub fn pump_live_assets(cx: &mut App) {
                                 .join(&path)
                                 .into(),
                         ));
+                        batch.0.push(path);
+                    }
+                    for (asset_revision, (applied, failed)) in asset_batches {
+                        crate::live::report_assets_applied(
+                            asset_revision,
+                            &applied,
+                            &failed,
+                            !applied.is_empty(),
+                        );
                     }
                     let has_windows = !cx.windows().is_empty();
                     for probe in probes {

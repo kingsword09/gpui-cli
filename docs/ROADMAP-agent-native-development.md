@@ -42,7 +42,7 @@
 | 缺口 | 当前代码事实 | 后果 |
 | --- | --- | --- |
 | UI 是否响应/呈现 | `ui_observation` 为 false；没有窗口/帧确认 | 进程启动不能证明 UI 正常 |
-| 资源是否应用 | 有发送事件，`assets_confirmed` 为 false | 不能证明最新图片已被加载并用于当前场景 |
+| 资源是否应用 | 有发送事件和 runtime 缓存失效 ACK，`assets_confirmed` 绑定当前 revision | ACK 仍不能证明最新图片已被 GPU 呈现或用于当前场景 |
 | 界面结构与输入 | 无对外的节点查询、输入和断言 API | Agent 仍依赖手工截图、点击和判断 |
 | 完整移动日志 | 原生日志采集未实现 | 早期 native crash、Android logger 输出缺少兜底 |
 | 场景和跨端验证 | 无场景注册、矩阵 runner、复现包 | 无法用同一测试说明各端行为是否一致 |

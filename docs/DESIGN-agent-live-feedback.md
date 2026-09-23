@@ -273,7 +273,7 @@ gpui dev status --session <session_id> --json
 - desktop/iOS 的 Cargo 和 Android 的 cargo-ndk 都接入流式 JSON 诊断；Xcode/Gradle 输出并行读取 stdout/stderr。平台安装与启动记录独立阶段结果，仍复用现有设备适配器。`build.status` 当前表示整个构建/启动轮次的结果，`build.stage` 和 `build.error` 定位具体失败阶段。
 - `build.last_output` 保存标准输出和错误输出的末段与原始日志引用；没有 rustc JSON 的工具失败也能通过诊断查询定位输出。编译器没有提供源码位置时，规范化位置字段返回 null。
 - desktop 在握手前就捕获 stdout/stderr，并独立监控退出，包括构建期间的意外退出。移动端启动命令成功先记为 `launched`，通道连接后才记为进程 `running`；未把启动命令成功当作 UI 正常。普通错误日志使用 `app.log` 的 error 级别，panic 使用 `app.panic`；原生日志采集与显式 `report_error` / tracing 适配未加入本次交付。
-- 当前版本是否过期由 `stale` 表示；UI 一律报告 unavailable，资源只报告发送结果，不确认加载或呈现。`assets_confirmed` 为 false。运行错误在重启后保留为待复验，不因为构建成功而清除。
+- 当前版本是否过期由 `stale` 表示；UI 状态由窗口 heartbeat 提供，资源 ACK 只确认收到并完成缓存失效，不确认 GPU 呈现。`assets_confirmed` 只在 ACK 对应当前 `asset_revision` 且无失败路径时为 true。运行错误在重启后保留为待复验，不因为构建成功而清除。
 - 内存事件最多 2,048 条 / 4 MiB，单次事件页最多 128 条 / 512 KiB；过期游标返回 `cursor_expired`。磁盘事件最多 8 个 1 MiB 分段，原始输出最多 8 个 4 MiB 分段。当前诊断和运行问题同样有上限，超出时返回 omitted 计数。历史会话目录暂不自动删除。
 - 原始输出按带上下文的 NDJSON 分块保留，引用含路径、字节偏移和长度；引用的旧分段可能被轮转淘汰。超过 64 KiB 的单行输出保留为多个原始块，超长 Cargo JSON 行可能无法生成结构化诊断。超限事件明确标记截断，不能无限增大查询响应。
 - `q`、Ctrl-C 和终止信号会停止当前构建及 desktop 子进程，结束会话并唤醒事件订阅。已结束会话通过保存的文件检查，CLI 不把遗留注册文件当成仍存活的服务。

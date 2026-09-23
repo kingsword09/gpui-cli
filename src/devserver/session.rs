@@ -56,7 +56,7 @@ impl Session {
             running: None,
             windows: Vec::new(),
             capabilities: json!({"status": true, "diagnostics": true, "events": true,
-                "run_identity": "launch_token", "ui_observation": true, "asset_confirmation": false,
+            "run_identity": "launch_token", "ui_observation": true, "asset_confirmation": true,
                 "actions": false, "checks": false, "input_scope": "project_files",
                 "native_mobile_logs": false, "timing_spans": true}),
             diagnostics: Vec::new(),

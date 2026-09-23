@@ -75,6 +75,8 @@ pub enum Kind {
     WatchError,
     #[serde(rename = "assets.sent")]
     AssetsSent,
+    #[serde(rename = "assets.applied")]
+    AssetsApplied,
     #[serde(rename = "window.registered")]
     WindowRegistered,
     #[serde(rename = "window.closed")]
@@ -199,6 +201,11 @@ impl State {
         match event.kind {
             Kind::SessionEnded => self.lifecycle = "ended".into(),
             Kind::SourceChanged => {
+                if let Some(run) = &mut self.running
+                    && event.scope.revision.asset_revision != self.desired.asset_revision
+                {
+                    run.assets_confirmed = false;
+                }
                 self.desired = event.scope.revision.clone();
                 self.watcher_error = None;
             }
@@ -358,6 +365,20 @@ impl State {
                     );
                     window.last_latency_ms = data["latency_ms"].as_u64();
                     window.last_probe_request_id = data["request_id"].as_str().map(str::to_owned);
+                }
+            }
+            Kind::AssetsApplied => {
+                if let Some(run) = &mut self.running
+                    && event.scope.run_id == run.scope.run_id
+                {
+                    let revision = data["asset_revision"].as_u64();
+                    let failed = data["failed"]
+                        .as_array()
+                        .is_some_and(|paths| !paths.is_empty());
+                    run.assets_confirmed = data["accepted"] != false
+                        && revision == Some(self.desired.asset_revision)
+                        && data["cache_invalidated"] == true
+                        && !failed;
                 }
             }
             Kind::AppStarted

@@ -596,6 +596,31 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                             "reason": result.reason, "received_at_ms": received_at_ms}),
                     );
                 }
+                ClientMessage::AssetsApplied {
+                    asset_revision,
+                    applied,
+                    failed,
+                    cache_invalidated,
+                } => {
+                    let desired = shared
+                        .session
+                        .as_ref()
+                        .map(|session| session.store.state().desired.asset_revision)
+                        .unwrap_or(asset_revision);
+                    let accepted = asset_revision == desired;
+                    shared.emit(
+                        Kind::AssetsApplied,
+                        &scope,
+                        json!({
+                            "asset_revision": asset_revision,
+                            "applied": applied.iter().take(128).map(|path| clip(path, 256)).collect::<Vec<_>>(),
+                            "failed": failed.iter().take(128).map(|path| clip(path, 256)).collect::<Vec<_>>(),
+                            "cache_invalidated": cache_invalidated,
+                            "accepted": accepted,
+                            "received_at_ms": now_ms(),
+                        }),
+                    );
+                }
                 ClientMessage::Hello { .. } => {}
             }
         }
@@ -720,6 +745,7 @@ mod tests {
 
         server.broadcast(&ServerMessage::AssetChanged {
             path: "assets/x.png".to_string(),
+            asset_revision: 1,
         });
 
         let mut len_bytes = [0u8; 4];
@@ -728,7 +754,9 @@ mod tests {
         let mut body = vec![0u8; len];
         stream.read_exact(&mut body).unwrap();
         let message: ServerMessage = protocol::decode(&body).unwrap();
-        assert!(matches!(message, ServerMessage::AssetChanged { path } if path == "assets/x.png"));
+        assert!(
+            matches!(message, ServerMessage::AssetChanged { path, .. } if path == "assets/x.png")
+        );
     }
 
     #[test]
@@ -742,6 +770,7 @@ mod tests {
 
         server.broadcast(&ServerMessage::AssetChanged {
             path: "assets/x.png".to_string(),
+            asset_revision: 1,
         });
         let mut len_bytes = [0u8; 4];
         stream.read_exact(&mut len_bytes).unwrap();
@@ -779,6 +808,7 @@ mod tests {
             server.broadcast(&ServerMessage::AssetData {
                 path: "assets/x.png".to_string(),
                 data: "x".repeat(256 * 1024),
+                asset_revision: 1,
             });
         }
         std::thread::sleep(Duration::from_millis(100));

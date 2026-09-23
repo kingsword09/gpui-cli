@@ -47,7 +47,15 @@ static PENDING_STATE: Mutex<Option<String>> = Mutex::new(None);
 static OUTBOUND: Mutex<Option<mpsc::SyncSender<String>>> = Mutex::new(None);
 
 /// Asset paths the CLI reported as changed, drained by the UI loop.
-static ASSET_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetEvent {
+    pub path: String,
+    pub asset_revision: u64,
+    pub failed: bool,
+    pub error: Option<String>,
+}
+
+static ASSET_EVENTS: Mutex<Vec<AssetEvent>> = Mutex::new(Vec::new());
 
 /// Probe requests waiting for the UI thread. The app consumes these from its
 /// render/event loop and answers with `respond_ui_probe`.
@@ -196,7 +204,7 @@ pub fn image_source(name: &str) -> gpui::ImageSource {
 }
 
 /// Asset paths reported changed by the CLI since the last call.
-pub fn take_asset_events() -> Vec<String> {
+pub fn take_asset_events() -> Vec<AssetEvent> {
     std::mem::take(&mut ASSET_EVENTS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
@@ -272,6 +280,28 @@ pub fn respond_ui_probe(
         "{{\"type\":\"ui_probe_result\",\"request_id\":\"{}\",\"window_id\":\"{}\",\"responsive\":{responsive}{latency}}}",
         json_escape(request_id),
         json_escape(window_id),
+    ));
+}
+
+/// Acknowledges an asset batch after the UI thread has invalidated its cache.
+pub fn report_assets_applied(
+    asset_revision: u64,
+    applied: &[String],
+    failed: &[String],
+    cache_invalidated: bool,
+) {
+    let strings = |values: &[String]| {
+        values
+            .iter()
+            .take(128)
+            .map(|value| format!("\"{}\"", json_escape(value)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    queue_control(format!(
+        "{{\"type\":\"assets_applied\",\"asset_revision\":{asset_revision},\"applied\":[{}],\"failed\":[{}],\"cache_invalidated\":{cache_invalidated}}}",
+        strings(applied),
+        strings(failed),
     ));
 }
 
@@ -453,11 +483,18 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
             ASSET_EVENTS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(path);
+                .push(AssetEvent {
+                    path,
+                    asset_revision: number_field(frame, "asset_revision").unwrap_or(0),
+                    failed: false,
+                    error: None,
+                });
         }
     } else if find_bytes(frame, b"\"asset_data\"") {
-        if let (Some(path), Some(data)) = (string_field(frame, "path"), string_field(frame, "data")) {
-            if let Some(bytes) = b64_decode(&data) {
+        if let Some(path) = string_field(frame, "path") {
+            let asset_revision = number_field(frame, "asset_revision").unwrap_or(0);
+            let data = string_field(frame, "data");
+            if let Some(bytes) = data.as_deref().and_then(b64_decode) {
                 let target = std::env::temp_dir()
                     .join("gpui-assets")
                     .join(&path);
@@ -468,8 +505,38 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                     ASSET_EVENTS
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .push(path);
+                        .push(AssetEvent {
+                            path,
+                            asset_revision,
+                            failed: false,
+                            error: None,
+                        });
+                } else {
+                    ASSET_EVENTS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(AssetEvent {
+                            path,
+                            asset_revision,
+                            failed: true,
+                            error: Some("write_failed".into()),
+                        });
                 }
+            } else {
+                ASSET_EVENTS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(AssetEvent {
+                        path,
+                        asset_revision,
+                        failed: true,
+                        error: Some(if data.is_some() {
+                            "invalid_base64"
+                        } else {
+                            "missing_data"
+                        }
+                        .into()),
+                    });
             }
         }
     } else if find_bytes(frame, b"\"probe_ui\"") {
@@ -670,6 +737,20 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle)
 }
 
+fn number_field(frame: &[u8], key: &str) -> Option<u64> {
+    let needle = format!("\"{key}\":").into_bytes();
+    let start = frame
+        .windows(needle.len())
+        .position(|window| window == &needle[..])?
+        + needle.len();
+    let end = start
+        + frame[start..]
+            .iter()
+            .position(|byte| !byte.is_ascii_digit())
+            .unwrap_or(frame.len() - start);
+    std::str::from_utf8(&frame[start..end]).ok()?.parse().ok()
+}
+
 /// Extracts an escaped string field's value from a JSON frame.
 fn string_field(frame: &[u8], key: &str) -> Option<String> {
     let needle = format!("\"{key}\":\"").into_bytes();
@@ -721,8 +802,11 @@ fn string_field(frame: &[u8], key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn string_field_unescapes_known_sequences() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let frame = b"{\"type\":\"asset_changed\",\"path\":\"assets/a b\\\"c.png\"}";
         assert_eq!(string_field(frame, "path").as_deref(), Some("assets/a b\"c.png"));
         assert_eq!(string_field(frame, "type").as_deref(), Some("asset_changed"));
@@ -731,12 +815,14 @@ mod tests {
 
     #[test]
     fn json_escape_is_round_trip_safe_for_controls() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let escaped = json_escape("line\nbreak \"quoted\" \\slash");
         assert_eq!(escaped, "line\\nbreak \\\"quoted\\\" \\\\slash");
     }
 
     #[test]
     fn prepare_restart_ships_the_published_snapshot() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, rx) = mpsc::sync_channel(8);
         *OUTBOUND.lock().unwrap() = Some(tx);
         *PUBLISHED_STATE.lock().unwrap() = Some("{\"clicks\":3}".to_string());
@@ -761,6 +847,7 @@ mod tests {
 
     #[test]
     fn window_registration_queues_before_connection() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         *OUTBOUND.lock().unwrap() = None;
         PENDING_CONTROL.lock().unwrap().clear();
         REGISTERED_WINDOWS.lock().unwrap().clear();
@@ -777,6 +864,7 @@ mod tests {
 
     #[test]
     fn probe_ui_dispatch_queues_a_ui_thread_request() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         UI_PROBES.lock().unwrap().clear();
         dispatch(
             br#"{"type":"probe_ui","request_id":"probe.1","window_id":"w-main"}"#,
@@ -795,7 +883,27 @@ mod tests {
     }
 
     #[test]
+    fn asset_ack_contains_revision_and_cache_result() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::sync_channel(8);
+        *OUTBOUND.lock().unwrap() = Some(tx);
+        report_assets_applied(
+            7,
+            &["assets/logo.png".into()],
+            &["assets/missing.png".into()],
+            true,
+        );
+        *OUTBOUND.lock().unwrap() = None;
+        let payload = rx.recv().unwrap();
+        assert!(payload.contains("\"type\":\"assets_applied\""));
+        assert!(payload.contains("\"asset_revision\":7"));
+        assert!(payload.contains("\"cache_invalidated\":true"));
+        assert!(payload.contains("assets/missing.png"));
+    }
+
+    #[test]
     fn snapshot_number_builder_produces_valid_json() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(snapshot_json_number("clicks", 3), "{\"clicks\":3}");
     }
 }
