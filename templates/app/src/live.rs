@@ -49,6 +49,22 @@ static OUTBOUND: Mutex<Option<mpsc::SyncSender<String>>> = Mutex::new(None);
 /// Asset paths the CLI reported as changed, drained by the UI loop.
 static ASSET_EVENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Probe requests waiting for the UI thread. The app consumes these from its
+/// render/event loop and answers with `respond_ui_probe`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiProbeRequest {
+    pub request_id: String,
+    pub window_id: String,
+    /// When the network thread accepted the probe. The UI adapter can report
+    /// this as queue latency without waiting on the network thread.
+    pub queued_at: std::time::Instant,
+}
+
+static UI_PROBES: Mutex<Vec<UiProbeRequest>> = Mutex::new(Vec::new());
+static PENDING_CONTROL: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static REGISTERED_WINDOWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+const PENDING_CONTROL_BOUND: usize = 16;
+
 /// Set by `dev_asset_source()`: only then does the hello advertise the
 /// asset-reload capability, so the CLI can skip rebuilds for asset changes.
 static ASSET_SOURCE_INSTALLED: std::sync::atomic::AtomicBool =
@@ -194,6 +210,71 @@ pub fn publish_state(json: &str) {
     *PUBLISHED_STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(json.to_string());
 }
 
+/// Announces a generated window to the current supervisor. Registration is
+/// retained briefly if the connection is still handshaking.
+pub fn register_window(
+    window_id: &str,
+    title: &str,
+    width: u32,
+    height: u32,
+    scale_milli: u32,
+    foreground: bool,
+) {
+    remember_window(window_id);
+    queue_control(format!(
+        "{{\"type\":\"window_registered\",\"window_id\":\"{}\",\"title\":\"{}\",\"width\":{},\"height\":{},\"scale_milli\":{},\"foreground\":{}}}",
+        json_escape(window_id),
+        json_escape(title),
+        width,
+        height,
+        scale_milli,
+        foreground,
+    ));
+}
+
+/// Announces a generated window closure to the supervisor.
+pub fn close_window(window_id: &str, reason: Option<&str>) {
+    forget_window(window_id);
+    let reason = reason
+        .map(|value| format!(",\"reason\":\"{}\"", json_escape(value)))
+        .unwrap_or_default();
+    queue_control(format!(
+        "{{\"type\":\"window_closed\",\"window_id\":\"{}\"{reason}}}",
+        json_escape(window_id),
+    ));
+}
+
+/// Returns whether the runtime still considers a window registered.
+pub fn window_is_registered(window_id: &str) -> bool {
+    REGISTERED_WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|registered| registered == window_id)
+}
+
+/// Drains probe requests for execution on the UI thread.
+pub fn take_ui_probe_requests() -> Vec<UiProbeRequest> {
+    std::mem::take(&mut UI_PROBES.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Sends the result of a UI-thread probe back to the supervisor.
+pub fn respond_ui_probe(
+    request_id: &str,
+    window_id: &str,
+    responsive: bool,
+    latency_ms: Option<u64>,
+) {
+    let latency = latency_ms
+        .map(|value| format!(",\"latency_ms\":{value}"))
+        .unwrap_or_default();
+    queue_control(format!(
+        "{{\"type\":\"ui_probe_result\",\"request_id\":\"{}\",\"window_id\":\"{}\",\"responsive\":{responsive}{latency}}}",
+        json_escape(request_id),
+        json_escape(window_id),
+    ));
+}
+
 /// Builds a single-number snapshot body, e.g. `"clicks":3` -> `"{"clicks":3}"`.
 pub fn snapshot_json_number(key: &str, value: usize) -> String {
     ["{\"".to_owned(), key.to_owned(), "\":".to_owned(), value.to_string(), "}".to_owned()].concat()
@@ -322,6 +403,7 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
         let mut guard = OUTBOUND.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(tx);
     }
+    flush_pending_control();
     let writer_handle = thread::Builder::new()
         .name("gpui-live-write".into())
         .spawn(move || {
@@ -389,6 +471,20 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                         .push(path);
                 }
             }
+        }
+    } else if find_bytes(frame, b"\"probe_ui\"") {
+        if let (Some(request_id), Some(window_id)) = (
+            string_field(frame, "request_id"),
+            string_field(frame, "window_id"),
+        ) {
+            UI_PROBES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(UiProbeRequest {
+                    request_id,
+                    window_id,
+                    queued_at: std::time::Instant::now(),
+                });
         }
     } else if find_bytes(frame, b"\"prepare_restart\"") {
         let Some(session) = string_field(frame, "session") else {
@@ -493,6 +589,42 @@ fn send(payload: String) -> bool {
         Some(sender) => sender.try_send(payload).is_ok(),
         None => false,
     }
+}
+
+fn queue_control(payload: String) {
+    if send(payload.clone()) {
+        return;
+    }
+    let mut pending = PENDING_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
+    if pending.len() < PENDING_CONTROL_BOUND {
+        pending.push(payload);
+    }
+}
+
+fn flush_pending_control() {
+    let pending = {
+        let mut guard = PENDING_CONTROL.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *guard)
+    };
+    for payload in pending {
+        let _ = send(payload);
+    }
+}
+
+fn remember_window(window_id: &str) {
+    let mut windows = REGISTERED_WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if !windows.iter().any(|registered| registered == window_id) {
+        windows.push(window_id.to_string());
+    }
+}
+
+fn forget_window(window_id: &str) {
+    REGISTERED_WINDOWS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|registered| registered != window_id);
 }
 
 // ── minimal JSON plumbing ────────────────────────────────────────────────────
@@ -625,6 +757,41 @@ mod tests {
         assert!(payload.contains("\"type\":\"state_saved\""));
         assert!(payload.contains("\"session\":\"s-abc\""));
         assert!(payload.contains("\"data\":\"{\\\"clicks\\\":3}\""));
+    }
+
+    #[test]
+    fn window_registration_queues_before_connection() {
+        *OUTBOUND.lock().unwrap() = None;
+        PENDING_CONTROL.lock().unwrap().clear();
+        REGISTERED_WINDOWS.lock().unwrap().clear();
+        register_window("w-main", "Counter", 800, 600, 1000, true);
+        let pending = PENDING_CONTROL.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].contains("\"window_registered\""));
+        assert!(pending[0].contains("\"window_id\":\"w-main\""));
+        assert!(window_is_registered("w-main"));
+        drop(pending);
+        close_window("w-main", Some("test"));
+        assert!(!window_is_registered("w-main"));
+    }
+
+    #[test]
+    fn probe_ui_dispatch_queues_a_ui_thread_request() {
+        UI_PROBES.lock().unwrap().clear();
+        dispatch(
+            br#"{"type":"probe_ui","request_id":"probe.1","window_id":"w-main"}"#,
+            &LiveConfig {
+                addr: String::new(),
+                token: String::new(),
+                project: String::new(),
+                session: None,
+                state_file: None,
+            },
+        );
+        let requests = take_ui_probe_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].request_id, "probe.1");
+        assert_eq!(requests[0].window_id, "w-main");
     }
 
     #[test]

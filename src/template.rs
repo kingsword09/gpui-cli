@@ -278,6 +278,18 @@ fn open_main_window(cx: &mut App) {
     crate::pump_live_assets(cx);
 
     cx.open_window(WindowOptions::default(), |window, cx| {
+        crate::register_window(
+            "main",
+            {{APP_TITLE_RUST}},
+            800,
+            600,
+            1000,
+            true,
+        );
+        cx.on_app_quit(|_| async {
+            crate::close_window("main", Some("app_quit"));
+        })
+        .detach();
         let view = cx.new(|_| MainView::new());
         cx.new(|cx| Root::new(view, window, cx))
     })
@@ -287,6 +299,7 @@ fn open_main_window(cx: &mut App) {
 }
 "#,
     );
+    out = out.replace("{{APP_TITLE_RUST}}", &format!("{:?}", config.title));
 
     if config.has_ios() {
         out.push_str(

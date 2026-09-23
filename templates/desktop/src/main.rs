@@ -32,6 +32,18 @@ fn main() {
         {{APP_LIB_NAME}}::pump_live_assets(cx);
 
         cx.open_window(WindowOptions::default(), |window, cx| {
+            {{APP_LIB_NAME}}::register_window(
+                "main",
+                {{APP_TITLE_RUST}},
+                800,
+                600,
+                1000,
+                true,
+            );
+            cx.on_app_quit(|_| async {
+                {{APP_LIB_NAME}}::close_window("main", Some("app_quit"));
+            })
+            .detach();
             let view = cx.new(|_| MainView::new());
             cx.new(|cx| Root::new(view, window, cx))
         })
