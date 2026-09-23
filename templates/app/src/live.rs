@@ -51,6 +51,7 @@ static OUTBOUND: Mutex<Option<mpsc::SyncSender<String>>> = Mutex::new(None);
 pub struct AssetEvent {
     pub path: String,
     pub asset_revision: u64,
+    pub removed: bool,
     pub failed: bool,
     pub error: Option<String>,
 }
@@ -478,7 +479,7 @@ fn connect_with_retry(addr: &str) -> std::io::Result<TcpStream> {
 /// Handles one server message. Frames come from our own CLI, so a targeted
 /// scan for the known fields is enough (no JSON parser).
 fn dispatch(frame: &[u8], config: &LiveConfig) {
-    if find_bytes(frame, b"\"asset_changed\"") {
+    if find_bytes(frame, b"\"asset_removed\"") {
         if let Some(path) = string_field(frame, "path") {
             ASSET_EVENTS
                 .lock()
@@ -486,6 +487,20 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                 .push(AssetEvent {
                     path,
                     asset_revision: number_field(frame, "asset_revision").unwrap_or(0),
+                    removed: true,
+                    failed: false,
+                    error: None,
+                });
+        }
+    } else if find_bytes(frame, b"\"asset_changed\"") {
+        if let Some(path) = string_field(frame, "path") {
+            ASSET_EVENTS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(AssetEvent {
+                    path,
+                    asset_revision: number_field(frame, "asset_revision").unwrap_or(0),
+                    removed: false,
                     failed: false,
                     error: None,
                 });
@@ -508,6 +523,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                         .push(AssetEvent {
                             path,
                             asset_revision,
+                            removed: false,
                             failed: false,
                             error: None,
                         });
@@ -518,6 +534,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                         .push(AssetEvent {
                             path,
                             asset_revision,
+                            removed: false,
                             failed: true,
                             error: Some("write_failed".into()),
                         });
@@ -529,6 +546,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                     .push(AssetEvent {
                         path,
                         asset_revision,
+                        removed: false,
                         failed: true,
                         error: Some(if data.is_some() {
                             "invalid_base64"
@@ -811,6 +829,28 @@ mod tests {
         assert_eq!(string_field(frame, "path").as_deref(), Some("assets/a b\"c.png"));
         assert_eq!(string_field(frame, "type").as_deref(), Some("asset_changed"));
         assert_eq!(string_field(frame, "missing"), None);
+    }
+
+    #[test]
+    fn explicit_asset_removal_is_queued_for_the_ui_thread() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        ASSET_EVENTS.lock().unwrap().clear();
+        dispatch(
+            br#"{"type":"asset_removed","path":"assets/old.png","asset_revision":8}"#,
+            &LiveConfig {
+                addr: String::new(),
+                token: String::new(),
+                project: String::new(),
+                session: None,
+                state_file: None,
+            },
+        );
+        let events = take_asset_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "assets/old.png");
+        assert_eq!(events[0].asset_revision, 8);
+        assert!(events[0].removed);
+        assert!(!events[0].failed);
     }
 
     #[test]

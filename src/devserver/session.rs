@@ -1,7 +1,7 @@
 //! One live session, shared by build, process, app-channel and control workers.
 
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
-use super::inputs::Inputs;
+use super::inputs::{AssetDelta, Inputs};
 use super::timing::{SpanGuard, Timing};
 use super::windows::WindowRegistry;
 use anyhow::{Context, Result};
@@ -120,6 +120,10 @@ impl Session {
     }
 
     pub fn sync_inputs(&self) -> Result<Revision> {
+        self.sync_inputs_with_delta().map(|(revision, _)| revision)
+    }
+
+    pub fn sync_inputs_with_delta(&self) -> Result<(Revision, AssetDelta)> {
         let scan_scope = Scope {
             revision: self.store.state().desired,
             ..Scope::default()
@@ -136,6 +140,7 @@ impl Session {
                 return Err(error);
             }
         };
+        let asset_delta = AssetDelta::between(&previous.assets, &inputs.assets);
         let mut revision = self.store.state().desired;
         if revision.source_revision == 0 || inputs != *previous {
             if revision.source_revision == 0
@@ -153,7 +158,7 @@ impl Session {
             *previous = inputs;
         }
         scan.finish("ok", None);
-        Ok(revision)
+        Ok((revision, asset_delta))
     }
 
     pub fn begin_build(self: &Arc<Self>) -> Result<Build> {
