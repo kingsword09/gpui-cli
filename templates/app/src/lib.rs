@@ -27,9 +27,35 @@ pub fn init_live(config_file: Option<&std::path::Path>) {
     let _ = config_file;
 }
 
-/// Under `gpui run --live`, drains asset changes the dev channel received and
-/// evicts the affected images from GPUI's cache so the next render reloads
-/// them from disk without a rebuild. Call once from the app's run closure.
+/// Registers a generated window with the live supervisor in debug builds.
+/// Release builds keep the same call site as the generated development entry
+/// point, but omit the dev channel entirely.
+pub fn register_window(
+    window_id: &str,
+    title: &str,
+    width: u32,
+    height: u32,
+    scale_milli: u32,
+    foreground: bool,
+) {
+    #[cfg(debug_assertions)]
+    live::register_window(window_id, title, width, height, scale_milli, foreground);
+    #[cfg(not(debug_assertions))]
+    let _ = (window_id, title, width, height, scale_milli, foreground);
+}
+
+/// Reports a generated window closing to the live supervisor in debug builds.
+pub fn close_window(window_id: &str, reason: Option<&str>) {
+    #[cfg(debug_assertions)]
+    live::close_window(window_id, reason);
+    #[cfg(not(debug_assertions))]
+    let _ = (window_id, reason);
+}
+
+/// Under `gpui run --live`, drains asset changes and UI probes received by the
+/// dev channel. Asset invalidation and probe responses are completed from the
+/// GPUI foreground context so the network thread never touches UI state.
+/// Call once from the app's run closure.
 pub fn pump_live_assets(cx: &mut App) {
     #[cfg(all(debug_assertions, feature = "gpui-dev"))]
     {
@@ -39,9 +65,11 @@ pub fn pump_live_assets(cx: &mut App) {
                     .timer(std::time::Duration::from_millis(200))
                     .await;
                 let paths = crate::live::take_asset_events();
-                if paths.is_empty() {
+                let probes = crate::live::take_ui_probe_requests();
+                if paths.is_empty() && probes.is_empty() {
                     continue;
                 }
+                let has_asset_changes = !paths.is_empty();
                 cx.update(|cx| {
                     for path in paths {
                         // Embedded = the DevAssetSource key (desktop/Android);
@@ -57,7 +85,22 @@ pub fn pump_live_assets(cx: &mut App) {
                                 .into(),
                         ));
                     }
-                    cx.refresh_windows();
+                    let has_windows = !cx.windows().is_empty();
+                    for probe in probes {
+                        let responsive = has_windows
+                            && crate::live::window_is_registered(&probe.window_id);
+                        let latency_ms = u64::try_from(probe.queued_at.elapsed().as_millis())
+                            .unwrap_or(u64::MAX);
+                        crate::live::respond_ui_probe(
+                            &probe.request_id,
+                            &probe.window_id,
+                            responsive,
+                            Some(latency_ms),
+                        );
+                    }
+                    if has_asset_changes {
+                        cx.refresh_windows();
+                    }
                 });
             }
         })
