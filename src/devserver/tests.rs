@@ -58,7 +58,7 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
     let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
     let build = session.begin_build().unwrap();
     let run = session.begin_run(&build);
-    let token = server.expect_run(run).unwrap();
+    let token = server.expect_run(run.clone()).unwrap();
     let mut socket = connect(&server, &token);
 
     send(
@@ -104,6 +104,69 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
     assert!(events.events.iter().any(|event| {
         event.kind == Kind::WindowRegistered && event.data["scale_milli"] == 2000
     }));
+}
+
+#[test]
+fn windows_control_query_returns_run_scoped_registration() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let control = ControlServer::start(session.clone()).unwrap();
+    let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    let token = server.expect_run(run.clone()).unwrap();
+    let mut socket = connect(&server, &token);
+
+    send(
+        &mut socket,
+        &ClientMessage::WindowRegistered {
+            window_id: "w-main".into(),
+            title: "Counter".into(),
+            width: 800,
+            height: 600,
+            scale_milli: 1000,
+            foreground: true,
+        },
+    );
+    wait_until(|| {
+        !session
+            .windows
+            .snapshots(Some(run.run_id.as_deref().unwrap()))
+            .is_empty()
+    });
+
+    let probe: ServerMessage =
+        protocol::decode(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+    let (request_id, window_id) = match probe {
+        ServerMessage::ProbeUi {
+            request_id,
+            window_id,
+        } => (request_id, window_id),
+        other => panic!("expected heartbeat probe, got {other:?}"),
+    };
+    assert_eq!(window_id, "w-main");
+    send(
+        &mut socket,
+        &ClientMessage::UiProbeResult {
+            request_id,
+            window_id,
+            responsive: true,
+            latency_ms: Some(2),
+        },
+    );
+    wait_until(|| {
+        session
+            .windows
+            .snapshots(Some(run.run_id.as_deref().unwrap()))
+            .first()
+            .is_some_and(|window| window.ui == "responsive")
+    });
+
+    let reply = control::request(&control.registration, "test.windows", Command::Windows).unwrap();
+    let result = reply.result.unwrap();
+    assert_eq!(result["run_id"], run.run_id.clone().unwrap());
+    assert_eq!(result["windows"][0]["window_id"], "w-main");
+    assert_eq!(result["windows"][0]["ui"], "responsive");
 }
 
 fn send(socket: &mut TcpStream, message: &ClientMessage) {

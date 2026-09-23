@@ -23,6 +23,8 @@ pub enum DevCommand {
     Status,
     /// Read current compiler diagnostics and unverified runtime problems
     Diagnostics,
+    /// List windows registered by the current run and their UI heartbeat state
+    Windows,
     /// Replay events after a cursor, then optionally wait for new events
     Events {
         #[arg(long, default_value_t = 0)]
@@ -97,6 +99,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         let command = match args.command {
             DevCommand::Status => Command::Status,
             DevCommand::Diagnostics => Command::Diagnostics,
+            DevCommand::Windows => Command::Windows,
             DevCommand::Events { .. } => Command::Events {
                 after,
                 timeout_ms: if follow && timeout == 0 {

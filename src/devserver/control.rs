@@ -36,6 +36,7 @@ pub enum Command {
     Ping,
     Status,
     Diagnostics,
+    Windows,
     Events { after: u64, timeout_ms: u64 },
 }
 
@@ -264,13 +265,21 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
     let request_id = request.request_id.clone();
     let result = match request.command {
         Command::Ping => json!({"lifecycle": session.store.state().lifecycle}),
-        Command::Status => session.store.state().status_json(),
+        Command::Status => status_json(session),
         Command::Diagnostics => {
             let state = session.store.state();
             json!({"seq": state.seq, "build": state.build, "desired": state.desired,
                 "diagnostics": state.diagnostics, "diagnostics_omitted": state.diagnostics_omitted,
                 "runtime_issues": state.runtime_issues, "runtime_issues_omitted": state.runtime_issues_omitted,
                 "storage_error": state.storage_error, "watcher_error": state.watcher_error})
+        }
+        Command::Windows => {
+            let state = session.store.state();
+            let run_id = state
+                .running
+                .as_ref()
+                .and_then(|run| run.scope.run_id.clone());
+            json!({"run_id": run_id, "windows": session.windows.snapshots(run_id.as_deref())})
         }
         Command::Events { after, timeout_ms } => {
             if timeout_ms > MAX_WAIT_MS || after > session.store.state().seq {
@@ -290,6 +299,28 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
         }
     };
     success_reply(&session.id, &request_id, result)
+}
+
+fn status_json(session: &Session) -> Value {
+    let state = session.store.state();
+    let run_id = state
+        .running
+        .as_ref()
+        .and_then(|run| run.scope.run_id.clone());
+    let windows = session.windows.snapshots(run_id.as_deref());
+    let mut value = state.status_json();
+    value["windows"] = serde_json::to_value(&windows).expect("serializable window state");
+    let ui = if windows.iter().any(|window| window.ui == "unresponsive") {
+        "unresponsive"
+    } else if windows.iter().any(|window| window.ui == "responsive") {
+        "responsive"
+    } else if windows.iter().any(|window| window.ui == "unknown") {
+        "unknown"
+    } else {
+        "unavailable"
+    };
+    value["ui"] = json!({"status": ui, "window_count": windows.len()});
+    value
 }
 
 pub fn request(registration: &Registration, request_id: &str, command: Command) -> Result<Reply> {

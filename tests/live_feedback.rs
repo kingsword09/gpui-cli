@@ -143,7 +143,13 @@ fn real_live_build_failure_recovery_supersession_crash_and_event_follow() {
     let run = initial["running"]["run_id"].clone();
     let pid = initial["running"]["pid"].clone();
     assert_eq!(initial["stale"], false);
-    assert_eq!(initial["capabilities"]["ui_observation"], false);
+    assert_eq!(initial["capabilities"]["ui_observation"], true);
+    assert_eq!(initial["ui"]["status"], "unavailable");
+    assert!(
+        initial["windows"]
+            .as_array()
+            .is_some_and(|windows| windows.is_empty())
+    );
 
     fixture.source("fn main() { let _: u32 = \"wrong\"; }\n");
     let failed = fixture.wait(|s| s["build"]["status"] == "failed");

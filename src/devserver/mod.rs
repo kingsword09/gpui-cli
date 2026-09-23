@@ -9,6 +9,7 @@ mod process;
 pub mod protocol;
 pub mod session;
 pub mod timing;
+pub mod windows;
 
 pub use app_channel::DevServer;
 

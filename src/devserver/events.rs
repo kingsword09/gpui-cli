@@ -119,6 +119,29 @@ pub struct RunState {
     pub exit: Option<Value>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub window_id: String,
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+    pub scale_milli: u32,
+    pub foreground: bool,
+    pub lifecycle: String,
+    pub ui: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_probe_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_probe_request_id: Option<String>,
+    pub registered_at_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct State {
     pub schema_version: u32,
@@ -132,6 +155,8 @@ pub struct State {
     pub desired: Revision,
     pub build: Option<BuildState>,
     pub running: Option<RunState>,
+    #[serde(default)]
+    pub windows: Vec<WindowSnapshot>,
     pub capabilities: Value,
     pub diagnostics: Vec<Value>,
     pub diagnostics_omitted: u64,
@@ -151,8 +176,20 @@ impl State {
     pub fn status_json(&self) -> Value {
         let mut value = serde_json::to_value(self).expect("serializable live state");
         value["stale"] = json!(self.stale());
-        value["ui"] =
-            json!({"status": "unavailable", "reason": "UI observation is not implemented"});
+        let ui = if self
+            .windows
+            .iter()
+            .any(|window| window.ui == "unresponsive")
+        {
+            "unresponsive"
+        } else if self.windows.iter().any(|window| window.ui == "responsive") {
+            "responsive"
+        } else if self.windows.iter().any(|window| window.ui == "unknown") {
+            "unknown"
+        } else {
+            "unavailable"
+        };
+        value["ui"] = json!({"status": ui, "window_count": self.windows.len()});
         value
     }
 
@@ -233,6 +270,7 @@ impl State {
                 }
             }
             Kind::AppStarting => {
+                self.windows.clear();
                 self.running = Some(RunState {
                     scope: event.scope.clone(),
                     pid: None,
@@ -244,6 +282,82 @@ impl State {
                 });
                 for issue in &mut self.runtime_issues {
                     issue["verification"] = json!("pending");
+                }
+            }
+            Kind::WindowRegistered => {
+                let Some(window_id) = data["window_id"].as_str() else {
+                    return;
+                };
+                let snapshot = WindowSnapshot {
+                    run_id: event.scope.run_id.clone(),
+                    window_id: window_id.to_owned(),
+                    title: data["title"].as_str().unwrap_or_default().to_owned(),
+                    width: data["width"]
+                        .as_u64()
+                        .and_then(|value| u32::try_from(value).ok())
+                        .unwrap_or(0),
+                    height: data["height"]
+                        .as_u64()
+                        .and_then(|value| u32::try_from(value).ok())
+                        .unwrap_or(0),
+                    scale_milli: data["scale_milli"]
+                        .as_u64()
+                        .and_then(|value| u32::try_from(value).ok())
+                        .unwrap_or(1000),
+                    foreground: data["foreground"].as_bool().unwrap_or(false),
+                    lifecycle: "open".into(),
+                    ui: "unknown".into(),
+                    reason: None,
+                    last_probe_at_ms: None,
+                    last_latency_ms: None,
+                    last_probe_request_id: None,
+                    registered_at_ms: data["registered_at_ms"]
+                        .as_u64()
+                        .unwrap_or(event.received_at_ms),
+                };
+                if let Some(existing) = self.windows.iter_mut().find(|window| {
+                    window.run_id == snapshot.run_id && window.window_id == snapshot.window_id
+                }) {
+                    *existing = snapshot;
+                } else {
+                    self.windows.push(snapshot);
+                }
+            }
+            Kind::WindowClosed => {
+                if let Some(window_id) = data["window_id"].as_str()
+                    && let Some(window) = self.windows.iter_mut().find(|window| {
+                        window.run_id == event.scope.run_id && window.window_id == window_id
+                    })
+                {
+                    window.lifecycle = "closed".into();
+                    window.ui = "unavailable".into();
+                    window.reason = data["reason"].as_str().map(str::to_owned);
+                }
+            }
+            Kind::UiProbeResult => {
+                if data["accepted"] == false {
+                    return;
+                }
+                let Some(window_id) = data["window_id"].as_str() else {
+                    return;
+                };
+                if let Some(window) = self.windows.iter_mut().find(|window| {
+                    window.run_id == event.scope.run_id && window.window_id == window_id
+                }) {
+                    window.ui = if data["responsive"].as_bool().unwrap_or(false) {
+                        "responsive"
+                    } else {
+                        "unresponsive"
+                    }
+                    .into();
+                    window.reason = data["reason"].as_str().map(str::to_owned);
+                    window.last_probe_at_ms = Some(
+                        data["received_at_ms"]
+                            .as_u64()
+                            .unwrap_or(event.received_at_ms),
+                    );
+                    window.last_latency_ms = data["latency_ms"].as_u64();
+                    window.last_probe_request_id = data["request_id"].as_str().map(str::to_owned);
                 }
             }
             Kind::AppStarted
@@ -301,6 +415,22 @@ impl State {
                         ISSUE_BYTES,
                         &mut self.runtime_issues_omitted,
                     );
+                }
+                if event.kind == Kind::AppDisconnected {
+                    for window in self.windows.iter_mut().filter(|window| {
+                        window.run_id == event.scope.run_id && window.lifecycle == "open"
+                    }) {
+                        window.ui = "unknown".into();
+                        window.reason = Some("app_channel_disconnected".into());
+                    }
+                }
+                if event.kind == Kind::AppExited {
+                    for window in self.windows.iter_mut().filter(|window| {
+                        window.run_id == event.scope.run_id && window.lifecycle == "open"
+                    }) {
+                        window.ui = "unavailable".into();
+                        window.reason = Some("app_exited".into());
+                    }
                 }
             }
             Kind::AppPanic | Kind::AppLog => {
