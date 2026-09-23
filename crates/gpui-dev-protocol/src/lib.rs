@@ -119,6 +119,16 @@ pub enum ServerMessage {
         path: String,
         asset_revision: u64,
     },
+    AssetsBegin {
+        transfer_id: String,
+        asset_revision: u64,
+        entries: Vec<AssetManifestEntry>,
+        removed: Vec<String>,
+    },
+    AssetsCommit {
+        transfer_id: String,
+        asset_revision: u64,
+    },
     AssetManifest {
         transfer_id: String,
         asset_revision: u64,
@@ -389,6 +399,29 @@ mod tests {
         assert_eq!(
             decode::<ClientMessage>(&encode(&received).unwrap()).unwrap(),
             received
+        );
+
+        let begin = ServerMessage::AssetsBegin {
+            transfer_id: "t9".into(),
+            asset_revision: 9,
+            entries: vec![AssetManifestEntry {
+                path: "assets/logo.png".into(),
+                hash: "def".into(),
+            }],
+            removed: vec!["assets/old.png".into()],
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&begin).unwrap()).unwrap(),
+            begin
+        );
+
+        let commit = ServerMessage::AssetsCommit {
+            transfer_id: "t9".into(),
+            asset_revision: 9,
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&commit).unwrap()).unwrap(),
+            commit
         );
     }
 }
