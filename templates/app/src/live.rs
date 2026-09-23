@@ -365,6 +365,28 @@ pub fn report_assets_applied(
     ));
 }
 
+fn report_assets_received(
+    transfer_id: &str,
+    asset_revision: u64,
+    received: &[String],
+    failed: &[String],
+) {
+    let strings = |values: &[String]| {
+        values
+            .iter()
+            .take(128)
+            .map(|value| format!("\"{}\"", json_escape(value)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    queue_control(format!(
+        "{{\"type\":\"assets_received\",\"transfer_id\":\"{}\",\"asset_revision\":{asset_revision},\"received\":[{}],\"failed\":[{}]}}",
+        json_escape(transfer_id),
+        strings(received),
+        strings(failed),
+    ));
+}
+
 /// Builds a single-number snapshot body, e.g. `"clicks":3` -> `"{"clicks":3}"`.
 pub fn snapshot_json_number(key: &str, value: usize) -> String {
     ["{\"".to_owned(), key.to_owned(), "\":".to_owned(), value.to_string(), "}".to_owned()].concat()
@@ -583,31 +605,37 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
         }
     } else if find_bytes(frame, b"\"asset_removed\"") {
         if let Some(path) = string_field(frame, "path") {
+            let transfer_id = string_field(frame, "transfer_id").unwrap_or_default();
+            let asset_revision = number_field(frame, "asset_revision").unwrap_or(0);
             ASSET_EVENTS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(AssetEvent {
-                    path,
-                    transfer_id: string_field(frame, "transfer_id").unwrap_or_default(),
-                    asset_revision: number_field(frame, "asset_revision").unwrap_or(0),
+                    path: path.clone(),
+                    transfer_id: transfer_id.clone(),
+                    asset_revision,
                     removed: true,
                     failed: false,
                     error: None,
                 });
+            report_assets_received(&transfer_id, asset_revision, &[path.clone()], &[]);
         }
     } else if find_bytes(frame, b"\"asset_changed\"") {
         if let Some(path) = string_field(frame, "path") {
+            let transfer_id = string_field(frame, "transfer_id").unwrap_or_default();
+            let asset_revision = number_field(frame, "asset_revision").unwrap_or(0);
             ASSET_EVENTS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(AssetEvent {
-                    path,
-                    transfer_id: string_field(frame, "transfer_id").unwrap_or_default(),
-                    asset_revision: number_field(frame, "asset_revision").unwrap_or(0),
+                    path: path.clone(),
+                    transfer_id: transfer_id.clone(),
+                    asset_revision,
                     removed: false,
                     failed: false,
                     error: None,
                 });
+            report_assets_received(&transfer_id, asset_revision, &[path.clone()], &[]);
         }
     } else if find_bytes(frame, b"\"asset_data\"") {
         if let Some(path) = string_field(frame, "path") {
@@ -622,6 +650,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                     let _ = std::fs::create_dir_all(parent);
                 }
                 if std::fs::write(&target, bytes).is_ok() {
+                    report_assets_received(&transfer_id, asset_revision, &[path.clone()], &[]);
                     ASSET_EVENTS
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -634,6 +663,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                             error: None,
                         });
                 } else {
+                    report_assets_received(&transfer_id, asset_revision, &[], &[path.clone()]);
                     ASSET_EVENTS
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -647,6 +677,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                         });
                 }
             } else {
+                report_assets_received(&transfer_id, asset_revision, &[], &[path.clone()]);
                 ASSET_EVENTS
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -1161,6 +1192,24 @@ mod tests {
         assert!(payload.contains("\"asset_revision\":7"));
         assert!(payload.contains("\"cache_invalidated\":true"));
         assert!(payload.contains("assets/missing.png"));
+    }
+
+    #[test]
+    fn received_ack_contains_transfer_identity_and_paths() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::sync_channel(8);
+        *OUTBOUND.lock().unwrap() = Some(tx);
+        report_assets_received(
+            "t-received",
+            7,
+            &["assets/logo.png".into()],
+            &["assets/broken.png".into()],
+        );
+        *OUTBOUND.lock().unwrap() = None;
+        let payload = rx.recv().unwrap();
+        assert!(payload.contains("\"type\":\"assets_received\""));
+        assert!(payload.contains("\"transfer_id\":\"t-received\""));
+        assert!(payload.contains("assets/broken.png"));
     }
 
     #[test]

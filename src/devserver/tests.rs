@@ -98,6 +98,15 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
             cache_invalidated: true,
         },
     );
+    send(
+        &mut socket,
+        &ClientMessage::AssetsReceived {
+            transfer_id: "asset-t1-r0".into(),
+            asset_revision: 0,
+            received: vec!["assets/x.png".into()],
+            failed: Vec::new(),
+        },
+    );
 
     wait_until(|| {
         let events = session.store.events(0, Duration::ZERO);
@@ -113,6 +122,10 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
                 .events
                 .iter()
                 .any(|event| event.kind == Kind::AssetsApplied)
+            && events
+                .events
+                .iter()
+                .any(|event| event.kind == Kind::AssetsReceived)
     });
     let events = session.store.events(0, Duration::ZERO);
     assert!(events.events.iter().any(|event| {
