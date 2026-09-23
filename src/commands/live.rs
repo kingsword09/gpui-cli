@@ -492,9 +492,10 @@ fn push_ios_assets(
     project: &Project,
     paths: Vec<String>,
     server: &DevServer,
+    transfer_id: &str,
     asset_revision: u64,
 ) -> Vec<String> {
-    push_ios_assets_to(project, paths, server, None, asset_revision)
+    push_ios_assets_to(project, paths, server, None, transfer_id, asset_revision)
 }
 
 fn push_ios_assets_to(
@@ -502,6 +503,7 @@ fn push_ios_assets_to(
     paths: Vec<String>,
     server: &DevServer,
     connection_id: Option<u64>,
+    transfer_id: &str,
     asset_revision: u64,
 ) -> Vec<String> {
     let mut pushed = Vec::new();
@@ -521,6 +523,7 @@ fn push_ios_assets_to(
                     continue;
                 }
                 let message = ServerMessage::AssetData {
+                    transfer_id: transfer_id.to_string(),
                     path: rel.clone(),
                     data: protocol::b64::encode(&bytes),
                     asset_revision,
@@ -818,6 +821,7 @@ fn reload_assets(
     plan: &Plan,
     server: &DevServer,
     delta: &AssetDelta,
+    transfer_id: &str,
     asset_revision: u64,
 ) -> bool {
     if !(server.has_clients() && server.all_clients_support_asset_reload()) {
@@ -838,7 +842,13 @@ fn reload_assets(
         Plan::Ios {
             physical: false, ..
         } => (
-            push_ios_assets(project, delta.changed.clone(), server, asset_revision),
+            push_ios_assets(
+                project,
+                delta.changed.clone(),
+                server,
+                transfer_id,
+                asset_revision,
+            ),
             delta.removed.clone(),
         ),
         Plan::Ios { physical: true, .. } => return false,
@@ -855,12 +865,14 @@ fn reload_assets(
     }
     for path in &updated {
         server.broadcast(&ServerMessage::AssetChanged {
+            transfer_id: transfer_id.to_string(),
             path: path.clone(),
             asset_revision,
         });
     }
     for path in &removed {
         server.broadcast(&ServerMessage::AssetRemoved {
+            transfer_id: transfer_id.to_string(),
             path: path.clone(),
             asset_revision,
         });
@@ -943,6 +955,7 @@ fn apply_asset_reconciliation(
                 server.send_to(
                     connection_id,
                     &ServerMessage::AssetChanged {
+                        transfer_id: reconciliation.transfer_id.clone(),
                         path: (*path).clone(),
                         asset_revision: revision,
                     },
@@ -956,6 +969,7 @@ fn apply_asset_reconciliation(
             changed.clone(),
             server,
             Some(connection_id),
+            &reconciliation.transfer_id,
             revision,
         )
         .len(),
@@ -966,6 +980,7 @@ fn apply_asset_reconciliation(
                 let _ = server.send_to(
                     connection_id,
                     &ServerMessage::AssetChanged {
+                        transfer_id: reconciliation.transfer_id.clone(),
                         path: path.clone(),
                         asset_revision: revision,
                     },
@@ -987,6 +1002,7 @@ fn apply_asset_reconciliation(
                 let _ = server.send_to(
                     connection_id,
                     &ServerMessage::AssetRemoved {
+                        transfer_id: reconciliation.transfer_id.clone(),
                         path: path.clone(),
                         asset_revision: revision,
                     },
@@ -1001,6 +1017,7 @@ fn apply_asset_reconciliation(
                 server.send_to(
                     connection_id,
                     &ServerMessage::AssetRemoved {
+                        transfer_id: reconciliation.transfer_id.clone(),
                         path: (*path).clone(),
                         asset_revision: revision,
                     },
@@ -1036,6 +1053,7 @@ fn drain_asset_reconciliations(
             Kind::AssetsSent,
             &reconciliation.scope,
             json!({
+                "transfer_id": reconciliation.transfer_id,
                 "changed": reconciliation.missing.iter().chain(reconciliation.stale.iter()).collect::<Vec<_>>(),
                 "removed": reconciliation.removed,
                 "present": reconciliation.present,
@@ -1325,6 +1343,18 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     )?;
                     continue;
                 }
+                let Some((transfer_id, _, _)) = server.current_asset_manifest() else {
+                    quit = run_cycles(
+                        project,
+                        &plan,
+                        &mut channel,
+                        &server,
+                        &mut child,
+                        &rx,
+                        &mut last_failed,
+                    )?;
+                    continue;
+                };
                 let scope = session.current_run().unwrap_or_default();
                 let asset_span =
                     session.start_span("assets.apply", &scope, None, json!({"delta": delta}));
@@ -1333,13 +1363,14 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     &plan,
                     &server,
                     &delta,
+                    &transfer_id,
                     session.store.state().desired.asset_revision,
                 );
                 asset_span.finish(if sent { "sent" } else { "fallback" }, None);
                 session.emit(
                     Kind::AssetsSent,
                     &scope,
-                    json!({"changed": delta.changed, "removed": delta.removed,
+                    json!({"transfer_id": transfer_id, "changed": delta.changed, "removed": delta.removed,
                     "requested_asset_revision": session.store.state().desired.asset_revision,
                     "handled_without_build": sent, "render_confirmed": false}),
                 );

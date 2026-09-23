@@ -77,6 +77,7 @@ impl Write for ProbeWriter {
 #[test]
 fn encoded_known_message_stays_json_and_bounded() {
     let payload = encode(&ServerMessage::AssetData {
+        transfer_id: "t4".into(),
         path: "assets/icon.png".into(),
         data: "aGVsbG8=".into(),
         asset_revision: 4,

@@ -38,6 +38,7 @@ mod tests {
     #[test]
     fn frames_roundtrip_through_a_buffer() {
         let message = ServerMessage::AssetChanged {
+            transfer_id: "t3".into(),
             path: "assets/logo.png".to_string(),
             asset_revision: 3,
         };
@@ -49,13 +50,14 @@ mod tests {
         let decoded = read_frame(&mut cursor).unwrap();
         let back: ServerMessage = decode(&decoded).unwrap();
         assert!(
-            matches!(back, ServerMessage::AssetChanged { path, asset_revision } if path == "assets/logo.png" && asset_revision == 3)
+            matches!(back, ServerMessage::AssetChanged { transfer_id, path, asset_revision } if transfer_id == "t3" && path == "assets/logo.png" && asset_revision == 3)
         );
     }
 
     #[test]
     fn explicit_asset_removal_uses_the_wire_tag() {
         let payload = encode(&ServerMessage::AssetRemoved {
+            transfer_id: "t4".into(),
             path: "assets/old.png".to_string(),
             asset_revision: 4,
         })

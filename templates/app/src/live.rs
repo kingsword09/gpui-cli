@@ -51,6 +51,7 @@ static OUTBOUND: Mutex<Option<mpsc::SyncSender<String>>> = Mutex::new(None);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssetEvent {
     pub path: String,
+    pub transfer_id: String,
     pub asset_revision: u64,
     pub removed: bool,
     pub failed: bool,
@@ -61,6 +62,7 @@ static ASSET_EVENTS: Mutex<Vec<AssetEvent>> = Mutex::new(Vec::new());
 
 /// The latest manifest the supervisor declared for this connection's run.
 static DESIRED_ASSETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+static DESIRED_TRANSFER_ID: Mutex<Option<String>> = Mutex::new(None);
 /// Hashes of assets whose UI-thread cache invalidation has completed.
 static APPLIED_ASSETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
@@ -216,7 +218,15 @@ pub fn take_asset_events() -> Vec<AssetEvent> {
 }
 
 #[cfg(feature = "gpui-dev")]
-pub(crate) fn mark_asset_applied(path: &str, removed: bool) {
+pub(crate) fn mark_asset_applied(transfer_id: &str, path: &str, removed: bool) {
+    if DESIRED_TRANSFER_ID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        != Some(transfer_id)
+    {
+        return;
+    }
     let mut applied = APPLIED_ASSETS.lock().unwrap_or_else(|e| e.into_inner());
     if removed {
         applied.remove(path);
@@ -231,6 +241,7 @@ pub(crate) fn mark_asset_applied(path: &str, removed: bool) {
 }
 
 fn report_assets_reconciled(
+    transfer_id: &str,
     asset_revision: u64,
     present: &[String],
     missing: &[String],
@@ -246,7 +257,8 @@ fn report_assets_reconciled(
             .join(",")
     };
     queue_control(format!(
-        "{{\"type\":\"assets_reconciled\",\"asset_revision\":{asset_revision},\"present\":[{}],\"missing\":[{}],\"stale\":[{}],\"removed\":[{}]}}",
+        "{{\"type\":\"assets_reconciled\",\"transfer_id\":\"{}\",\"asset_revision\":{asset_revision},\"present\":[{}],\"missing\":[{}],\"stale\":[{}],\"removed\":[{}]}}",
+        json_escape(transfer_id),
         strings(present),
         strings(missing),
         strings(stale),
@@ -331,6 +343,7 @@ pub fn respond_ui_probe(
 
 /// Acknowledges an asset batch after the UI thread has invalidated its cache.
 pub fn report_assets_applied(
+    transfer_id: &str,
     asset_revision: u64,
     applied: &[String],
     failed: &[String],
@@ -345,7 +358,8 @@ pub fn report_assets_applied(
             .join(",")
     };
     queue_control(format!(
-        "{{\"type\":\"assets_applied\",\"asset_revision\":{asset_revision},\"applied\":[{}],\"failed\":[{}],\"cache_invalidated\":{cache_invalidated}}}",
+        "{{\"type\":\"assets_applied\",\"transfer_id\":\"{}\",\"asset_revision\":{asset_revision},\"applied\":[{}],\"failed\":[{}],\"cache_invalidated\":{cache_invalidated}}}",
+        json_escape(transfer_id),
         strings(applied),
         strings(failed),
     ));
@@ -525,6 +539,9 @@ fn connect_with_retry(addr: &str) -> std::io::Result<TcpStream> {
 /// scan for the known fields is enough (no JSON parser).
 fn dispatch(frame: &[u8], config: &LiveConfig) {
     if find_bytes(frame, b"\"asset_manifest\"") {
+        let Some(transfer_id) = string_field(frame, "transfer_id") else {
+            return;
+        };
         let Some(asset_revision) = number_field(frame, "asset_revision") else {
             return;
         };
@@ -550,7 +567,11 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
             .cloned()
             .collect::<Vec<_>>();
         *DESIRED_ASSETS.lock().unwrap_or_else(|e| e.into_inner()) = desired;
+        *DESIRED_TRANSFER_ID
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(transfer_id.clone());
         report_assets_reconciled(
+            &transfer_id,
             asset_revision,
             &present,
             &missing,
@@ -558,7 +579,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
             &removed,
         );
         if missing.is_empty() && stale.is_empty() && removed.is_empty() {
-            report_assets_applied(asset_revision, &[], &[], true);
+            report_assets_applied(&transfer_id, asset_revision, &[], &[], true);
         }
     } else if find_bytes(frame, b"\"asset_removed\"") {
         if let Some(path) = string_field(frame, "path") {
@@ -567,6 +588,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(AssetEvent {
                     path,
+                    transfer_id: string_field(frame, "transfer_id").unwrap_or_default(),
                     asset_revision: number_field(frame, "asset_revision").unwrap_or(0),
                     removed: true,
                     failed: false,
@@ -580,6 +602,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(AssetEvent {
                     path,
+                    transfer_id: string_field(frame, "transfer_id").unwrap_or_default(),
                     asset_revision: number_field(frame, "asset_revision").unwrap_or(0),
                     removed: false,
                     failed: false,
@@ -589,6 +612,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
     } else if find_bytes(frame, b"\"asset_data\"") {
         if let Some(path) = string_field(frame, "path") {
             let asset_revision = number_field(frame, "asset_revision").unwrap_or(0);
+            let transfer_id = string_field(frame, "transfer_id").unwrap_or_default();
             let data = string_field(frame, "data");
             if let Some(bytes) = data.as_deref().and_then(b64_decode) {
                 let target = std::env::temp_dir()
@@ -603,6 +627,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                         .unwrap_or_else(|e| e.into_inner())
                         .push(AssetEvent {
                             path,
+                            transfer_id: transfer_id.clone(),
                             asset_revision,
                             removed: false,
                             failed: false,
@@ -614,6 +639,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                         .unwrap_or_else(|e| e.into_inner())
                         .push(AssetEvent {
                             path,
+                            transfer_id: transfer_id.clone(),
                             asset_revision,
                             removed: false,
                             failed: true,
@@ -626,6 +652,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                     .unwrap_or_else(|e| e.into_inner())
                     .push(AssetEvent {
                         path,
+                        transfer_id,
                         asset_revision,
                         removed: false,
                         failed: true,
@@ -985,7 +1012,7 @@ mod tests {
     fn manifest_entries_are_parsed_and_reconciled() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let entries = object_entries(
-            br#"{"type":"asset_manifest","asset_revision":3,"entries":[{"path":"assets/a.png","hash":"aaa"},{"path":"assets/b b.png","hash":"bbb"}]}"#,
+            br#"{"type":"asset_manifest","transfer_id":"t3","asset_revision":3,"entries":[{"path":"assets/a.png","hash":"aaa"},{"path":"assets/b b.png","hash":"bbb"}]}"#,
             "entries",
         );
         assert_eq!(
@@ -1009,7 +1036,7 @@ mod tests {
             .unwrap()
             .insert("assets/old.png".into(), "old-hash".into());
         dispatch(
-            br#"{"type":"asset_manifest","asset_revision":4,"entries":[{"path":"assets/new.png","hash":"new-hash"}]}"#,
+            br#"{"type":"asset_manifest","transfer_id":"t4","asset_revision":4,"entries":[{"path":"assets/new.png","hash":"new-hash"}]}"#,
             &LiveConfig {
                 addr: String::new(),
                 token: String::new(),
@@ -1030,7 +1057,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         ASSET_EVENTS.lock().unwrap().clear();
         dispatch(
-            br#"{"type":"asset_removed","path":"assets/old.png","asset_revision":8}"#,
+            br#"{"type":"asset_removed","transfer_id":"t8","path":"assets/old.png","asset_revision":8}"#,
             &LiveConfig {
                 addr: String::new(),
                 token: String::new(),
@@ -1122,6 +1149,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(8);
         *OUTBOUND.lock().unwrap() = Some(tx);
         report_assets_applied(
+            "t7",
             7,
             &["assets/logo.png".into()],
             &["assets/missing.png".into()],
