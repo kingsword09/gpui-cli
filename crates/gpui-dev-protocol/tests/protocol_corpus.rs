@@ -79,6 +79,7 @@ fn encoded_known_message_stays_json_and_bounded() {
     let payload = encode(&ServerMessage::AssetData {
         path: "assets/icon.png".into(),
         data: "aGVsbG8=".into(),
+        asset_revision: 4,
     })
     .unwrap();
     assert!(payload.starts_with(br#"{"type":"asset_data""#));

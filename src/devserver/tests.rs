@@ -88,6 +88,15 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
             reason: Some("user".into()),
         },
     );
+    send(
+        &mut socket,
+        &ClientMessage::AssetsApplied {
+            asset_revision: 0,
+            applied: vec!["assets/x.png".into()],
+            failed: Vec::new(),
+            cache_invalidated: true,
+        },
+    );
 
     wait_until(|| {
         let events = session.store.events(0, Duration::ZERO);
@@ -99,11 +108,22 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
                 .events
                 .iter()
                 .any(|event| event.kind == Kind::WindowClosed)
+            && events
+                .events
+                .iter()
+                .any(|event| event.kind == Kind::AssetsApplied)
     });
     let events = session.store.events(0, Duration::ZERO);
     assert!(events.events.iter().any(|event| {
         event.kind == Kind::WindowRegistered && event.data["scale_milli"] == 2000
     }));
+    assert!(
+        session
+            .store
+            .state()
+            .running
+            .is_some_and(|run| run.assets_confirmed)
+    );
 }
 
 #[test]

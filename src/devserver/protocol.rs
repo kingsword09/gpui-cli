@@ -37,6 +37,7 @@ mod tests {
     fn frames_roundtrip_through_a_buffer() {
         let message = ServerMessage::AssetChanged {
             path: "assets/logo.png".to_string(),
+            asset_revision: 3,
         };
         let payload = encode(&message).unwrap();
         let mut buffer = Vec::new();
@@ -45,7 +46,9 @@ mod tests {
         let mut cursor = Cursor::new(buffer);
         let decoded = read_frame(&mut cursor).unwrap();
         let back: ServerMessage = decode(&decoded).unwrap();
-        assert!(matches!(back, ServerMessage::AssetChanged { path } if path == "assets/logo.png"));
+        assert!(
+            matches!(back, ServerMessage::AssetChanged { path, asset_revision } if path == "assets/logo.png" && asset_revision == 3)
+        );
     }
 
     #[test]

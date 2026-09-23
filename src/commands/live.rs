@@ -283,7 +283,12 @@ fn run_iteration(
                 json!({"confirmed": false, "device": id}),
             );
             if !physical && server.wait_for_client(Duration::from_secs(30)) {
-                push_ios_assets(project, all_asset_paths(project), server);
+                push_ios_assets(
+                    project,
+                    all_asset_paths(project),
+                    server,
+                    build.scope.revision.asset_revision,
+                );
             }
             println!("{}", format!("✓ relaunched on {label}").green());
         }
@@ -491,7 +496,12 @@ fn all_asset_paths(project: &Project) -> Vec<String> {
 /// channel (the app sandbox cannot read the project directory, so the bytes
 /// travel as base64 `asset_data` messages). Returns the paths that were
 /// actually queued. Not connected: silently skipped (empty).
-fn push_ios_assets(project: &Project, paths: Vec<String>, server: &DevServer) -> Vec<String> {
+fn push_ios_assets(
+    project: &Project,
+    paths: Vec<String>,
+    server: &DevServer,
+    asset_revision: u64,
+) -> Vec<String> {
     let mut pushed = Vec::new();
     for rel in paths {
         match fs::read(project.root.join(&rel)) {
@@ -511,6 +521,7 @@ fn push_ios_assets(project: &Project, paths: Vec<String>, server: &DevServer) ->
                 server.broadcast(&ServerMessage::AssetData {
                     path: rel.clone(),
                     data: protocol::b64::encode(&bytes),
+                    asset_revision,
                 });
                 pushed.push(rel);
             }
@@ -766,7 +777,13 @@ fn run_cycles(
 /// Pushes + broadcasts an asset-only change to the running app. Returns false
 /// when no capable client is attached and the caller must fall back to a full
 /// rebuild (the app then reads the fresh files at startup).
-fn reload_assets(project: &Project, plan: &Plan, server: &DevServer, paths: &[String]) -> bool {
+fn reload_assets(
+    project: &Project,
+    plan: &Plan,
+    server: &DevServer,
+    paths: &[String],
+    asset_revision: u64,
+) -> bool {
     if !(server.has_clients() && server.all_clients_support_asset_reload()) {
         return false;
     }
@@ -779,11 +796,14 @@ fn reload_assets(project: &Project, plan: &Plan, server: &DevServer, paths: &[St
         }
         Plan::Ios {
             physical: false, ..
-        } => push_ios_assets(project, paths.to_vec(), server),
+        } => push_ios_assets(project, paths.to_vec(), server, asset_revision),
         _ => paths.to_vec(),
     };
     for path in &pushed {
-        server.broadcast(&ServerMessage::AssetChanged { path: path.clone() });
+        server.broadcast(&ServerMessage::AssetChanged {
+            path: path.clone(),
+            asset_revision,
+        });
     }
     if pushed.is_empty() {
         println!(
@@ -1047,7 +1067,13 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                 let scope = session.current_run().unwrap_or_default();
                 let asset_span =
                     session.start_span("assets.apply", &scope, None, json!({"paths": paths}));
-                let sent = reload_assets(project, &plan, &server, &paths);
+                let sent = reload_assets(
+                    project,
+                    &plan,
+                    &server,
+                    &paths,
+                    session.store.state().desired.asset_revision,
+                );
                 asset_span.finish(if sent { "sent" } else { "fallback" }, None);
                 session.emit(
                     Kind::AssetsSent,
