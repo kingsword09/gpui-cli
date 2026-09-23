@@ -15,5 +15,6 @@ asset bytes、或收到 changed/removed 指令后发送 `assets_received`；缓�
 
 ## 边界
 
-received 仍按单个内容/删除消息回报；本次已增加 begin/commit 批次边界，但还没有缺块重传、
-声明 hash 的实际字节校验和 `required_loaded`/scene 绑定；后续继续补齐资源完整性和观察一致性。
+received 仍按单个内容/删除消息回报；begin/commit 批次边界和 iOS 声明 hash 校验已经补上，
+但还没有缺块重传、桌面/Android 读取阶段校验和 `required_loaded`/scene 绑定；后续继续补齐
+资源完整性和观察一致性。
