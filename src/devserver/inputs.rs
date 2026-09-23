@@ -34,6 +34,38 @@ pub struct Inputs {
     pub untracked_directory_links: Vec<String>,
 }
 
+/// Exact asset changes between two input scans. A watcher event can report a
+/// deleted directory rather than each file beneath it, so live reload uses
+/// this content-manifest diff instead of trusting the raw filesystem paths.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct AssetDelta {
+    pub changed: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl AssetDelta {
+    pub fn between(
+        previous: &BTreeMap<String, String>,
+        current: &BTreeMap<String, String>,
+    ) -> Self {
+        let changed = current
+            .iter()
+            .filter(|(path, hash)| previous.get(*path) != Some(*hash))
+            .map(|(path, _)| path.clone())
+            .collect();
+        let removed = previous
+            .keys()
+            .filter(|path| !current.contains_key(*path))
+            .cloned()
+            .collect();
+        Self { changed, removed }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.changed.is_empty() && self.removed.is_empty()
+    }
+}
+
 impl Inputs {
     pub fn scan(root: &Path) -> Result<Self> {
         let mut result = Self::default();
@@ -121,6 +153,26 @@ mod tests {
         assert_ne!(before.sources, after.sources);
         assert_eq!(before.assets, after.assets);
         fs::remove_file(dir.path().join("assets/icon")).unwrap();
-        assert!(Inputs::scan(dir.path()).unwrap().assets.is_empty());
+        let deleted = Inputs::scan(dir.path()).unwrap();
+        assert!(deleted.assets.is_empty());
+        let delta = AssetDelta::between(&after.assets, &deleted.assets);
+        assert_eq!(delta.changed, Vec::<String>::new());
+        assert_eq!(delta.removed, vec!["assets/icon"]);
+    }
+
+    #[test]
+    fn asset_delta_marks_added_and_hash_changed_files() {
+        let before = BTreeMap::from([
+            ("assets/old.png".into(), "old".into()),
+            ("assets/same.png".into(), "same".into()),
+        ]);
+        let after = BTreeMap::from([
+            ("assets/new.png".into(), "new".into()),
+            ("assets/same.png".into(), "same".into()),
+            ("assets/changed.png".into(), "new-hash".into()),
+        ]);
+        let delta = AssetDelta::between(&before, &after);
+        assert_eq!(delta.changed, vec!["assets/changed.png", "assets/new.png"]);
+        assert_eq!(delta.removed, vec!["assets/old.png"]);
     }
 }

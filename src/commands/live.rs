@@ -28,7 +28,7 @@ use crate::device::{self, DeviceFlags, android, inventory, ios};
 use crate::devserver::DevServer;
 use crate::devserver::control::ControlServer;
 use crate::devserver::events::{Kind, Scope};
-use crate::devserver::inputs::should_trigger;
+use crate::devserver::inputs::{AssetDelta, should_trigger};
 use crate::devserver::output::{self, AppProcess};
 use crate::devserver::protocol::{self, ServerMessage};
 use crate::devserver::session::{Build, Session};
@@ -50,9 +50,8 @@ const DEBOUNCE_MS: u64 = 400;
 
 enum Event {
     Change,
-    /// Asset-only changes under `assets/`, as slash-separated paths relative
-    /// to the project root.
-    Assets(Vec<String>),
+    /// Exact asset-only changes derived from the input content manifest.
+    Assets(AssetDelta),
     Force,
     Quit,
 }
@@ -571,6 +570,22 @@ fn push_android_assets(
     pushed
 }
 
+/// Removes deleted assets from the app's private files dir. `rm -f` makes a
+/// reconnect/retry idempotent when the file was already absent on the device.
+fn remove_android_assets(serial: &str, package: &str, paths: &[String]) -> Vec<String> {
+    let mut removed = Vec::new();
+    for path in paths {
+        match android::remove_device_file(serial, package, path) {
+            Ok(()) => removed.push(path.clone()),
+            Err(err) => println!(
+                "{}",
+                format!("⚠ failed to remove asset {path} from the device: {err:#}").yellow()
+            ),
+        }
+    }
+    removed
+}
+
 /// iOS build with streaming Cargo diagnostics and Xcode output.
 /// `Ok(None)` means the Rust build failed.
 fn build_ios_app_live(
@@ -775,37 +790,61 @@ fn run_cycles(
 }
 
 /// Pushes + broadcasts an asset-only change to the running app. Returns false
-/// when no capable client is attached and the caller must fall back to a full
-/// rebuild (the app then reads the fresh files at startup).
+/// when no capable client is attached or the complete delta could not be
+/// staged; the caller must fall back to a full rebuild.
 fn reload_assets(
     project: &Project,
     plan: &Plan,
     server: &DevServer,
-    paths: &[String],
+    delta: &AssetDelta,
     asset_revision: u64,
 ) -> bool {
     if !(server.has_clients() && server.all_clients_support_asset_reload()) {
         return false;
     }
-    // Only announce files the app can actually reload — announcing a push
-    // that failed would make the client evict a cache entry it cannot refill.
-    let pushed = match plan {
+
+    // Only announce files the app can actually reload — announcing a push or
+    // removal that failed would make the client evict a cache entry it cannot
+    // refill or leave a stale device-side file behind.
+    let (updated, removed) = match plan {
         Plan::Android { serial, .. } => {
             let package = bundle_id_of_android(project);
-            push_android_assets(project, serial, &package, paths)
+            (
+                push_android_assets(project, serial, &package, &delta.changed),
+                remove_android_assets(serial, &package, &delta.removed),
+            )
         }
         Plan::Ios {
             physical: false, ..
-        } => push_ios_assets(project, paths.to_vec(), server, asset_revision),
-        _ => paths.to_vec(),
+        } => (
+            push_ios_assets(project, delta.changed.clone(), server, asset_revision),
+            delta.removed.clone(),
+        ),
+        Plan::Ios { physical: true, .. } => return false,
+        Plan::Desktop => (delta.changed.clone(), delta.removed.clone()),
     };
-    for path in &pushed {
+
+    let complete = updated.len() == delta.changed.len() && removed.len() == delta.removed.len();
+    if !complete {
+        println!(
+            "{}",
+            "[live] asset delta could not be staged completely — falling back to rebuild".yellow()
+        );
+        return false;
+    }
+    for path in &updated {
         server.broadcast(&ServerMessage::AssetChanged {
             path: path.clone(),
             asset_revision,
         });
     }
-    if pushed.is_empty() {
+    for path in &removed {
+        server.broadcast(&ServerMessage::AssetRemoved {
+            path: path.clone(),
+            asset_revision,
+        });
+    }
+    if updated.is_empty() && removed.is_empty() {
         println!(
             "{}",
             "[live] no asset reached the app — the change applies on the next rebuild".yellow()
@@ -821,7 +860,16 @@ fn reload_assets(
     } else {
         println!(
             "{}",
-            format!("[live] sent asset update(s): {}", pushed.join(", ")).green()
+            format!(
+                "[live] sent asset update(s): {}{}",
+                updated.join(", "),
+                if removed.is_empty() {
+                    String::new()
+                } else {
+                    format!("; removed: {}", removed.join(", "))
+                }
+            )
+            .green()
         );
     }
     true
@@ -965,7 +1013,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     return;
                 }
             };
-            let mut assets = Vec::new();
+            let mut saw_asset_path = false;
             let mut code_change = false;
             for event in events {
                 if matches!(event.kind, EventKind::Access(_)) {
@@ -978,20 +1026,20 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     if !should_trigger(relative) {
                         continue;
                     }
-                    if let Some(rel) = asset_rel_path(&watch_root, path) {
-                        assets.push(rel);
+                    if asset_rel_path(&watch_root, path).is_some() {
+                        saw_asset_path = true;
                     } else {
                         code_change = true;
                     }
                 }
             }
-            if !code_change && assets.is_empty() {
+            if !code_change && !saw_asset_path {
                 return;
             }
             let previous = watch_session.store.state().desired;
-            match watch_session.sync_inputs() {
-                Ok(revision) if revision == previous => return,
-                Ok(_) => {}
+            let delta = match watch_session.sync_inputs_with_delta() {
+                Ok((revision, _)) if revision == previous => return,
+                Ok((_, delta)) => delta,
                 Err(error) => {
                     watch_session.emit(
                         Kind::WatchError,
@@ -1000,13 +1048,11 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     );
                     return;
                 }
-            }
-            assets.sort();
-            assets.dedup();
+            };
             let event = if code_change {
                 Event::Change
             } else {
-                Event::Assets(assets)
+                Event::Assets(delta)
             };
             if tx.try_send(event).is_err() {
                 overflow.store(true, Ordering::SeqCst);
@@ -1063,22 +1109,22 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     &mut last_failed,
                 )?;
             }
-            Ok(Event::Assets(paths)) => {
+            Ok(Event::Assets(delta)) => {
                 let scope = session.current_run().unwrap_or_default();
                 let asset_span =
-                    session.start_span("assets.apply", &scope, None, json!({"paths": paths}));
+                    session.start_span("assets.apply", &scope, None, json!({"delta": delta}));
                 let sent = reload_assets(
                     project,
                     &plan,
                     &server,
-                    &paths,
+                    &delta,
                     session.store.state().desired.asset_revision,
                 );
                 asset_span.finish(if sent { "sent" } else { "fallback" }, None);
                 session.emit(
                     Kind::AssetsSent,
                     &scope,
-                    json!({"paths": paths,
+                    json!({"changed": delta.changed, "removed": delta.removed,
                     "requested_asset_revision": session.store.state().desired.asset_revision,
                     "handled_without_build": sent, "render_confirmed": false}),
                 );

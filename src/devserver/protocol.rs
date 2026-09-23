@@ -52,6 +52,17 @@ mod tests {
     }
 
     #[test]
+    fn explicit_asset_removal_uses_the_wire_tag() {
+        let payload = encode(&ServerMessage::AssetRemoved {
+            path: "assets/old.png".to_string(),
+            asset_revision: 4,
+        })
+        .unwrap();
+        let text = String::from_utf8(payload).unwrap();
+        assert!(text.starts_with("{\"type\":\"asset_removed\""));
+    }
+
+    #[test]
     fn oversized_frames_are_rejected() {
         let mut fake = Vec::new();
         let len = (MAX_FRAME_LEN + 1).to_be_bytes();

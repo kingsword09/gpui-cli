@@ -97,6 +97,10 @@ pub enum ServerMessage {
         data: String,
         asset_revision: u64,
     },
+    AssetRemoved {
+        path: String,
+        asset_revision: u64,
+    },
     PrepareRestart {
         session: String,
     },
@@ -302,5 +306,17 @@ mod tests {
         let mut oversized = Vec::new();
         oversized.extend_from_slice(&(MAX_FRAME_LEN + 1).to_be_bytes());
         assert!(read_frame(&mut Cursor::new(oversized)).is_err());
+    }
+
+    #[test]
+    fn explicit_asset_removal_roundtrips() {
+        let message = ServerMessage::AssetRemoved {
+            path: "assets/old.png".into(),
+            asset_revision: 4,
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&message).unwrap()).unwrap(),
+            message
+        );
     }
 }

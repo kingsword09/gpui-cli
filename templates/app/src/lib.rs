@@ -69,12 +69,12 @@ pub fn pump_live_assets(cx: &mut App) {
                 if asset_events.is_empty() && probes.is_empty() {
                     continue;
                 }
-                let has_asset_changes = asset_events.iter().any(|event| !event.failed);
                 cx.update(|cx| {
                     let mut asset_batches = std::collections::BTreeMap::<
                         u64,
                         (Vec<String>, Vec<String>),
                     >::new();
+                    let mut has_asset_changes = false;
                     for event in asset_events {
                         let batch = asset_batches.entry(event.asset_revision).or_default();
                         if event.failed {
@@ -82,6 +82,20 @@ pub fn pump_live_assets(cx: &mut App) {
                             continue;
                         }
                         let path = event.path;
+                        if event.removed {
+                            #[cfg(target_os = "ios")]
+                            {
+                                let target = std::env::temp_dir()
+                                    .join("gpui-assets")
+                                    .join(&path);
+                                if let Err(error) = std::fs::remove_file(&target) {
+                                    if error.kind() != std::io::ErrorKind::NotFound {
+                                        batch.1.push(path);
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         // Embedded = the DevAssetSource key (desktop/Android);
                         // Path = the simulator filesystem key used on iOS.
                         cx.remove_asset::<gpui::ImgResourceLoader>(&gpui::Resource::Embedded(
@@ -95,6 +109,7 @@ pub fn pump_live_assets(cx: &mut App) {
                                 .into(),
                         ));
                         batch.0.push(path);
+                        has_asset_changes = true;
                     }
                     for (asset_revision, (applied, failed)) in asset_batches {
                         crate::live::report_assets_applied(

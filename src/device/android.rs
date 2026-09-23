@@ -693,6 +693,34 @@ pub fn write_device_config(serial: &str, package: &str, name: &str, content: &[u
     )
 }
 
+/// Removes a file from the app's private files dir. The name is passed as an
+/// adb argument rather than through a shell so asset paths cannot escape that
+/// directory or alter the command being run.
+pub fn remove_device_file(serial: &str, package: &str, name: &str) -> Result<()> {
+    validate_device_file_name(name)?;
+    let adb = adb().context("`adb` was not found")?;
+    let target = format!("files/{name}");
+    super::run(
+        &adb,
+        &[
+            "-s", serial, "shell", "run-as", package, "rm", "-f", &target,
+        ],
+    )
+}
+
+fn validate_device_file_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.starts_with('/')
+        || name.contains('\\')
+        || name
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        bail!("invalid app-private file name '{name}'")
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +790,15 @@ mod tests {
     fn runtime_does_not_double_the_android_prefix() {
         assert_eq!(api_to_runtime("android-36"), "android-36");
         assert_eq!(api_to_runtime("36"), "android-36");
+    }
+
+    #[test]
+    fn device_file_names_cannot_escape_private_files() {
+        assert!(validate_device_file_name("assets/icons/logo.png").is_ok());
+        assert!(validate_device_file_name("../outside").is_err());
+        assert!(validate_device_file_name("assets/../outside").is_err());
+        assert!(validate_device_file_name("/absolute").is_err());
+        assert!(validate_device_file_name("assets\\logo.png").is_err());
     }
 
     #[test]
