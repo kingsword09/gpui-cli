@@ -127,6 +127,40 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
 }
 
 #[test]
+fn current_app_channel_queues_accepted_asset_reconciliation() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    let token = server.expect_run(run.clone()).unwrap();
+    let mut socket = connect(&server, &token);
+
+    send(
+        &mut socket,
+        &ClientMessage::AssetsReconciled {
+            asset_revision: run.revision.asset_revision,
+            present: vec![],
+            missing: vec!["assets/logo.png".into()],
+            stale: vec![],
+            removed: vec![],
+        },
+    );
+    wait_until(|| {
+        session
+            .store
+            .events(0, Duration::ZERO)
+            .events
+            .iter()
+            .any(|event| event.kind == Kind::AssetsReconciled)
+    });
+    let reconciliations = server.take_asset_reconciliations();
+    assert_eq!(reconciliations.len(), 1);
+    assert_eq!(reconciliations[0].connection_id, 0);
+    assert_eq!(reconciliations[0].missing, vec!["assets/logo.png"]);
+}
+
+#[test]
 fn windows_control_query_returns_run_scoped_registration() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();

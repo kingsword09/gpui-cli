@@ -2,7 +2,7 @@
 //! Logs go directly to the event store; snapshot replies go to their requester.
 
 use super::events::{Kind, Scope, clip, now_ms};
-use super::protocol::{self, ClientMessage, PROTO_VERSION, ServerMessage};
+use super::protocol::{self, AssetManifestEntry, ClientMessage, PROTO_VERSION, ServerMessage};
 use super::session::{Session, random_token};
 use super::windows::{ProbeReply, WindowRegistration, WindowRegistry};
 use anyhow::{Context, Result};
@@ -27,6 +27,17 @@ struct ExpectedRun {
 }
 type SnapshotKey = (Option<String>, String);
 
+#[derive(Clone, Debug)]
+pub struct AssetReconciliation {
+    pub connection_id: u64,
+    pub scope: Scope,
+    pub asset_revision: u64,
+    pub present: Vec<String>,
+    pub missing: Vec<String>,
+    pub stale: Vec<String>,
+    pub removed: Vec<String>,
+}
+
 struct Shared {
     token: String,
     expected: Mutex<Option<ExpectedRun>>,
@@ -34,6 +45,8 @@ struct Shared {
     clients: Mutex<HashMap<u64, ClientConn>>,
     changed: Condvar,
     waiters: Mutex<HashMap<SnapshotKey, mpsc::SyncSender<String>>>,
+    asset_manifest: Mutex<Option<(u64, Vec<AssetManifestEntry>)>>,
+    reconciliations: Mutex<Vec<AssetReconciliation>>,
     windows: Arc<WindowRegistry>,
     next_id: AtomicU64,
     connections: AtomicUsize,
@@ -116,6 +129,8 @@ impl DevServer {
             clients: Mutex::new(HashMap::new()),
             changed: Condvar::new(),
             waiters: Mutex::new(HashMap::new()),
+            asset_manifest: Mutex::new(None),
+            reconciliations: Mutex::new(Vec::new()),
             windows,
             next_id: AtomicU64::new(0),
             connections: AtomicUsize::new(0),
@@ -202,6 +217,55 @@ impl DevServer {
                 self.shared.write_failed.store(true, Ordering::SeqCst);
             }
         }
+    }
+
+    /// Publishes the current content manifest. New connections receive it
+    /// immediately and answer with a bounded reconciliation instead of making
+    /// the supervisor assume that a previous transfer reached the app.
+    pub fn set_asset_manifest(
+        &self,
+        asset_revision: u64,
+        entries: Vec<AssetManifestEntry>,
+    ) -> bool {
+        let message = ServerMessage::AssetManifest {
+            asset_revision,
+            entries: entries.clone(),
+        };
+        let Ok(payload) = protocol::encode(&message) else {
+            return false;
+        };
+        if payload.len() > protocol::MAX_FRAME_LEN as usize {
+            self.shared.write_failed.store(true, Ordering::SeqCst);
+            return false;
+        }
+        *self
+            .shared
+            .asset_manifest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((asset_revision, entries));
+        true
+    }
+
+    pub fn current_asset_manifest(&self) -> Option<(u64, Vec<AssetManifestEntry>)> {
+        self.shared
+            .asset_manifest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn send_to(&self, connection_id: u64, message: &ServerMessage) -> bool {
+        self.shared.send_to(connection_id, message)
+    }
+
+    pub fn take_asset_reconciliations(&self) -> Vec<AssetReconciliation> {
+        std::mem::take(
+            &mut *self
+                .shared
+                .reconciliations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
     }
 
     pub fn wait_for_client(&self, timeout: Duration) -> bool {
@@ -458,6 +522,20 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                 }
             }
         });
+    if let Some((asset_revision, entries)) = shared
+        .asset_manifest
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        let _ = shared.send_to(
+            id,
+            &ServerMessage::AssetManifest {
+                asset_revision,
+                entries,
+            },
+        );
+    }
     if writer.is_ok() {
         while !shared.shutdown.load(Ordering::SeqCst) {
             let Ok(frame) = protocol::read_frame(&mut reader) else {
@@ -621,6 +699,67 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                         }),
                     );
                 }
+                ClientMessage::AssetsReconciled {
+                    asset_revision,
+                    present,
+                    missing,
+                    stale,
+                    removed,
+                } => {
+                    let desired = shared
+                        .session
+                        .as_ref()
+                        .map(|session| session.store.state().desired.asset_revision)
+                        .unwrap_or(asset_revision);
+                    let accepted = asset_reload && asset_revision == desired;
+                    let present: Vec<String> = present
+                        .iter()
+                        .take(256)
+                        .map(|path| clip(path, 256))
+                        .collect();
+                    let missing: Vec<String> = missing
+                        .iter()
+                        .take(256)
+                        .map(|path| clip(path, 256))
+                        .collect();
+                    let stale: Vec<String> =
+                        stale.iter().take(256).map(|path| clip(path, 256)).collect();
+                    let removed: Vec<String> = removed
+                        .iter()
+                        .take(256)
+                        .map(|path| clip(path, 256))
+                        .collect();
+                    shared.emit(
+                        Kind::AssetsReconciled,
+                        &scope,
+                        json!({
+                            "asset_revision": asset_revision,
+                            "present": present,
+                            "missing": missing,
+                            "stale": stale,
+                            "removed": removed,
+                            "accepted": accepted,
+                            "connection_id": id,
+                            "received_at_ms": now_ms(),
+                        }),
+                    );
+                    if accepted {
+                        shared
+                            .reconciliations
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(AssetReconciliation {
+                                connection_id: id,
+                                scope: scope.clone(),
+                                asset_revision,
+                                present,
+                                missing,
+                                stale,
+                                removed,
+                            });
+                        shared.changed.notify_all();
+                    }
+                }
                 ClientMessage::Hello { .. } => {}
             }
         }
@@ -757,6 +896,33 @@ mod tests {
         assert!(
             matches!(message, ServerMessage::AssetChanged { path, .. } if path == "assets/x.png")
         );
+    }
+
+    #[test]
+    fn new_connections_receive_the_current_asset_manifest() {
+        let server = DevServer::start().unwrap();
+        assert!(server.set_asset_manifest(
+            4,
+            vec![protocol::AssetManifestEntry {
+                path: "assets/logo.png".into(),
+                hash: "hash-4".into(),
+            }]
+        ));
+        let (mut stream, reply) = connect(&server, &server.token);
+        let hello: ServerMessage = protocol::decode(&reply).unwrap();
+        assert!(matches!(hello, ServerMessage::HelloOk { .. }));
+        let manifest: ServerMessage =
+            protocol::decode(&protocol::read_frame(&mut stream).unwrap()).unwrap();
+        assert!(matches!(
+            manifest,
+            ServerMessage::AssetManifest {
+                asset_revision: 4,
+                entries
+            } if entries == vec![protocol::AssetManifestEntry {
+                path: "assets/logo.png".into(),
+                hash: "hash-4".into(),
+            }]
+        ));
     }
 
     #[test]

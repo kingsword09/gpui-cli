@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -25,7 +26,6 @@ use super::run::{
     resolve_ios_target, xcode_app_path, xcode_destination,
 };
 use crate::device::{self, DeviceFlags, android, inventory, ios};
-use crate::devserver::DevServer;
 use crate::devserver::control::ControlServer;
 use crate::devserver::events::{Kind, Scope};
 use crate::devserver::inputs::{AssetDelta, should_trigger};
@@ -33,6 +33,7 @@ use crate::devserver::output::{self, AppProcess};
 use crate::devserver::protocol::{self, ServerMessage};
 use crate::devserver::session::{Build, Session};
 use crate::devserver::timing;
+use crate::devserver::{AssetReconciliation, DevServer};
 use serde_json::json;
 
 /// Source files watch out for asset-only changes under this directory; they
@@ -281,14 +282,6 @@ fn run_iteration(
                 &channel.scope,
                 json!({"confirmed": false, "device": id}),
             );
-            if !physical && server.wait_for_client(Duration::from_secs(30)) {
-                push_ios_assets(
-                    project,
-                    all_asset_paths(project),
-                    server,
-                    build.scope.revision.asset_revision,
-                );
-            }
             println!("{}", format!("✓ relaunched on {label}").green());
         }
         Plan::Android { serial, label } => {
@@ -501,6 +494,16 @@ fn push_ios_assets(
     server: &DevServer,
     asset_revision: u64,
 ) -> Vec<String> {
+    push_ios_assets_to(project, paths, server, None, asset_revision)
+}
+
+fn push_ios_assets_to(
+    project: &Project,
+    paths: Vec<String>,
+    server: &DevServer,
+    connection_id: Option<u64>,
+    asset_revision: u64,
+) -> Vec<String> {
     let mut pushed = Vec::new();
     for rel in paths {
         match fs::read(project.root.join(&rel)) {
@@ -517,12 +520,20 @@ fn push_ios_assets(
                     );
                     continue;
                 }
-                server.broadcast(&ServerMessage::AssetData {
+                let message = ServerMessage::AssetData {
                     path: rel.clone(),
                     data: protocol::b64::encode(&bytes),
                     asset_revision,
-                });
-                pushed.push(rel);
+                };
+                let sent = if let Some(connection_id) = connection_id {
+                    server.send_to(connection_id, &message)
+                } else {
+                    server.broadcast(&message);
+                    true
+                };
+                if sent {
+                    pushed.push(rel);
+                }
             }
             Err(err) => println!("{}", format!("⚠ failed to read {rel}: {err}").yellow()),
         }
@@ -734,6 +745,16 @@ fn run_cycles(
             return Ok(true);
         }
         let build = channel.live.begin_build()?;
+        if !server.set_asset_manifest(
+            build.scope.revision.asset_revision,
+            channel.live.asset_manifest(),
+        ) {
+            build.finish(
+                false,
+                Some("asset manifest exceeds the dev-channel frame limit".to_string()),
+            );
+            bail!("asset manifest exceeds the dev-channel frame limit");
+        }
         let mut again = false;
         let failed = match run_iteration(project, plan, channel, server, child, &build) {
             Ok(Iteration::Rebuilt) => {
@@ -875,6 +896,167 @@ fn reload_assets(
     true
 }
 
+fn valid_asset_path(path: &str) -> bool {
+    let path = Path::new(path);
+    path.components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == std::ffi::OsStr::new(ASSETS_DIR))
+        && path.components().all(|component| {
+            !matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        })
+}
+
+/// Applies a reconnect-time manifest reconciliation to one app connection.
+/// Only paths declared by the current manifest are sent as content; removed
+/// paths are validated as asset-relative names before a delete is forwarded.
+fn apply_asset_reconciliation(
+    project: &Project,
+    plan: &Plan,
+    server: &DevServer,
+    reconciliation: &AssetReconciliation,
+    manifest: &BTreeMap<String, String>,
+) -> bool {
+    let mut changed = reconciliation.missing.clone();
+    changed.extend(reconciliation.stale.iter().cloned());
+    changed.sort();
+    changed.dedup();
+    if changed
+        .iter()
+        .any(|path| !valid_asset_path(path) || !manifest.contains_key(path))
+        || reconciliation
+            .removed
+            .iter()
+            .any(|path| !valid_asset_path(path))
+    {
+        return false;
+    }
+
+    let revision = reconciliation.asset_revision;
+    let connection_id = reconciliation.connection_id;
+    let updated = match plan {
+        Plan::Desktop => changed
+            .iter()
+            .filter(|path| {
+                server.send_to(
+                    connection_id,
+                    &ServerMessage::AssetChanged {
+                        path: (*path).clone(),
+                        asset_revision: revision,
+                    },
+                )
+            })
+            .count(),
+        Plan::Ios {
+            physical: false, ..
+        } => push_ios_assets_to(
+            project,
+            changed.clone(),
+            server,
+            Some(connection_id),
+            revision,
+        )
+        .len(),
+        Plan::Android { serial, .. } => {
+            let package = bundle_id_of_android(project);
+            let pushed = push_android_assets(project, serial, &package, &changed);
+            for path in &pushed {
+                let _ = server.send_to(
+                    connection_id,
+                    &ServerMessage::AssetChanged {
+                        path: path.clone(),
+                        asset_revision: revision,
+                    },
+                );
+            }
+            pushed.len()
+        }
+        Plan::Ios { physical: true, .. } => return false,
+    };
+    if updated != changed.len() {
+        return false;
+    }
+
+    let removed = match plan {
+        Plan::Android { serial, .. } => {
+            let package = bundle_id_of_android(project);
+            let removed = remove_android_assets(serial, &package, &reconciliation.removed);
+            for path in &removed {
+                let _ = server.send_to(
+                    connection_id,
+                    &ServerMessage::AssetRemoved {
+                        path: path.clone(),
+                        asset_revision: revision,
+                    },
+                );
+            }
+            removed.len()
+        }
+        _ => reconciliation
+            .removed
+            .iter()
+            .filter(|path| {
+                server.send_to(
+                    connection_id,
+                    &ServerMessage::AssetRemoved {
+                        path: (*path).clone(),
+                        asset_revision: revision,
+                    },
+                )
+            })
+            .count(),
+    };
+    removed == reconciliation.removed.len()
+}
+
+fn drain_asset_reconciliations(
+    project: &Project,
+    plan: &Plan,
+    server: &DevServer,
+    session: &Arc<Session>,
+) -> bool {
+    let reconciliations = server.take_asset_reconciliations();
+    if reconciliations.is_empty() {
+        return false;
+    }
+    let manifest: BTreeMap<String, String> = session
+        .asset_manifest()
+        .into_iter()
+        .map(|entry| (entry.path, entry.hash))
+        .collect();
+    let mut rebuild = false;
+    for reconciliation in reconciliations {
+        if reconciliation.asset_revision != session.store.state().desired.asset_revision {
+            continue;
+        }
+        let applied = apply_asset_reconciliation(project, plan, server, &reconciliation, &manifest);
+        session.emit(
+            Kind::AssetsSent,
+            &reconciliation.scope,
+            json!({
+                "changed": reconciliation.missing.iter().chain(reconciliation.stale.iter()).collect::<Vec<_>>(),
+                "removed": reconciliation.removed,
+                "present": reconciliation.present,
+                "requested_asset_revision": reconciliation.asset_revision,
+                "handled_without_build": applied,
+                "render_confirmed": false,
+                "reconciled": true,
+                "connection_id": reconciliation.connection_id,
+            }),
+        );
+        if !applied {
+            rebuild = true;
+            println!(
+                "{}",
+                "[live] asset reconciliation could not be completed — rebuilding".yellow()
+            );
+        }
+    }
+    rebuild
+}
+
 /// Sets up the launch plan for the chosen target (device selection up front,
 /// reused across iterations).
 fn resolve_plan(project: &Project, target: &str, flags: &DeviceFlags) -> Result<Plan> {
@@ -949,6 +1131,12 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     let _end_session = EndSession(session.clone());
     let _control = ControlServer::start(session.clone())?;
     let server = DevServer::start_observed(session.clone())?;
+    if !server.set_asset_manifest(
+        session.store.state().desired.asset_revision,
+        session.asset_manifest(),
+    ) {
+        bail!("asset manifest exceeds the dev-channel frame limit");
+    }
     let channel_dir = project.root.join(".gpui");
     fs::write(channel_dir.join("dev-port"), server.port.to_string())?;
     let overflow = Arc::new(AtomicBool::new(false));
@@ -1083,6 +1271,18 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         &mut last_failed,
     )?;
     while !quit && !session.stopping.load(Ordering::SeqCst) {
+        if drain_asset_reconciliations(project, &plan, &server, &session) {
+            quit = run_cycles(
+                project,
+                &plan,
+                &mut channel,
+                &server,
+                &mut child,
+                &rx,
+                &mut last_failed,
+            )?;
+            continue;
+        }
         let event = rx.recv_timeout(Duration::from_millis(100));
         if channel.overflow.swap(false, Ordering::SeqCst) {
             quit = run_cycles(
@@ -1110,6 +1310,21 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                 )?;
             }
             Ok(Event::Assets(delta)) => {
+                if !server.set_asset_manifest(
+                    session.store.state().desired.asset_revision,
+                    session.asset_manifest(),
+                ) {
+                    quit = run_cycles(
+                        project,
+                        &plan,
+                        &mut channel,
+                        &server,
+                        &mut child,
+                        &rx,
+                        &mut last_failed,
+                    )?;
+                    continue;
+                }
                 let scope = session.current_run().unwrap_or_default();
                 let asset_span =
                     session.start_span("assets.apply", &scope, None, json!({"delta": delta}));

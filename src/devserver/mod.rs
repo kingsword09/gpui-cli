@@ -11,7 +11,7 @@ pub mod session;
 pub mod timing;
 pub mod windows;
 
-pub use app_channel::DevServer;
+pub use app_channel::{AssetReconciliation, DevServer};
 
 #[cfg(test)]
 mod tests;
