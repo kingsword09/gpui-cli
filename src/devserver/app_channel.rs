@@ -1,9 +1,10 @@
 //! App connections have launch-scoped credentials and bounded output queues.
 //! Logs go directly to the event store; snapshot replies go to their requester.
 
-use super::events::{Kind, Scope, clip};
+use super::events::{Kind, Scope, clip, now_ms};
 use super::protocol::{self, ClientMessage, PROTO_VERSION, ServerMessage};
 use super::session::{Session, random_token};
+use super::windows::{ProbeReply, WindowRegistration, WindowRegistry};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::collections::HashMap;
@@ -33,6 +34,7 @@ struct Shared {
     clients: Mutex<HashMap<u64, ClientConn>>,
     changed: Condvar,
     waiters: Mutex<HashMap<SnapshotKey, mpsc::SyncSender<String>>>,
+    windows: Arc<WindowRegistry>,
     next_id: AtomicU64,
     connections: AtomicUsize,
     shutdown: AtomicBool,
@@ -48,10 +50,37 @@ impl Shared {
             .and_then(|r| r.scope.run_id.clone())
     }
 
+    fn current_scope(&self) -> Option<Scope> {
+        self.expected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|run| run.scope.clone())
+    }
+
     fn emit(&self, kind: Kind, scope: &Scope, data: serde_json::Value) {
         if let Some(session) = &self.session {
             session.emit(kind, scope, data);
         }
+    }
+
+    fn send_to(&self, connection_id: u64, message: &ServerMessage) -> bool {
+        let Ok(payload) = protocol::encode(message) else {
+            return false;
+        };
+        if payload.len() > protocol::MAX_FRAME_LEN as usize {
+            self.write_failed.store(true, Ordering::SeqCst);
+            return false;
+        }
+        let clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(client) = clients.get(&connection_id) else {
+            return false;
+        };
+        if client.sender.try_send(payload).is_err() {
+            self.write_failed.store(true, Ordering::SeqCst);
+            return false;
+        }
+        true
     }
 }
 
@@ -60,6 +89,7 @@ pub struct DevServer {
     pub token: String,
     shared: Arc<Shared>,
     accept_handle: Option<JoinHandle<()>>,
+    heartbeat_handle: Option<JoinHandle<()>>,
 }
 
 impl DevServer {
@@ -75,6 +105,10 @@ impl DevServer {
         let port = listener.local_addr()?.port();
         listener.set_nonblocking(true)?;
         let token = random_token()?;
+        let windows = session
+            .as_ref()
+            .map(|session| session.windows.clone())
+            .unwrap_or_default();
         let shared = Arc::new(Shared {
             token: token.clone(),
             expected: Mutex::new(None),
@@ -82,6 +116,7 @@ impl DevServer {
             clients: Mutex::new(HashMap::new()),
             changed: Condvar::new(),
             waiters: Mutex::new(HashMap::new()),
+            windows,
             next_id: AtomicU64::new(0),
             connections: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
@@ -118,11 +153,16 @@ impl DevServer {
                         }
                     }
                 })?;
+        let heartbeat_state = shared.clone();
+        let heartbeat_handle = thread::Builder::new()
+            .name("gpui-ui-heartbeat".into())
+            .spawn(move || heartbeat_loop(&heartbeat_state))?;
         Ok(Self {
             port,
             token,
             shared,
             accept_handle: Some(accept_handle),
+            heartbeat_handle: Some(heartbeat_handle),
         })
     }
 
@@ -263,6 +303,43 @@ impl Drop for DevServer {
         if let Some(handle) = self.accept_handle.take() {
             let _ = handle.join();
         }
+        if let Some(handle) = self.heartbeat_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn heartbeat_loop(shared: &Arc<Shared>) {
+    while !shared.shutdown.load(Ordering::SeqCst) {
+        if let Some(scope) = shared.current_scope() {
+            let tick = shared.windows.tick(scope.run_id.as_deref(), Instant::now());
+            for timeout in tick.timeouts {
+                shared.emit(
+                    Kind::UiProbeResult,
+                    &scope,
+                    json!({
+                        "request_id": timeout.request_id,
+                        "window_id": timeout.window_id,
+                        "responsive": false,
+                        "latency_ms": null,
+                        "accepted": true,
+                        "timeout": true,
+                        "reason": "probe_timeout",
+                        "received_at_ms": now_ms(),
+                    }),
+                );
+            }
+            for probe in tick.probes {
+                let _ = shared.send_to(
+                    probe.connection_id,
+                    &ServerMessage::ProbeUi {
+                        request_id: probe.request_id,
+                        window_id: probe.window_id,
+                    },
+                );
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -458,20 +535,38 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                     scale_milli,
                     foreground,
                 } => {
+                    let window_id = clip(&window_id, 128);
+                    let title = clip(&title, 256);
+                    let registered_at_ms = now_ms();
+                    shared.windows.register(
+                        &scope,
+                        id,
+                        WindowRegistration {
+                            window_id: window_id.clone(),
+                            title: title.clone(),
+                            width,
+                            height,
+                            scale_milli,
+                            foreground,
+                            registered_at_ms,
+                        },
+                    );
                     shared.emit(
                         Kind::WindowRegistered,
                         &scope,
-                        json!({"window_id": clip(&window_id, 128), "title": clip(&title, 256),
+                        json!({"window_id": window_id, "title": title,
                             "width": width, "height": height, "scale_milli": scale_milli,
-                            "foreground": foreground}),
+                            "foreground": foreground, "registered_at_ms": registered_at_ms}),
                     );
                 }
                 ClientMessage::WindowClosed { window_id, reason } => {
+                    let window_id = clip(&window_id, 128);
+                    let reason = reason.map(|value| clip(&value, 256));
+                    shared.windows.close(&scope, &window_id, reason.clone());
                     shared.emit(
                         Kind::WindowClosed,
                         &scope,
-                        json!({"window_id": clip(&window_id, 128),
-                            "reason": reason.as_deref().map(|value| clip(value, 256))}),
+                        json!({"window_id": window_id, "reason": reason}),
                     );
                 }
                 ClientMessage::UiProbeResult {
@@ -480,12 +575,25 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                     responsive,
                     latency_ms,
                 } => {
+                    let received_at_ms = now_ms();
+                    let result = shared.windows.record_probe_result(
+                        &scope,
+                        ProbeReply {
+                            connection_id: id,
+                            request_id: request_id.clone(),
+                            window_id: window_id.clone(),
+                            responsive,
+                            latency_ms,
+                            received_at_ms,
+                        },
+                    );
                     shared.emit(
                         Kind::UiProbeResult,
                         &scope,
                         json!({"request_id": clip(&request_id, 128),
                             "window_id": clip(&window_id, 128), "responsive": responsive,
-                            "latency_ms": latency_ms}),
+                            "latency_ms": latency_ms, "accepted": result.accepted,
+                            "reason": result.reason, "received_at_ms": received_at_ms}),
                     );
                 }
                 ClientMessage::Hello { .. } => {}
@@ -498,6 +606,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
     }
     let disconnected = !clients.values().any(|c| c.scope.run_id == scope.run_id);
     drop(clients);
+    shared.windows.disconnect(&scope, id);
     if disconnected {
         shared.emit(Kind::AppDisconnected, &scope, json!({"connection_id": id}));
     }

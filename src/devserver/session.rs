@@ -3,6 +3,7 @@
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
 use super::inputs::Inputs;
 use super::timing::{SpanGuard, Timing};
+use super::windows::WindowRegistry;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::fs;
@@ -19,6 +20,7 @@ pub struct Session {
     inputs: Mutex<Inputs>,
     output: Mutex<RollingFile>,
     pub timing: Arc<Timing>,
+    pub windows: Arc<WindowRegistry>,
     next_build: AtomicU64,
     next_run: AtomicU64,
 }
@@ -52,8 +54,9 @@ impl Session {
             desired: Revision::default(),
             build: None,
             running: None,
+            windows: Vec::new(),
             capabilities: json!({"status": true, "diagnostics": true, "events": true,
-                "run_identity": "launch_token", "ui_observation": false, "asset_confirmation": false,
+                "run_identity": "launch_token", "ui_observation": true, "asset_confirmation": false,
                 "actions": false, "checks": false, "input_scope": "project_files",
                 "native_mobile_logs": false, "timing_spans": true}),
             diagnostics: Vec::new(),
@@ -75,6 +78,7 @@ impl Session {
                 8,
             )?),
             timing,
+            windows: Arc::new(WindowRegistry::default()),
             dir,
             stopping: AtomicBool::new(false),
             inputs: Mutex::new(Inputs::default()),
