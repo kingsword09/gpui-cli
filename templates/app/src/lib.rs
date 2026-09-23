@@ -71,12 +71,15 @@ pub fn pump_live_assets(cx: &mut App) {
                 }
                 cx.update(|cx| {
                     let mut asset_batches = std::collections::BTreeMap::<
-                        u64,
+                        (String, u64),
                         (Vec<String>, Vec<String>),
                     >::new();
                     let mut has_asset_changes = false;
                     for event in asset_events {
-                        let batch = asset_batches.entry(event.asset_revision).or_default();
+                        let transfer_id = event.transfer_id;
+                        let batch = asset_batches
+                            .entry((transfer_id.clone(), event.asset_revision))
+                            .or_default();
                         if event.failed {
                             batch.1.push(event.path);
                             continue;
@@ -108,12 +111,13 @@ pub fn pump_live_assets(cx: &mut App) {
                                 .join(&path)
                                 .into(),
                         ));
-                        crate::live::mark_asset_applied(&path, event.removed);
+                        crate::live::mark_asset_applied(&transfer_id, &path, event.removed);
                         batch.0.push(path);
                         has_asset_changes = true;
                     }
-                    for (asset_revision, (applied, failed)) in asset_batches {
+                    for ((transfer_id, asset_revision), (applied, failed)) in asset_batches {
                         crate::live::report_assets_applied(
+                            &transfer_id,
                             asset_revision,
                             &applied,
                             &failed,

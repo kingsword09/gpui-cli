@@ -70,12 +70,14 @@ pub enum ClientMessage {
         latency_ms: Option<u64>,
     },
     AssetsApplied {
+        transfer_id: String,
         asset_revision: u64,
         applied: Vec<String>,
         failed: Vec<String>,
         cache_invalidated: bool,
     },
     AssetsReconciled {
+        transfer_id: String,
         asset_revision: u64,
         present: Vec<String>,
         missing: Vec<String>,
@@ -96,19 +98,23 @@ pub enum ServerMessage {
         current_proto: u32,
     },
     AssetChanged {
+        transfer_id: String,
         path: String,
         asset_revision: u64,
     },
     AssetData {
+        transfer_id: String,
         path: String,
         data: String,
         asset_revision: u64,
     },
     AssetRemoved {
+        transfer_id: String,
         path: String,
         asset_revision: u64,
     },
     AssetManifest {
+        transfer_id: String,
         asset_revision: u64,
         entries: Vec<AssetManifestEntry>,
     },
@@ -305,6 +311,7 @@ mod tests {
     #[test]
     fn frame_roundtrip_and_limit_are_bounded() {
         let payload = encode(&ServerMessage::AssetChanged {
+            transfer_id: "t1".into(),
             path: "a".into(),
             asset_revision: 1,
         })
@@ -315,6 +322,7 @@ mod tests {
         assert_eq!(
             decode::<ServerMessage>(&decoded).unwrap(),
             ServerMessage::AssetChanged {
+                transfer_id: "t1".into(),
                 path: "a".into(),
                 asset_revision: 1,
             }
@@ -328,6 +336,7 @@ mod tests {
     #[test]
     fn explicit_asset_removal_roundtrips() {
         let message = ServerMessage::AssetRemoved {
+            transfer_id: "t1".into(),
             path: "assets/old.png".into(),
             asset_revision: 4,
         };
@@ -340,6 +349,7 @@ mod tests {
     #[test]
     fn asset_manifest_and_reconciliation_roundtrip() {
         let manifest = ServerMessage::AssetManifest {
+            transfer_id: "t9".into(),
             asset_revision: 9,
             entries: vec![AssetManifestEntry {
                 path: "assets/logo.png".into(),
@@ -352,6 +362,7 @@ mod tests {
         );
 
         let reconciliation = ClientMessage::AssetsReconciled {
+            transfer_id: "t9".into(),
             asset_revision: 9,
             present: vec![],
             missing: vec!["assets/logo.png".into()],

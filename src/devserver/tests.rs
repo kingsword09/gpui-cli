@@ -91,6 +91,7 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
     send(
         &mut socket,
         &ClientMessage::AssetsApplied {
+            transfer_id: "asset-t1-r0".into(),
             asset_revision: 0,
             applied: vec!["assets/x.png".into()],
             failed: Vec::new(),
@@ -134,11 +135,20 @@ fn current_app_channel_queues_accepted_asset_reconciliation() {
     let build = session.begin_build().unwrap();
     let run = session.begin_run(&build);
     let token = server.expect_run(run.clone()).unwrap();
+    assert!(server.set_asset_manifest(
+        run.revision.asset_revision,
+        vec![protocol::AssetManifestEntry {
+            path: "assets/logo.png".into(),
+            hash: "hash".into(),
+        }]
+    ));
+    let transfer_id = server.current_asset_manifest().unwrap().0;
     let mut socket = connect(&server, &token);
 
     send(
         &mut socket,
         &ClientMessage::AssetsReconciled {
+            transfer_id,
             asset_revision: run.revision.asset_revision,
             present: vec![],
             missing: vec!["assets/logo.png".into()],

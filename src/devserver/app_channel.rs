@@ -31,11 +31,19 @@ type SnapshotKey = (Option<String>, String);
 pub struct AssetReconciliation {
     pub connection_id: u64,
     pub scope: Scope,
+    pub transfer_id: String,
     pub asset_revision: u64,
     pub present: Vec<String>,
     pub missing: Vec<String>,
     pub stale: Vec<String>,
     pub removed: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct AssetManifestSnapshot {
+    transfer_id: String,
+    asset_revision: u64,
+    entries: Vec<AssetManifestEntry>,
 }
 
 struct Shared {
@@ -45,10 +53,11 @@ struct Shared {
     clients: Mutex<HashMap<u64, ClientConn>>,
     changed: Condvar,
     waiters: Mutex<HashMap<SnapshotKey, mpsc::SyncSender<String>>>,
-    asset_manifest: Mutex<Option<(u64, Vec<AssetManifestEntry>)>>,
+    asset_manifest: Mutex<Option<AssetManifestSnapshot>>,
     reconciliations: Mutex<Vec<AssetReconciliation>>,
     windows: Arc<WindowRegistry>,
     next_id: AtomicU64,
+    next_transfer: AtomicU64,
     connections: AtomicUsize,
     shutdown: AtomicBool,
     write_failed: AtomicBool,
@@ -133,6 +142,7 @@ impl DevServer {
             reconciliations: Mutex::new(Vec::new()),
             windows,
             next_id: AtomicU64::new(0),
+            next_transfer: AtomicU64::new(1),
             connections: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             write_failed: AtomicBool::new(false),
@@ -227,7 +237,12 @@ impl DevServer {
         asset_revision: u64,
         entries: Vec<AssetManifestEntry>,
     ) -> bool {
+        let transfer_id = format!(
+            "asset-t{}-r{asset_revision}",
+            self.shared.next_transfer.fetch_add(1, Ordering::Relaxed)
+        );
         let message = ServerMessage::AssetManifest {
+            transfer_id: transfer_id.clone(),
             asset_revision,
             entries: entries.clone(),
         };
@@ -242,16 +257,27 @@ impl DevServer {
             .shared
             .asset_manifest
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some((asset_revision, entries));
+            .unwrap_or_else(|e| e.into_inner()) = Some(AssetManifestSnapshot {
+            transfer_id,
+            asset_revision,
+            entries,
+        });
         true
     }
 
-    pub fn current_asset_manifest(&self) -> Option<(u64, Vec<AssetManifestEntry>)> {
+    pub fn current_asset_manifest(&self) -> Option<(String, u64, Vec<AssetManifestEntry>)> {
         self.shared
             .asset_manifest
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .as_ref()
+            .map(|manifest| {
+                (
+                    manifest.transfer_id.clone(),
+                    manifest.asset_revision,
+                    manifest.entries.clone(),
+                )
+            })
     }
 
     pub fn send_to(&self, connection_id: u64, message: &ServerMessage) -> bool {
@@ -522,7 +548,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                 }
             }
         });
-    if let Some((asset_revision, entries)) = shared
+    if let Some(manifest) = shared
         .asset_manifest
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -531,8 +557,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
         let _ = shared.send_to(
             id,
             &ServerMessage::AssetManifest {
-                asset_revision,
-                entries,
+                transfer_id: manifest.transfer_id,
+                asset_revision: manifest.asset_revision,
+                entries: manifest.entries,
             },
         );
     }
@@ -675,21 +702,31 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                     );
                 }
                 ClientMessage::AssetsApplied {
+                    transfer_id,
                     asset_revision,
                     applied,
                     failed,
                     cache_invalidated,
                 } => {
-                    let desired = shared
-                        .session
+                    let accepted = shared
+                        .asset_manifest
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
                         .as_ref()
-                        .map(|session| session.store.state().desired.asset_revision)
-                        .unwrap_or(asset_revision);
-                    let accepted = asset_revision == desired;
+                        .map(|manifest| {
+                            transfer_id == manifest.transfer_id
+                                && asset_revision == manifest.asset_revision
+                        })
+                        .unwrap_or_else(|| {
+                            shared.session.as_ref().is_none_or(|session| {
+                                asset_revision == session.store.state().desired.asset_revision
+                            })
+                        });
                     shared.emit(
                         Kind::AssetsApplied,
                         &scope,
                         json!({
+                            "transfer_id": transfer_id,
                             "asset_revision": asset_revision,
                             "applied": applied.iter().take(128).map(|path| clip(path, 256)).collect::<Vec<_>>(),
                             "failed": failed.iter().take(128).map(|path| clip(path, 256)).collect::<Vec<_>>(),
@@ -700,18 +737,23 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                     );
                 }
                 ClientMessage::AssetsReconciled {
+                    transfer_id,
                     asset_revision,
                     present,
                     missing,
                     stale,
                     removed,
                 } => {
-                    let desired = shared
-                        .session
-                        .as_ref()
-                        .map(|session| session.store.state().desired.asset_revision)
-                        .unwrap_or(asset_revision);
-                    let accepted = asset_reload && asset_revision == desired;
+                    let accepted = asset_reload
+                        && shared
+                            .asset_manifest
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_ref()
+                            .is_some_and(|manifest| {
+                                transfer_id == manifest.transfer_id
+                                    && asset_revision == manifest.asset_revision
+                            });
                     let present: Vec<String> = present
                         .iter()
                         .take(256)
@@ -733,6 +775,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                         Kind::AssetsReconciled,
                         &scope,
                         json!({
+                            "transfer_id": transfer_id,
                             "asset_revision": asset_revision,
                             "present": present,
                             "missing": missing,
@@ -751,6 +794,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                             .push(AssetReconciliation {
                                 connection_id: id,
                                 scope: scope.clone(),
+                                transfer_id,
                                 asset_revision,
                                 present,
                                 missing,
@@ -883,6 +927,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
 
         server.broadcast(&ServerMessage::AssetChanged {
+            transfer_id: "t1".into(),
             path: "assets/x.png".to_string(),
             asset_revision: 1,
         });
@@ -916,12 +961,13 @@ mod tests {
         assert!(matches!(
             manifest,
             ServerMessage::AssetManifest {
+                transfer_id,
                 asset_revision: 4,
                 entries
             } if entries == vec![protocol::AssetManifestEntry {
                 path: "assets/logo.png".into(),
                 hash: "hash-4".into(),
-            }]
+            }] && transfer_id.starts_with("asset-t")
         ));
     }
 
@@ -935,6 +981,7 @@ mod tests {
         assert!(server.wait_for_client(Duration::from_secs(1)));
 
         server.broadcast(&ServerMessage::AssetChanged {
+            transfer_id: "t1".into(),
             path: "assets/x.png".to_string(),
             asset_revision: 1,
         });
@@ -972,6 +1019,7 @@ mod tests {
         // the write path, not the reader noticing the reset first.
         for _ in 0..12 {
             server.broadcast(&ServerMessage::AssetData {
+                transfer_id: "t1".into(),
                 path: "assets/x.png".to_string(),
                 data: "x".repeat(256 * 1024),
                 asset_revision: 1,
