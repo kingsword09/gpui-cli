@@ -34,6 +34,19 @@ pub fn window_capture_available() -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn capture_window(pid: u32, title: &str, timeout: Duration) -> anyhow::Result<WindowCapture> {
+    capture_window_with_cancel(pid, title, timeout, || false)
+}
+
+#[cfg(target_os = "macos")]
+pub fn capture_window_with_cancel<F>(
+    pid: u32,
+    title: &str,
+    timeout: Duration,
+    should_cancel: F,
+) -> anyhow::Result<WindowCapture>
+where
+    F: Fn() -> bool,
+{
     use std::io::Read;
 
     const ENUMERATE_WINDOW: &str = r#"
@@ -74,6 +87,7 @@ exit(3)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
         timeout,
+        &should_cancel,
     )
     .context("enumerating the target macOS window")?;
     if enumeration.status.code() == Some(3) {
@@ -114,6 +128,7 @@ exit(3)
             .stdout(Stdio::null())
             .stderr(Stdio::piped()),
         remaining,
+        &should_cancel,
     )
     .context("capturing the selected macOS window")?;
     if !output.status.success() {
@@ -151,10 +166,33 @@ pub fn capture_window(
     bail!("macOS window capture is unavailable on this platform")
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn capture_window_with_cancel<F>(
+    _pid: u32,
+    _title: &str,
+    _timeout: Duration,
+    _should_cancel: F,
+) -> anyhow::Result<WindowCapture>
+where
+    F: Fn() -> bool,
+{
+    bail!("macOS window capture is unavailable on this platform")
+}
+
 #[cfg(target_os = "macos")]
-fn run_bounded(command: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
+fn run_bounded<F>(
+    command: &mut Command,
+    timeout: Duration,
+    should_cancel: &F,
+) -> anyhow::Result<Output>
+where
+    F: Fn() -> bool,
+{
     if timeout.is_zero() {
         bail!("window capture deadline elapsed");
+    }
+    if should_cancel() {
+        bail!("window capture cancelled");
     }
     let mut child = command.spawn().context("starting capture helper")?;
     let started = Instant::now();
@@ -173,6 +211,11 @@ fn run_bounded(command: &mut Command, timeout: Duration) -> anyhow::Result<Outpu
                 stdout,
                 stderr,
             });
+        }
+        if should_cancel() {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("window capture cancelled");
         }
         if started.elapsed() >= timeout {
             let _ = child.kill();
@@ -194,6 +237,11 @@ fn epoch_ms() -> u64 {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::thread;
 
     #[test]
     fn macos_window_enumerator_compiles_and_rejects_an_unmatched_title() {
@@ -209,5 +257,23 @@ mod tests {
                 .contains("no visible macOS window matched"),
             "unexpected capture helper error: {error:#}"
         );
+    }
+
+    #[test]
+    fn bounded_capture_kills_a_helper_when_cancelled() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let trigger = cancelled.clone();
+        let thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let mut command = Command::new("/bin/sleep");
+        command.arg("5");
+        let error = run_bounded(&mut command, Duration::from_secs(5), &|| {
+            cancelled.load(Ordering::SeqCst)
+        })
+        .unwrap_err();
+        thread.join().unwrap();
+        assert!(error.to_string().contains("cancelled"));
     }
 }

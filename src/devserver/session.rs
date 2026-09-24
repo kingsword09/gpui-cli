@@ -604,14 +604,31 @@ impl Session {
                 json!({"provider": provider, "missing": ["semantics.read"]}),
             ));
         }
-        let capture = capture::capture_window(pid, &window.title, timeout).map_err(|error| {
-            OperationError::with_details(
-                "capture_failed",
-                error.to_string(),
-                json!({"provider": provider, "window_id": window.window_id,
-                    "run_id": run.scope.run_id, "pid": pid}),
-            )
-        })?;
+        if !self.operation_is_running(&operation.operation_id) {
+            return Err(OperationError::new(
+                "cancelled",
+                "observe was cancelled before the window screenshot started",
+            ));
+        }
+        let capture = match capture::capture_window_with_cancel(pid, &window.title, timeout, || {
+            !self.operation_is_running(&operation.operation_id)
+        }) {
+            Ok(capture) => capture,
+            Err(_) if !self.operation_is_running(&operation.operation_id) => {
+                return Err(OperationError::new(
+                    "cancelled",
+                    "observe was cancelled while the window screenshot was being captured",
+                ));
+            }
+            Err(error) => {
+                return Err(OperationError::with_details(
+                    "capture_failed",
+                    error.to_string(),
+                    json!({"provider": provider, "window_id": window.window_id,
+                        "run_id": run.scope.run_id, "pid": pid}),
+                ));
+            }
+        };
         if !self.operation_is_running(&operation.operation_id) {
             return Err(OperationError::new(
                 "cancelled",
@@ -701,6 +718,14 @@ impl Session {
                 "sha256": digest_hex, "provider": provider, "scope": "window"}),
         );
         for (index, chunk) in capture.bytes.chunks(ARTIFACT_CHUNK_BYTES).enumerate() {
+            if !self.operation_is_running(&operation.operation_id) {
+                let _ = self.artifacts.abort(&artifact_id, &transfer_id);
+                return Err(OperationError::with_details(
+                    "cancelled",
+                    "observe was cancelled while its screenshot artifact was transferring",
+                    json!({"artifact_id": artifact_id}),
+                ));
+            }
             let offset = (index * ARTIFACT_CHUNK_BYTES) as u64;
             if let Err(error) =
                 self.artifacts

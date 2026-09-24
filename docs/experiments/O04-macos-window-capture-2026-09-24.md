@@ -14,6 +14,9 @@
   像素总数和 SHA-256；
 - `observe --sync` 在目标 run 连接后先等待对应 `asset_revision` 的 `assets_applied`
   确认；采集结束再次核对资源确认，确认丢失时拒绝本次观察；
+- 取消或 deadline 到达时轮询中的 capture helper 会被终止；artifact 按块传输时
+  逐块检查 operation 终态，未发布 transfer 会 abort，迟到完成不能改写 cancelled/
+  timed_out；
 - 采集前后核对 run、window、UI heartbeat 和 tracked input revision/hash；中途变化时
   operation 失败，不发布成功 observation；
 - 发布不可变 PNG artifact，记录窗口号/bounds、像素尺寸、前后 scene_epoch、时间、
@@ -29,5 +32,6 @@
 - PNG 元数据解析测试覆盖签名、非零尺寸和宽高读取；ArtifactStore 现有测试覆盖 PNG
   大小、像素上限、SHA-256、传输完整性和原子发布；
 - 同步观察测试覆盖资源确认未到达时保持 operation pending；
+- macOS bounded-helper 测试覆盖取消时终止子进程；
 - macOS live GUI 截图需在已授权 Screen Recording 的交互会话中实测。该 provider
   不证明 GPUI scene 读回、present fence、被遮挡内容或语义树。
