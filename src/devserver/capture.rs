@@ -1,9 +1,15 @@
 //! Platform capture providers used by observation operations.
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::bail;
+#[cfg(target_os = "macos")]
+use anyhow::{Context, anyhow};
+#[cfg(target_os = "macos")]
 use std::process::{Command, Output, Stdio};
+#[cfg(target_os = "macos")]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 #[derive(Clone, Debug)]
 pub struct WindowCapture {
@@ -145,6 +151,7 @@ pub fn capture_window(
     bail!("macOS window capture is unavailable on this platform")
 }
 
+#[cfg(target_os = "macos")]
 fn run_bounded(command: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
     if timeout.is_zero() {
         bail!("window capture deadline elapsed");
@@ -176,6 +183,7 @@ fn run_bounded(command: &mut Command, timeout: Duration) -> anyhow::Result<Outpu
     }
 }
 
+#[cfg(target_os = "macos")]
 fn epoch_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
