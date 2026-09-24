@@ -133,6 +133,55 @@ fn operation_get_and_cancel_preserve_terminal_state() {
 }
 
 #[test]
+fn observe_submission_is_version_bound_and_fails_without_a_capture_provider() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("main.rs"), "fn main() {}").unwrap();
+    let session = Session::start(project.path(), "test", "desktop:test").unwrap();
+    let control = ControlServer::start(session.clone()).unwrap();
+
+    let submitted = control::request(
+        &control.registration,
+        "test.observe",
+        Command::Observe {
+            sync: true,
+            window_id: None,
+            require: vec!["screenshot".into()],
+            deadline_ms: 10_000,
+        },
+    )
+    .unwrap();
+    assert!(submitted.ok);
+    let operation_id = submitted.result.unwrap()["operation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    session.advance_observe_requests();
+    let completed = control::request(
+        &control.registration,
+        "test.observe.get",
+        Command::OperationGet { operation_id },
+    )
+    .unwrap()
+    .result
+    .unwrap();
+    assert_eq!(completed["state"], "failed");
+    assert_eq!(completed["error"]["code"], "unavailable");
+    assert_eq!(completed["source_revision"], 1);
+    assert_eq!(completed["target"]["input_consistency"], "tracked_scan");
+    let events = session.store.events(0, Duration::ZERO).events;
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == Kind::OperationStarted)
+    );
+    assert!(events.iter().any(|event| {
+        event.kind == Kind::OperationFinished
+            && event.data["operation"]["error"]["code"] == "unavailable"
+    }));
+}
+
+#[test]
 fn current_app_channel_routes_window_and_ui_probe_events() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();

@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Args)]
 pub struct DevArgs {
@@ -31,6 +33,24 @@ pub enum DevCommand {
     Windows,
     /// Request a fresh build through the live supervisor
     Build,
+    /// Submit a version-bound UI observation
+    Observe {
+        /// Ensure the actively watched inputs are rebuilt before observing
+        #[arg(long)]
+        sync: bool,
+        /// Select one registered window when multiple windows are open
+        #[arg(long, value_name = "WINDOW_ID")]
+        window: Option<String>,
+        /// Required observation capability or alias; may be repeated or comma-separated
+        #[arg(long, value_name = "CAPABILITY")]
+        require: Vec<String>,
+        /// Total operation deadline, from 1ms through 120s
+        #[arg(long, default_value = "30s", value_parser = parse_operation_timeout)]
+        timeout: u64,
+        /// Return after submission rather than waiting for the operation terminal state
+        #[arg(long = "async")]
+        asynchronous: bool,
+    },
     /// Query or cancel an asynchronous supervisor operation
     Operation {
         #[command(subcommand)]
@@ -83,6 +103,29 @@ pub enum ArtifactCommand {
 }
 
 pub fn parse_timeout(value: &str) -> std::result::Result<u64, String> {
+    parse_duration(
+        value,
+        control::MAX_WAIT_MS,
+        "timeout must be between 0 and 30s (e.g. 500ms or 30s)",
+    )
+}
+
+pub fn parse_operation_timeout(value: &str) -> std::result::Result<u64, String> {
+    parse_duration(
+        value,
+        120_000,
+        "timeout must be between 1ms and 120s (e.g. 500ms or 30s)",
+    )
+    .and_then(|timeout| {
+        if timeout == 0 {
+            Err("timeout must be between 1ms and 120s (e.g. 500ms or 30s)".into())
+        } else {
+            Ok(timeout)
+        }
+    })
+}
+
+fn parse_duration(value: &str, maximum: u64, message: &str) -> std::result::Result<u64, String> {
     let (number, multiplier) = if let Some(n) = value.strip_suffix("ms") {
         (n, 1)
     } else {
@@ -92,8 +135,8 @@ pub fn parse_timeout(value: &str) -> std::result::Result<u64, String> {
         .parse::<u64>()
         .ok()
         .and_then(|v| v.checked_mul(multiplier))
-        .filter(|v| *v <= control::MAX_WAIT_MS);
-    ms.ok_or_else(|| "timeout must be between 0 and 30s (e.g. 500ms or 30s)".into())
+        .filter(|v| *v <= maximum);
+    ms.ok_or_else(|| message.into())
 }
 
 pub fn handle_dev(args: DevArgs) -> Result<()> {
@@ -162,6 +205,36 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         }
         return Ok(());
     }
+    if let DevCommand::Observe {
+        sync,
+        window,
+        require,
+        timeout,
+        asynchronous,
+    } = &args.command
+    {
+        let result = execute_observe(
+            &registration,
+            *sync,
+            window.clone(),
+            require.clone(),
+            *timeout,
+            *asynchronous,
+        )?;
+        if args.json {
+            write_value(
+                &Reply::success(
+                    &registration.session_id,
+                    control::next_request_id("dev.observe"),
+                    result,
+                ),
+                false,
+            )?;
+        } else {
+            write_value(&result, true)?;
+        }
+        return Ok(());
+    }
     let request_id = control::next_request_id("dev");
     let (mut after, timeout, follow) = match &args.command {
         DevCommand::Events {
@@ -177,6 +250,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             DevCommand::Diagnostics => Command::Diagnostics,
             DevCommand::Windows => Command::Windows,
             DevCommand::Build => Command::Build,
+            DevCommand::Observe { .. } => unreachable!("observe commands return above"),
             DevCommand::Operation { .. } => unreachable!("operation commands return above"),
             DevCommand::Events { .. } => Command::Events {
                 after,
@@ -255,6 +329,77 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
     }
 }
 
+fn execute_observe(
+    registration: &control::Registration,
+    sync: bool,
+    window_id: Option<String>,
+    require: Vec<String>,
+    timeout_ms: u64,
+    asynchronous: bool,
+) -> std::result::Result<serde_json::Value, ApiError> {
+    let request_id = control::next_request_id("dev.observe");
+    let reply = control::request(
+        registration,
+        &request_id,
+        Command::Observe {
+            sync,
+            window_id,
+            require,
+            deadline_ms: timeout_ms,
+        },
+    )
+    .map_err(|error| ApiError::new("connection_failed", error.to_string()))?;
+    if !reply.ok {
+        return Err(reply
+            .error
+            .map(Into::into)
+            .unwrap_or_else(|| ApiError::new("request_failed", "Observe request failed")));
+    }
+    let submitted = reply.result.unwrap_or_default();
+    if asynchronous {
+        return Ok(submitted);
+    }
+    let operation_id = submitted["operation_id"].as_str().ok_or_else(|| {
+        ApiError::new("invalid_response", "Observe submission has no operation_id")
+    })?;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let current = operation_request(
+            registration,
+            Command::OperationGet {
+                operation_id: operation_id.to_owned(),
+            },
+        )?;
+        let state = current["state"].as_str().unwrap_or("unknown");
+        if matches!(
+            state,
+            "succeeded" | "failed" | "cancelled" | "timed_out" | "superseded" | "unknown"
+        ) {
+            if state == "succeeded" {
+                return Ok(current);
+            }
+            let error = current["error"].clone();
+            return Err(ApiError {
+                code: error["code"].as_str().unwrap_or("operation_failed").into(),
+                message: error["message"]
+                    .as_str()
+                    .unwrap_or("observe operation did not succeed")
+                    .into(),
+                details: Some(json!({"operation_id": operation_id, "operation": current})),
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(ApiError {
+                code: "timed_out".into(),
+                message: "observe operation did not reach a terminal state before its deadline"
+                    .into(),
+                details: Some(json!({"operation_id": operation_id})),
+            });
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn execute_operation(
     registration: &control::Registration,
     command: &OperationCommand,
@@ -267,6 +412,13 @@ fn execute_operation(
             operation_id: operation_id.clone(),
         },
     };
+    operation_request(registration, request)
+}
+
+fn operation_request(
+    registration: &control::Registration,
+    request: Command,
+) -> std::result::Result<serde_json::Value, ApiError> {
     let reply = control::request(
         registration,
         &control::next_request_id("dev.operation"),
@@ -517,6 +669,14 @@ mod tests {
     use crate::devserver::control::ControlServer;
     use crate::devserver::session::Session;
     use gpui_dev_protocol::ArtifactKind;
+
+    #[test]
+    fn operation_timeout_requires_a_nonzero_value_within_the_total_deadline() {
+        assert_eq!(parse_operation_timeout("500ms").unwrap(), 500);
+        assert_eq!(parse_operation_timeout("120s").unwrap(), 120_000);
+        assert!(parse_operation_timeout("0").is_err());
+        assert!(parse_operation_timeout("121s").is_err());
+    }
 
     #[test]
     fn artifact_get_downloads_chunks_verifies_hash_and_respects_overwrite() {
