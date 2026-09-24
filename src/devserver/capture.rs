@@ -1,8 +1,8 @@
 //! Platform capture providers used by observation operations.
 
-use anyhow::bail;
 #[cfg(target_os = "macos")]
-use anyhow::{Context, anyhow};
+use anyhow::Context;
+use anyhow::bail;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Output, Stdio};
 #[cfg(target_os = "macos")]
@@ -10,6 +10,33 @@ use std::thread;
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::time::Instant;
+
+#[derive(Debug)]
+pub struct CaptureError {
+    code: &'static str,
+    message: String,
+}
+
+impl CaptureError {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl std::fmt::Display for CaptureError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CaptureError {}
 
 #[derive(Clone, Debug)]
 pub struct WindowCapture {
@@ -57,6 +84,7 @@ import Foundation
 let environment = ProcessInfo.processInfo.environment
 guard let pid = environment["GPUI_CAPTURE_PID"].flatMap(Int.init) else { exit(2) }
 let expectedTitle = environment["GPUI_CAPTURE_TITLE"] ?? ""
+guard CGPreflightScreenCaptureAccess() else { exit(4) }
 let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
 let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
 for window in windows {
@@ -91,17 +119,37 @@ exit(3)
     )
     .context("enumerating the target macOS window")?;
     if enumeration.status.code() == Some(3) {
-        bail!("no visible macOS window matched the app PID and title");
+        return Err(CaptureError::new(
+            "window_unavailable",
+            "no visible macOS window matched the app PID and title",
+        )
+        .into());
+    }
+    if enumeration.status.code() == Some(4) {
+        return Err(CaptureError::new(
+            "permission_denied",
+            "macOS Screen Recording permission is required for window capture",
+        )
+        .into());
     }
     if !enumeration.status.success() {
         let detail = String::from_utf8_lossy(&enumeration.stderr);
-        bail!("macOS window enumeration failed: {}", detail.trim());
+        return Err(CaptureError::new(
+            classify_helper_error(&detail),
+            format!("macOS window enumeration failed: {}", detail.trim()),
+        )
+        .into());
     }
     let line = String::from_utf8_lossy(&enumeration.stdout)
         .lines()
         .next()
         .map(str::to_owned)
-        .ok_or_else(|| anyhow!("no visible macOS window matched the app PID and title"))?;
+        .ok_or_else(|| {
+            CaptureError::new(
+                "window_unavailable",
+                "no visible macOS window matched the app PID and title",
+            )
+        })?;
     let fields = line.split('\t').collect::<Vec<_>>();
     if fields.len() != 5 {
         bail!("macOS window enumeration returned malformed bounds");
@@ -133,7 +181,11 @@ exit(3)
     .context("capturing the selected macOS window")?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
-        bail!("macOS window screenshot failed: {}", detail.trim());
+        return Err(CaptureError::new(
+            classify_helper_error(&detail),
+            format!("macOS window screenshot failed: {}", detail.trim()),
+        )
+        .into());
     }
     let mut file =
         std::fs::File::open(&png_path).context("screencapture did not create the requested PNG")?;
@@ -155,6 +207,19 @@ exit(3)
         started_at_ms,
         finished_at_ms: epoch_ms(),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn classify_helper_error(detail: &str) -> &'static str {
+    let detail = detail.to_ascii_lowercase();
+    if detail.contains("permission")
+        || detail.contains("not authorized")
+        || detail.contains("screen recording")
+    {
+        "permission_denied"
+    } else {
+        "capture_failed"
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -251,10 +316,10 @@ mod tests {
             Duration::from_secs(30),
         )
         .unwrap_err();
+        let message = error.to_string();
         assert!(
-            error
-                .to_string()
-                .contains("no visible macOS window matched"),
+            message.contains("no visible macOS window matched")
+                || message.contains("Screen Recording permission"),
             "unexpected capture helper error: {error:#}"
         );
     }
