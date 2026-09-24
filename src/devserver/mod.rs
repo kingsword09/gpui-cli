@@ -2,6 +2,7 @@
 
 mod app_channel;
 pub mod artifacts;
+pub mod capture;
 pub mod control;
 pub mod events;
 pub mod inputs;

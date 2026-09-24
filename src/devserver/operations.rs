@@ -336,6 +336,43 @@ impl OperationStore {
         })
     }
 
+    pub fn bind_scope(
+        &self,
+        operation_id: &str,
+        scope: Scope,
+        now_ms: u64,
+    ) -> Result<Transition, OperationError> {
+        validate_operation_id(operation_id)?;
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = expire_locked(&mut inner, now_ms);
+        let record = inner.records.get_mut(operation_id).ok_or_else(|| {
+            OperationError::new("operation_expired", "operation is unknown or expired")
+        })?;
+        if record.snapshot.state != OperationState::Running {
+            return Ok(Transition {
+                snapshot: record.snapshot.clone(),
+                changed: false,
+            });
+        }
+        let unchanged = record.snapshot.scope.build_id == scope.build_id
+            && record.snapshot.scope.run_id == scope.run_id
+            && record.snapshot.scope.revision == scope.revision;
+        if unchanged {
+            return Ok(Transition {
+                snapshot: record.snapshot.clone(),
+                changed: false,
+            });
+        }
+        record.snapshot.scope = scope;
+        let snapshot = record.snapshot.clone();
+        refresh_bytes(&mut inner);
+        self.changed.notify_all();
+        Ok(Transition {
+            snapshot,
+            changed: true,
+        })
+    }
+
     pub fn finish(
         &self,
         operation_id: &str,
@@ -696,6 +733,23 @@ mod tests {
             .unwrap();
         assert!(!late.changed);
         assert_eq!(late.snapshot.state, OperationState::Cancelled);
+    }
+
+    #[test]
+    fn running_operation_can_bind_to_the_actual_run_identity() {
+        let store = OperationStore::new(4);
+        let queued = submit(&store, "req-1", 100);
+        store.start(&queued.operation_id, 200).unwrap();
+        let mut actual_scope = scope();
+        actual_scope.build_id = Some("b2".into());
+        actual_scope.run_id = Some("r2".into());
+        let bound = store
+            .bind_scope(&queued.operation_id, actual_scope, 300)
+            .unwrap();
+        assert!(bound.changed);
+        assert_eq!(bound.snapshot.scope.build_id.as_deref(), Some("b2"));
+        assert_eq!(bound.snapshot.scope.run_id.as_deref(), Some("r2"));
+        assert_eq!(bound.snapshot.scope.revision.source_revision, 3);
     }
 
     #[test]
