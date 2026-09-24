@@ -770,6 +770,42 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                         }),
                     );
                 }
+                ClientMessage::AssetsRequiredLoaded {
+                    transfer_id,
+                    asset_revision,
+                    required,
+                    loaded,
+                    failed,
+                } => {
+                    let accepted = shared
+                        .asset_manifest
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .map(|manifest| {
+                            transfer_id == manifest.transfer_id
+                                && asset_revision == manifest.asset_revision
+                        })
+                        .unwrap_or_else(|| {
+                            shared.session.as_ref().is_none_or(|session| {
+                                asset_revision == session.store.state().desired.asset_revision
+                            })
+                        });
+                    shared.emit(
+                        Kind::AssetsRequiredLoaded,
+                        &scope,
+                        json!({
+                            "transfer_id": transfer_id,
+                            "asset_revision": asset_revision,
+                            "required": required.iter().take(256).map(|path| clip(path, 256)).collect::<Vec<_>>(),
+                            "loaded": loaded.iter().take(256).map(|path| clip(path, 256)).collect::<Vec<_>>(),
+                            "failed": failed.iter().take(256).map(|path| clip(path, 256)).collect::<Vec<_>>(),
+                            "accepted": accepted,
+                            "connection_id": id,
+                            "received_at_ms": now_ms(),
+                        }),
+                    );
+                }
                 ClientMessage::AssetsReconciled {
                     transfer_id,
                     asset_revision,

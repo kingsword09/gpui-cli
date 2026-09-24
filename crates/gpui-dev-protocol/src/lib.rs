@@ -82,6 +82,13 @@ pub enum ClientMessage {
         received: Vec<String>,
         failed: Vec<String>,
     },
+    AssetsRequiredLoaded {
+        transfer_id: String,
+        asset_revision: u64,
+        required: Vec<String>,
+        loaded: Vec<String>,
+        failed: Vec<String>,
+    },
     AssetsReconciled {
         transfer_id: String,
         asset_revision: u64,
@@ -399,6 +406,18 @@ mod tests {
         assert_eq!(
             decode::<ClientMessage>(&encode(&received).unwrap()).unwrap(),
             received
+        );
+
+        let required_loaded = ClientMessage::AssetsRequiredLoaded {
+            transfer_id: "t9".into(),
+            asset_revision: 9,
+            required: vec!["assets/logo.png".into()],
+            loaded: vec!["assets/logo.png".into()],
+            failed: vec![],
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&required_loaded).unwrap()).unwrap(),
+            required_loaded
         );
 
         let begin = ServerMessage::AssetsBegin {

@@ -11,7 +11,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
@@ -74,8 +74,15 @@ static PENDING_ASSET_BATCH: Mutex<Option<PendingAssetBatch>> = Mutex::new(None);
 /// The latest manifest the supervisor declared for this connection's run.
 static DESIRED_ASSETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 static DESIRED_TRANSFER_ID: Mutex<Option<String>> = Mutex::new(None);
+static DESIRED_ASSET_REVISION: Mutex<u64> = Mutex::new(0);
 /// Hashes of assets whose UI-thread cache invalidation has completed.
 static APPLIED_ASSETS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+/// Assets explicitly declared by the app as necessary for its current scene.
+static REQUIRED_ASSETS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// Required assets successfully read through the live asset source.
+static LOADED_REQUIRED_ASSETS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static FAILED_REQUIRED_ASSETS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static LAST_REQUIRED_LOADED_REPORT: Mutex<Option<String>> = Mutex::new(None);
 
 /// Probe requests waiting for the UI thread. The app consumes these from its
 /// render/event loop and answers with `respond_ui_probe`.
@@ -228,12 +235,175 @@ pub fn take_asset_events() -> Vec<AssetEvent> {
     std::mem::take(&mut ASSET_EVENTS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// Declares an asset that must be successfully read before the current scene
+/// can be considered resource-ready. The declaration is intentionally
+/// explicit: an asset being transferred does not imply that the app uses it.
+pub fn require_asset(path: &str) {
+    REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.to_owned());
+    *LAST_REQUIRED_LOADED_REPORT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+pub fn clear_required_assets() {
+    REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    LOADED_REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    FAILED_REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    *LAST_REQUIRED_LOADED_REPORT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn record_asset_bytes(path: &str, bytes: &[u8]) {
+    if !REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(path)
+    {
+        return;
+    }
+    let transfer_id = DESIRED_TRANSFER_ID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
+    let loaded = expected_asset_hash(&transfer_id, path)
+        .is_some_and(|expected| sha256_hex(bytes) == expected);
+    if loaded {
+        LOADED_REQUIRED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_owned());
+        FAILED_REQUIRED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(path);
+    } else {
+        FAILED_REQUIRED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_owned());
+        LOADED_REQUIRED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(path);
+    }
+    *LAST_REQUIRED_LOADED_REPORT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn record_asset_failure(path: &str) {
+    if REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(path)
+    {
+        FAILED_REQUIRED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_owned());
+        LOADED_REQUIRED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(path);
+        *LAST_REQUIRED_LOADED_REPORT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Sends a deduplicated required-loaded status update. Returns true when a
+/// new status was queued for the supervisor.
+#[cfg(feature = "gpui-dev")]
+pub(crate) fn report_required_assets_loaded() -> bool {
+    let Some(transfer_id) = DESIRED_TRANSFER_ID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    else {
+        return false;
+    };
+    let asset_revision = *DESIRED_ASSET_REVISION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let required = REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    if required.is_empty() {
+        return false;
+    }
+    let loaded_set = LOADED_REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let failed_set = FAILED_REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let loaded = required
+        .iter()
+        .filter(|path| loaded_set.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let failed = required
+        .iter()
+        .filter(|path| failed_set.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let fingerprint = format!("{transfer_id}:{asset_revision}:{required:?}:{loaded:?}:{failed:?}");
+    let mut last = LAST_REQUIRED_LOADED_REPORT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if last.as_deref() == Some(fingerprint.as_str()) {
+        return false;
+    }
+    *last = Some(fingerprint);
+    drop(last);
+    let strings = |values: &[String]| {
+        values
+            .iter()
+            .take(128)
+            .map(|value| format!("\"{}\"", json_escape(value)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    queue_control(format!(
+        "{{\"type\":\"assets_required_loaded\",\"transfer_id\":\"{}\",\"asset_revision\":{asset_revision},\"required\":[{}],\"loaded\":[{}],\"failed\":[{}]}}",
+        json_escape(&transfer_id),
+        strings(&required),
+        strings(&loaded),
+        strings(&failed),
+    ));
+    true
+}
+
 fn begin_asset_batch(
     transfer_id: String,
     asset_revision: u64,
     entries: Vec<(String, String)>,
     removed: Vec<String>,
 ) {
+    let touched = entries
+        .iter()
+        .map(|(path, _)| path.clone())
+        .chain(removed.iter().cloned())
+        .collect::<BTreeSet<_>>();
     {
         let mut desired = DESIRED_ASSETS
             .lock()
@@ -248,6 +418,20 @@ fn begin_asset_batch(
     *DESIRED_TRANSFER_ID
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(transfer_id.clone());
+    *DESIRED_ASSET_REVISION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = asset_revision;
+    LOADED_REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|path| !touched.contains(path));
+    FAILED_REQUIRED_ASSETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|path| !touched.contains(path));
+    *LAST_REQUIRED_LOADED_REPORT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
     let mut pending = PENDING_ASSET_BATCH
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -549,9 +733,23 @@ impl gpui::AssetSource for DevAssetSource {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         for root in &self.roots {
             if let Ok(bytes) = std::fs::read(root.join(Self::relative(path))) {
+                let expected = DESIRED_TRANSFER_ID
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                    .and_then(|transfer_id| expected_asset_hash(&transfer_id, path));
+                if expected
+                    .as_deref()
+                    .is_some_and(|expected| sha256_hex(&bytes) != expected)
+                {
+                    record_asset_failure(path);
+                    return Ok(None);
+                }
+                record_asset_bytes(path, &bytes);
                 return Ok(Some(std::borrow::Cow::Owned(bytes)));
             }
         }
+        record_asset_failure(path);
         Ok(None)
     }
 
@@ -698,6 +896,20 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
         *DESIRED_TRANSFER_ID
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(transfer_id.clone());
+        *DESIRED_ASSET_REVISION
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = asset_revision;
+        LOADED_REQUIRED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        FAILED_REQUIRED_ASSETS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        *LAST_REQUIRED_LOADED_REPORT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         report_assets_reconciled(
             &transfer_id,
             asset_revision,
@@ -1650,6 +1862,38 @@ mod tests {
         assert!(payload.contains("\"type\":\"assets_received\""));
         assert!(payload.contains("\"transfer_id\":\"t-received\""));
         assert!(payload.contains("assets/broken.png"));
+    }
+
+    #[cfg(feature = "gpui-dev")]
+    #[test]
+    fn required_loaded_ack_reports_declared_status() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::sync_channel(8);
+        *OUTBOUND.lock().unwrap() = Some(tx);
+        *DESIRED_TRANSFER_ID.lock().unwrap() = Some("t-required".into());
+        *DESIRED_ASSET_REVISION.lock().unwrap() = 14;
+        REQUIRED_ASSETS.lock().unwrap().clear();
+        REQUIRED_ASSETS
+            .lock()
+            .unwrap()
+            .insert("assets/logo.png".into());
+        LOADED_REQUIRED_ASSETS.lock().unwrap().clear();
+        LOADED_REQUIRED_ASSETS
+            .lock()
+            .unwrap()
+            .insert("assets/logo.png".into());
+        FAILED_REQUIRED_ASSETS.lock().unwrap().clear();
+        *LAST_REQUIRED_LOADED_REPORT.lock().unwrap() = None;
+
+        assert!(report_required_assets_loaded());
+        *OUTBOUND.lock().unwrap() = None;
+        let payload = rx.recv().unwrap();
+        assert!(payload.contains("\"type\":\"assets_required_loaded\""));
+        assert!(payload.contains("\"transfer_id\":\"t-required\""));
+        assert!(payload.contains("assets/logo.png"));
+        REQUIRED_ASSETS.lock().unwrap().clear();
+        LOADED_REQUIRED_ASSETS.lock().unwrap().clear();
+        *LAST_REQUIRED_LOADED_REPORT.lock().unwrap() = None;
     }
 
     #[test]
