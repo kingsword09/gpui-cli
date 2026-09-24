@@ -83,6 +83,8 @@ static REQUIRED_ASSETS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static LOADED_REQUIRED_ASSETS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static FAILED_REQUIRED_ASSETS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static LAST_REQUIRED_LOADED_REPORT: Mutex<Option<String>> = Mutex::new(None);
+#[cfg(feature = "gpui-dev")]
+static LAST_SCENE_COMPLETION_REPORT: Mutex<Option<String>> = Mutex::new(None);
 
 /// Probe requests waiting for the UI thread. The app consumes these from its
 /// render/event loop and answers with `respond_ui_probe`.
@@ -392,6 +394,41 @@ pub fn report_required_assets_loaded(window_id: &str, scene_epoch: u64) -> bool 
         strings(&required),
         strings(&loaded),
         strings(&failed),
+    ));
+    true
+}
+
+/// Reports a scene that the UI adapter has completed for a specific content
+/// revision. A presented frame id is optional because most backends do not yet
+/// expose a verified present completion callback.
+#[cfg(feature = "gpui-dev")]
+pub fn report_scene_completed(
+    window_id: &str,
+    scene_epoch: u64,
+    source_revision: u64,
+    asset_revision: u64,
+    presented_frame_id: Option<&str>,
+) -> bool {
+    if scene_epoch == 0 {
+        return false;
+    }
+    let fingerprint = format!(
+        "{window_id}:{scene_epoch}:{source_revision}:{asset_revision}:{presented_frame_id:?}"
+    );
+    let mut last = LAST_SCENE_COMPLETION_REPORT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if last.as_deref() == Some(fingerprint.as_str()) {
+        return false;
+    }
+    *last = Some(fingerprint);
+    drop(last);
+    let presented = presented_frame_id
+        .map(|value| format!(",\"presented_frame_id\":\"{}\"", json_escape(value)))
+        .unwrap_or_default();
+    queue_control(format!(
+        "{{\"type\":\"scene_completed\",\"window_id\":\"{}\",\"scene_epoch\":{scene_epoch},\"source_revision\":{source_revision},\"asset_revision\":{asset_revision}{presented}}}",
+        json_escape(window_id),
     ));
     true
 }
@@ -1899,6 +1936,26 @@ mod tests {
         REQUIRED_ASSETS.lock().unwrap().clear();
         LOADED_REQUIRED_ASSETS.lock().unwrap().clear();
         *LAST_REQUIRED_LOADED_REPORT.lock().unwrap() = None;
+    }
+
+    #[cfg(feature = "gpui-dev")]
+    #[test]
+    fn scene_completed_report_is_deduplicated_and_keeps_presented_frame_optional() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::sync_channel(8);
+        *OUTBOUND.lock().unwrap() = Some(tx);
+        *LAST_SCENE_COMPLETION_REPORT.lock().unwrap() = None;
+
+        assert!(report_scene_completed("main", 4, 8, 9, Some("frame-4")));
+        assert!(!report_scene_completed("main", 4, 8, 9, Some("frame-4")));
+        *OUTBOUND.lock().unwrap() = None;
+        let payload = rx.recv().unwrap();
+        assert!(payload.contains("\"type\":\"scene_completed\""));
+        assert!(payload.contains("\"scene_epoch\":4"));
+        assert!(payload.contains("\"source_revision\":8"));
+        assert!(payload.contains("\"asset_revision\":9"));
+        assert!(payload.contains("\"presented_frame_id\":\"frame-4\""));
+        *LAST_SCENE_COMPLETION_REPORT.lock().unwrap() = None;
     }
 
     #[test]

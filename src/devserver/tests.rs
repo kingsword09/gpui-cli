@@ -74,6 +74,16 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
     );
     send(
         &mut socket,
+        &ClientMessage::SceneCompleted {
+            window_id: "w-main".into(),
+            scene_epoch: 1,
+            source_revision: run.revision.source_revision,
+            asset_revision: run.revision.asset_revision,
+            presented_frame_id: None,
+        },
+    );
+    send(
+        &mut socket,
         &ClientMessage::UiProbeResult {
             request_id: "probe.1".into(),
             window_id: "w-main".into(),
@@ -119,7 +129,6 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
             failed: Vec::new(),
         },
     );
-
     wait_until(|| {
         let events = session.store.events(0, Duration::ZERO);
         events
@@ -142,6 +151,10 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
                 .events
                 .iter()
                 .any(|event| event.kind == Kind::AssetsRequiredLoaded)
+            && events
+                .events
+                .iter()
+                .any(|event| event.kind == Kind::SceneCompleted && event.data["accepted"] == true)
     });
     let events = session.store.events(0, Duration::ZERO);
     assert!(events.events.iter().any(|event| {
@@ -153,6 +166,13 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
             .state()
             .running
             .is_some_and(|run| run.assets_confirmed)
+    );
+    assert_eq!(
+        session
+            .windows
+            .snapshots(Some(run.run_id.as_deref().unwrap()))[0]
+            .scene_epoch,
+        1
     );
 }
 

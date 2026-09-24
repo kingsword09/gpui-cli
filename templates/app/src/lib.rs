@@ -52,6 +52,34 @@ pub fn close_window(window_id: &str, reason: Option<&str>) {
     let _ = (window_id, reason);
 }
 
+/// Reports a completed GPUI scene for a content revision. A non-null
+/// presented frame id is only valid when the platform backend has verified the
+/// presentation; scene completion alone does not imply screen presentation.
+pub fn report_scene_completed(
+    window_id: &str,
+    scene_epoch: u64,
+    source_revision: u64,
+    asset_revision: u64,
+    presented_frame_id: Option<&str>,
+) {
+    #[cfg(all(debug_assertions, feature = "gpui-dev"))]
+    live::report_scene_completed(
+        window_id,
+        scene_epoch,
+        source_revision,
+        asset_revision,
+        presented_frame_id,
+    );
+    #[cfg(not(all(debug_assertions, feature = "gpui-dev")))]
+    let _ = (
+        window_id,
+        scene_epoch,
+        source_revision,
+        asset_revision,
+        presented_frame_id,
+    );
+}
+
 /// Under `gpui run --live`, drains asset changes and UI probes received by the
 /// dev channel. Asset invalidation and probe responses are completed from the
 /// GPUI foreground context so the network thread never touches UI state.

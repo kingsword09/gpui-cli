@@ -4,7 +4,7 @@
 use super::events::{Kind, Scope, clip, now_ms};
 use super::protocol::{self, AssetManifestEntry, ClientMessage, PROTO_VERSION, ServerMessage};
 use super::session::{Session, random_token};
-use super::windows::{ProbeReply, WindowRegistration, WindowRegistry};
+use super::windows::{ProbeReply, SceneCompletion, WindowRegistration, WindowRegistry};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::collections::HashMap;
@@ -720,6 +720,46 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                             "window_id": clip(&window_id, 128), "responsive": responsive,
                             "latency_ms": latency_ms, "accepted": result.accepted,
                             "reason": result.reason, "received_at_ms": received_at_ms}),
+                    );
+                }
+                ClientMessage::SceneCompleted {
+                    window_id,
+                    scene_epoch,
+                    source_revision,
+                    asset_revision,
+                    presented_frame_id,
+                } => {
+                    let window_id = clip(&window_id, 128);
+                    let presented_frame_id = presented_frame_id.map(|value| clip(&value, 128));
+                    let revision_match = source_revision == scope.revision.source_revision
+                        && asset_revision == scope.revision.asset_revision;
+                    let result = if !revision_match {
+                        super::windows::SceneResult {
+                            accepted: false,
+                            reason: Some("revision_mismatch"),
+                        }
+                    } else {
+                        shared.windows.record_scene_completed(
+                            &scope,
+                            SceneCompletion {
+                                window_id: window_id.clone(),
+                                connection_id: id,
+                                scene_epoch,
+                                source_revision,
+                                asset_revision,
+                                presented_frame_id: presented_frame_id.clone(),
+                                completed_at_ms: now_ms(),
+                            },
+                        )
+                    };
+                    shared.emit(
+                        Kind::SceneCompleted,
+                        &scope,
+                        json!({"window_id": window_id, "scene_epoch": scene_epoch,
+                            "source_revision": source_revision, "asset_revision": asset_revision,
+                            "presented_frame_id": presented_frame_id,
+                            "accepted": result.accepted, "reason": result.reason,
+                            "connection_id": id, "received_at_ms": now_ms()}),
                     );
                 }
                 ClientMessage::AssetsApplied {

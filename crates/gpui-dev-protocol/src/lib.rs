@@ -122,6 +122,14 @@ pub enum ClientMessage {
         stale: Vec<String>,
         removed: Vec<String>,
     },
+    SceneCompleted {
+        window_id: String,
+        scene_epoch: u64,
+        source_revision: u64,
+        asset_revision: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        presented_frame_id: Option<String>,
+    },
     ArtifactBegin {
         manifest: ArtifactManifest,
     },
@@ -558,6 +566,18 @@ mod tests {
         assert_eq!(
             decode::<ServerMessage>(&encode(&ack).unwrap()).unwrap(),
             ack
+        );
+
+        let scene = ClientMessage::SceneCompleted {
+            window_id: "main".into(),
+            scene_epoch: 4,
+            source_revision: 8,
+            asset_revision: 9,
+            presented_frame_id: Some("frame-4".into()),
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&scene).unwrap()).unwrap(),
+            scene
         );
     }
 }
