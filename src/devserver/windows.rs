@@ -85,6 +85,22 @@ pub struct ProbeResult {
     pub reason: Option<&'static str>,
 }
 
+pub struct SceneCompletion {
+    pub window_id: String,
+    pub connection_id: u64,
+    pub scene_epoch: u64,
+    pub source_revision: u64,
+    pub asset_revision: u64,
+    pub presented_frame_id: Option<String>,
+    pub completed_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneResult {
+    pub accepted: bool,
+    pub reason: Option<&'static str>,
+}
+
 #[derive(Default)]
 pub struct HeartbeatTick {
     pub probes: Vec<ProbeRequest>,
@@ -115,6 +131,11 @@ impl WindowRegistry {
                     last_probe_at_ms: None,
                     last_latency_ms: None,
                     last_probe_request_id: None,
+                    scene_epoch: 0,
+                    scene_source_revision: None,
+                    scene_asset_revision: None,
+                    presented_frame_id: None,
+                    scene_completed_at_ms: None,
                     registered_at_ms: registration.registered_at_ms,
                 },
                 connection_id,
@@ -196,6 +217,63 @@ impl WindowRegistry {
         window.snapshot.last_latency_ms = reply.latency_ms;
         window.snapshot.last_probe_request_id = Some(reply.request_id);
         ProbeResult {
+            accepted: true,
+            reason: None,
+        }
+    }
+
+    pub fn record_scene_completed(
+        &self,
+        scope: &Scope,
+        completion: SceneCompletion,
+    ) -> SceneResult {
+        if completion.scene_epoch == 0 {
+            return SceneResult {
+                accepted: false,
+                reason: Some("invalid_scene_epoch"),
+            };
+        }
+        let key = WindowKey {
+            run_id: scope.run_id.clone(),
+            window_id: completion.window_id,
+        };
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(window) = inner.windows.get_mut(&key) else {
+            return SceneResult {
+                accepted: false,
+                reason: Some("unknown_window"),
+            };
+        };
+        if window.connection_id != completion.connection_id {
+            return SceneResult {
+                accepted: false,
+                reason: Some("stale_connection"),
+            };
+        }
+        if window.snapshot.lifecycle != "open" {
+            return SceneResult {
+                accepted: false,
+                reason: Some("window_closed"),
+            };
+        }
+        if completion.scene_epoch < window.snapshot.scene_epoch {
+            return SceneResult {
+                accepted: false,
+                reason: Some("stale_scene_epoch"),
+            };
+        }
+        if completion.scene_epoch == window.snapshot.scene_epoch {
+            return SceneResult {
+                accepted: false,
+                reason: Some("duplicate_scene_epoch"),
+            };
+        }
+        window.snapshot.scene_epoch = completion.scene_epoch;
+        window.snapshot.scene_source_revision = Some(completion.source_revision);
+        window.snapshot.scene_asset_revision = Some(completion.asset_revision);
+        window.snapshot.presented_frame_id = completion.presented_frame_id;
+        window.snapshot.scene_completed_at_ms = Some(completion.completed_at_ms);
+        SceneResult {
             accepted: true,
             reason: None,
         }
@@ -316,6 +394,72 @@ mod tests {
             }
         );
         assert_eq!(registry.snapshots(Some("run-1"))[0].ui, "responsive");
+    }
+
+    #[test]
+    fn scene_completion_is_monotonic_and_connection_scoped() {
+        let registry = WindowRegistry::default();
+        registry.register(
+            &scope(),
+            7,
+            WindowRegistration {
+                window_id: "main".into(),
+                title: "Counter".into(),
+                width: 800,
+                height: 600,
+                scale_milli: 1000,
+                foreground: true,
+                registered_at_ms: 10,
+            },
+        );
+        let first = registry.record_scene_completed(
+            &scope(),
+            SceneCompletion {
+                window_id: "main".into(),
+                connection_id: 7,
+                scene_epoch: 3,
+                source_revision: 8,
+                asset_revision: 9,
+                presented_frame_id: None,
+                completed_at_ms: 20,
+            },
+        );
+        assert_eq!(
+            first,
+            SceneResult {
+                accepted: true,
+                reason: None
+            }
+        );
+        let duplicate = registry.record_scene_completed(
+            &scope(),
+            SceneCompletion {
+                window_id: "main".into(),
+                connection_id: 7,
+                scene_epoch: 3,
+                source_revision: 8,
+                asset_revision: 9,
+                presented_frame_id: None,
+                completed_at_ms: 21,
+            },
+        );
+        assert_eq!(duplicate.reason, Some("duplicate_scene_epoch"));
+        let stale_connection = registry.record_scene_completed(
+            &scope(),
+            SceneCompletion {
+                window_id: "main".into(),
+                connection_id: 8,
+                scene_epoch: 4,
+                source_revision: 8,
+                asset_revision: 9,
+                presented_frame_id: Some("frame-4".into()),
+                completed_at_ms: 22,
+            },
+        );
+        assert_eq!(stale_connection.reason, Some("stale_connection"));
+        let snapshot = registry.snapshots(Some("run-1")).pop().unwrap();
+        assert_eq!(snapshot.scene_epoch, 3);
+        assert_eq!(snapshot.scene_asset_revision, Some(9));
     }
 
     #[test]

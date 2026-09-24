@@ -89,6 +89,8 @@ pub enum Kind {
     WindowClosed,
     #[serde(rename = "ui.probe_result")]
     UiProbeResult,
+    #[serde(rename = "scene.completed")]
+    SceneCompleted,
     #[serde(rename = "artifact.declared")]
     ArtifactDeclared,
     #[serde(rename = "artifact.published")]
@@ -155,6 +157,16 @@ pub struct WindowSnapshot {
     pub last_latency_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_probe_request_id: Option<String>,
+    #[serde(default)]
+    pub scene_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_source_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_asset_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presented_frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_completed_at_ms: Option<u64>,
     pub registered_at_ms: u64,
 }
 
@@ -332,6 +344,11 @@ impl State {
                     last_probe_at_ms: None,
                     last_latency_ms: None,
                     last_probe_request_id: None,
+                    scene_epoch: 0,
+                    scene_source_revision: None,
+                    scene_asset_revision: None,
+                    presented_frame_id: None,
+                    scene_completed_at_ms: None,
                     registered_at_ms: data["registered_at_ms"]
                         .as_u64()
                         .unwrap_or(event.received_at_ms),
@@ -379,6 +396,26 @@ impl State {
                     );
                     window.last_latency_ms = data["latency_ms"].as_u64();
                     window.last_probe_request_id = data["request_id"].as_str().map(str::to_owned);
+                }
+            }
+            Kind::SceneCompleted => {
+                if data["accepted"] == false {
+                    return;
+                }
+                let Some(window_id) = data["window_id"].as_str() else {
+                    return;
+                };
+                if let Some(window) = self.windows.iter_mut().find(|window| {
+                    window.run_id == event.scope.run_id && window.window_id == window_id
+                }) {
+                    window.scene_epoch = data["scene_epoch"].as_u64().unwrap_or(0);
+                    window.scene_source_revision = data["source_revision"].as_u64();
+                    window.scene_asset_revision = data["asset_revision"].as_u64();
+                    window.presented_frame_id =
+                        data["presented_frame_id"].as_str().map(str::to_owned);
+                    window.scene_completed_at_ms = data["received_at_ms"]
+                        .as_u64()
+                        .or(Some(event.received_at_ms));
                 }
             }
             Kind::AssetsApplied => {
