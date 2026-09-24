@@ -8,7 +8,9 @@
 ## 行为
 
 - 用受管 app PID、注册窗口标题和 `CGWindowListCopyWindowInfo` 定位当前屏幕上的
-  layer-0 窗口；不按进程名或任意全屏窗口猜目标；
+  layer-0 窗口；优先精确标题匹配；当 macOS 不暴露 `CGWindowName` 时，仅在该 PID
+  恰好只有一个可见无名窗口时回退到 PID 匹配，并把 `window_match` 记为
+  `pid_single_unnamed`；多窗口不猜目标；
 - 调用系统 `screencapture -x -o -l <window_number>`，截图写入本次调用的私有临时目录；
 - 执行受 observe 总 deadline 限制；PNG 上限 16 MiB，ArtifactStore 再校验 PNG 头、尺寸、
   像素总数和 SHA-256；
@@ -21,7 +23,7 @@
   operation 失败，不发布成功 observation；
 - provider 将 Screen Recording 未授权报告为 `permission_denied`，将注册窗口不在当前
   屏幕窗口列表中报告为 `window_unavailable`，不把两者折叠成无上下文的通用失败；
-- 发布不可变 PNG artifact，记录窗口号/bounds、像素尺寸、前后 scene_epoch、时间、
+- 发布不可变 PNG artifact，记录窗口号、匹配方式、bounds、像素尺寸、前后 scene_epoch、时间、
   逻辑尺寸、scale、orientation、系统 UI 范围、provider、实际 run/revision 和 freshness；
   一致性标为 `best_effort/window`，
   `presented_frame_id` 仍保持 null，scene 改变时 freshness 为 unknown；
