@@ -66,8 +66,7 @@ pub fn pump_live_assets(cx: &mut App) {
                     .await;
                 let asset_events = crate::live::take_asset_events();
                 let probes = crate::live::take_ui_probe_requests();
-                let required_loaded = crate::live::report_required_assets_loaded();
-                if asset_events.is_empty() && probes.is_empty() && !required_loaded {
+                if asset_events.is_empty() && probes.is_empty() {
                     continue;
                 }
                 cx.update(|cx| {

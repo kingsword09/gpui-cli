@@ -328,7 +328,7 @@ fn record_asset_failure(path: &str) {
 /// Sends a deduplicated required-loaded status update. Returns true when a
 /// new status was queued for the supervisor.
 #[cfg(feature = "gpui-dev")]
-pub(crate) fn report_required_assets_loaded() -> bool {
+pub fn report_required_assets_loaded(window_id: &str, scene_epoch: u64) -> bool {
     let Some(transfer_id) = DESIRED_TRANSFER_ID
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -366,7 +366,9 @@ pub(crate) fn report_required_assets_loaded() -> bool {
         .filter(|path| failed_set.contains(*path))
         .cloned()
         .collect::<Vec<_>>();
-    let fingerprint = format!("{transfer_id}:{asset_revision}:{required:?}:{loaded:?}:{failed:?}");
+    let fingerprint = format!(
+        "{transfer_id}:{asset_revision}:{window_id}:{scene_epoch}:{required:?}:{loaded:?}:{failed:?}"
+    );
     let mut last = LAST_REQUIRED_LOADED_REPORT
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -384,8 +386,9 @@ pub(crate) fn report_required_assets_loaded() -> bool {
             .join(",")
     };
     queue_control(format!(
-        "{{\"type\":\"assets_required_loaded\",\"transfer_id\":\"{}\",\"asset_revision\":{asset_revision},\"required\":[{}],\"loaded\":[{}],\"failed\":[{}]}}",
+        "{{\"type\":\"assets_required_loaded\",\"transfer_id\":\"{}\",\"asset_revision\":{asset_revision},\"window_id\":\"{}\",\"scene_epoch\":{scene_epoch},\"required\":[{}],\"loaded\":[{}],\"failed\":[{}]}}",
         json_escape(&transfer_id),
+        json_escape(window_id),
         strings(&required),
         strings(&loaded),
         strings(&failed),
@@ -1885,11 +1888,13 @@ mod tests {
         FAILED_REQUIRED_ASSETS.lock().unwrap().clear();
         *LAST_REQUIRED_LOADED_REPORT.lock().unwrap() = None;
 
-        assert!(report_required_assets_loaded());
+        assert!(report_required_assets_loaded("main", 3));
         *OUTBOUND.lock().unwrap() = None;
         let payload = rx.recv().unwrap();
         assert!(payload.contains("\"type\":\"assets_required_loaded\""));
         assert!(payload.contains("\"transfer_id\":\"t-required\""));
+        assert!(payload.contains("\"window_id\":\"main\""));
+        assert!(payload.contains("\"scene_epoch\":3"));
         assert!(payload.contains("assets/logo.png"));
         REQUIRED_ASSETS.lock().unwrap().clear();
         LOADED_REQUIRED_ASSETS.lock().unwrap().clear();
