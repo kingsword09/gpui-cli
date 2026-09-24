@@ -8,12 +8,13 @@
   必需资源；
 - desktop/Android 的 `DevAssetSource::load` 对实际读取的 bytes 校验当前 declared hash，
   成功记录 loaded，缺失或 hash mismatch 记录 failed；
-- runtime 以 `assets_required_loaded` 携带 `required`、`loaded`、`failed` 和当前
+- UI adapter 在确认 scene 完成后调用 `report_required_assets_loaded(window_id, scene_epoch)`；
+  runtime 以 `assets_required_loaded` 携带 `required`、`loaded`、`failed`、scene 元数据和当前
   `transfer_id`/`asset_revision` 回报，状态变化去重；
 - supervisor 记录 `assets.required_loaded`，并按当前 transfer identity fencing，不能改写
   `assets_confirmed`。
 
 ## 边界
 
-iOS 的 `Resource::Path` 读取尚未接入同等的 decode/load 回调；本子 PR 也没有把
-required-loaded 绑定到 `scene_epoch`，不能单独证明 GPU 已使用该资源或已经呈现。
+iOS 的 `Resource::Path` 读取尚未接入同等的 decode/load 回调；scene_epoch 是 UI adapter
+提供的完成标记，仍不等同于 GPU presented frame，不能单独证明屏幕已经呈现。

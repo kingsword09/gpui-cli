@@ -112,6 +112,8 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
         &ClientMessage::AssetsRequiredLoaded {
             transfer_id: "asset-t1-r0".into(),
             asset_revision: 0,
+            window_id: "w-main".into(),
+            scene_epoch: 1,
             required: vec!["assets/x.png".into()],
             loaded: vec!["assets/x.png".into()],
             failed: Vec::new(),

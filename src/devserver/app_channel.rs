@@ -773,6 +773,8 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                 ClientMessage::AssetsRequiredLoaded {
                     transfer_id,
                     asset_revision,
+                    window_id,
+                    scene_epoch,
                     required,
                     loaded,
                     failed,
@@ -797,6 +799,8 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                         json!({
                             "transfer_id": transfer_id,
                             "asset_revision": asset_revision,
+                            "window_id": window_id,
+                            "scene_epoch": scene_epoch,
                             "required": required.iter().take(256).map(|path| clip(path, 256)).collect::<Vec<_>>(),
                             "loaded": loaded.iter().take(256).map(|path| clip(path, 256)).collect::<Vec<_>>(),
                             "failed": failed.iter().take(256).map(|path| clip(path, 256)).collect::<Vec<_>>(),

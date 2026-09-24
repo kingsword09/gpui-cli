@@ -85,6 +85,8 @@ pub enum ClientMessage {
     AssetsRequiredLoaded {
         transfer_id: String,
         asset_revision: u64,
+        window_id: String,
+        scene_epoch: u64,
         required: Vec<String>,
         loaded: Vec<String>,
         failed: Vec<String>,
@@ -411,6 +413,8 @@ mod tests {
         let required_loaded = ClientMessage::AssetsRequiredLoaded {
             transfer_id: "t9".into(),
             asset_revision: 9,
+            window_id: "main".into(),
+            scene_epoch: 3,
             required: vec!["assets/logo.png".into()],
             loaded: vec!["assets/logo.png".into()],
             failed: vec![],
