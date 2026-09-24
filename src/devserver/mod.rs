@@ -5,6 +5,7 @@ pub mod artifacts;
 pub mod control;
 pub mod events;
 pub mod inputs;
+pub mod operations;
 pub mod output;
 mod process;
 pub mod protocol;

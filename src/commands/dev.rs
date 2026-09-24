@@ -31,6 +31,11 @@ pub enum DevCommand {
     Windows,
     /// Request a fresh build through the live supervisor
     Build,
+    /// Query or cancel an asynchronous supervisor operation
+    Operation {
+        #[command(subcommand)]
+        command: OperationCommand,
+    },
     /// Replay events after a cursor, then optionally wait for new events
     Events {
         #[arg(long, default_value_t = 0)]
@@ -47,6 +52,14 @@ pub enum DevCommand {
         #[command(subcommand)]
         command: ArtifactCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub enum OperationCommand {
+    /// Read one operation snapshot
+    Get { operation_id: String },
+    /// Cancel a queued or running operation
+    Cancel { operation_id: String },
 }
 
 #[derive(Subcommand)]
@@ -133,6 +146,22 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         }
         return Ok(());
     }
+    if let DevCommand::Operation { command } = &args.command {
+        let result = execute_operation(&registration, command)?;
+        if args.json {
+            write_value(
+                &Reply::success(
+                    &registration.session_id,
+                    control::next_request_id("dev.operation"),
+                    result,
+                ),
+                false,
+            )?;
+        } else {
+            write_value(&result, true)?;
+        }
+        return Ok(());
+    }
     let request_id = control::next_request_id("dev");
     let (mut after, timeout, follow) = match &args.command {
         DevCommand::Events {
@@ -148,6 +177,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             DevCommand::Diagnostics => Command::Diagnostics,
             DevCommand::Windows => Command::Windows,
             DevCommand::Build => Command::Build,
+            DevCommand::Operation { .. } => unreachable!("operation commands return above"),
             DevCommand::Events { .. } => Command::Events {
                 after,
                 timeout_ms: if follow && timeout == 0 {
@@ -223,6 +253,33 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         }
         return Ok(());
     }
+}
+
+fn execute_operation(
+    registration: &control::Registration,
+    command: &OperationCommand,
+) -> std::result::Result<serde_json::Value, ApiError> {
+    let request = match command {
+        OperationCommand::Get { operation_id } => Command::OperationGet {
+            operation_id: operation_id.clone(),
+        },
+        OperationCommand::Cancel { operation_id } => Command::OperationCancel {
+            operation_id: operation_id.clone(),
+        },
+    };
+    let reply = control::request(
+        registration,
+        &control::next_request_id("dev.operation"),
+        request,
+    )
+    .map_err(|error| ApiError::new("connection_failed", error.to_string()))?;
+    if !reply.ok {
+        return Err(reply
+            .error
+            .map(Into::into)
+            .unwrap_or_else(|| ApiError::new("request_failed", "Operation request failed")));
+    }
+    Ok(reply.result.unwrap_or_default())
 }
 
 fn execute_artifact(
