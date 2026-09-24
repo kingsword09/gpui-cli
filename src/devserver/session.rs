@@ -621,10 +621,13 @@ impl Session {
                 ));
             }
             Err(error) => {
+                let code = error
+                    .downcast_ref::<capture::CaptureError>()
+                    .map_or("capture_failed", |failure| failure.code());
                 return Err(OperationError::with_details(
-                    "capture_failed",
+                    code,
                     error.to_string(),
-                    json!({"provider": provider, "window_id": window.window_id,
+                    json!({"provider": provider, "code": code, "window_id": window.window_id,
                         "run_id": run.scope.run_id, "pid": pid}),
                 ));
             }
@@ -806,7 +809,11 @@ impl Session {
             "window_bounds": capture.bounds,
             "pixel_width": pixel_width,
             "pixel_height": pixel_height,
+            "logical_width": window.width,
+            "logical_height": window.height,
             "scale_milli": window.scale_milli,
+            "orientation": capture_orientation(pixel_width, pixel_height),
+            "includes_system_ui": false,
             "freshness": {
                 "source": if run.scope.revision.source_revision == request.target_revision.source_revision { "current" } else { "stale" },
                 "assets": if run.assets_confirmed && run.scope.revision.asset_revision == request.target_revision.asset_revision { "applied" } else { "unknown" },
@@ -1211,9 +1218,17 @@ fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
     Ok((width, height))
 }
 
+fn capture_orientation(width: u32, height: u32) -> &'static str {
+    match width.cmp(&height) {
+        std::cmp::Ordering::Less => "portrait",
+        std::cmp::Ordering::Equal => "square",
+        std::cmp::Ordering::Greater => "landscape",
+    }
+}
+
 #[cfg(test)]
 mod observation_tests {
-    use super::png_dimensions;
+    use super::{capture_orientation, png_dimensions};
 
     #[test]
     fn png_dimensions_require_signature_and_nonzero_size() {
@@ -1225,5 +1240,8 @@ mod observation_tests {
 
         png[16..20].copy_from_slice(&0u32.to_be_bytes());
         assert!(png_dimensions(&png).is_err());
+        assert_eq!(capture_orientation(640, 480), "landscape");
+        assert_eq!(capture_orientation(480, 640), "portrait");
+        assert_eq!(capture_orientation(480, 480), "square");
     }
 }

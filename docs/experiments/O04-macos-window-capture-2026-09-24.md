@@ -19,8 +19,11 @@
   timed_out；
 - 采集前后核对 run、window、UI heartbeat 和 tracked input revision/hash；中途变化时
   operation 失败，不发布成功 observation；
+- provider 将 Screen Recording 未授权报告为 `permission_denied`，将注册窗口不在当前
+  屏幕窗口列表中报告为 `window_unavailable`，不把两者折叠成无上下文的通用失败；
 - 发布不可变 PNG artifact，记录窗口号/bounds、像素尺寸、前后 scene_epoch、时间、
-  provider、实际 run/revision 和 freshness；一致性标为 `best_effort/window`，
+  逻辑尺寸、scale、orientation、系统 UI 范围、provider、实际 run/revision 和 freshness；
+  一致性标为 `best_effort/window`，
   `presented_frame_id` 仍保持 null，scene 改变时 freshness 为 unknown；
 - screenshot alias 在 macOS 解析到 `capture.window`；显式要求 `capture.scene`、
   `capture.device` 或 semantics 仍返回 `unavailable`。
