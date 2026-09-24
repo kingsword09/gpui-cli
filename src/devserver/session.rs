@@ -1,5 +1,6 @@
 //! One live session, shared by build, process, app-channel and control workers.
 
+use super::artifacts::{ArtifactLimits, ArtifactStore};
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
 use super::inputs::{AssetDelta, Inputs};
 use super::protocol::AssetManifestEntry;
@@ -22,6 +23,7 @@ pub struct Session {
     output: Mutex<RollingFile>,
     pub timing: Arc<Timing>,
     pub windows: Arc<WindowRegistry>,
+    pub artifacts: Arc<ArtifactStore>,
     next_build: AtomicU64,
     next_run: AtomicU64,
 }
@@ -59,7 +61,11 @@ impl Session {
             capabilities: json!({"status": true, "diagnostics": true, "events": true,
             "run_identity": "launch_token", "ui_observation": true, "asset_confirmation": true,
                 "actions": false, "checks": false, "input_scope": "project_files",
-                "native_mobile_logs": false, "timing_spans": true}),
+                "native_mobile_logs": false, "timing_spans": true,
+                "artifact_store": {"available": true, "provider": "session_file_store",
+                    "constraints": {"chunk_bytes": gpui_dev_protocol::ARTIFACT_CHUNK_BYTES,
+                        "session_bytes": ArtifactLimits::default().session_quota_bytes,
+                        "project_bytes": ArtifactLimits::default().project_quota_bytes}}}),
             diagnostics: Vec::new(),
             diagnostics_omitted: 0,
             runtime_issues: Vec::new(),
@@ -68,6 +74,7 @@ impl Session {
             watcher_error: None,
         };
         let timing = Arc::new(Timing::new(&dir, &id)?);
+        let artifacts = Arc::new(ArtifactStore::new(&root, &id, ArtifactLimits::default())?);
         let session = Arc::new(Self {
             id,
             root,
@@ -80,18 +87,14 @@ impl Session {
             )?),
             timing,
             windows: Arc::new(WindowRegistry::default()),
+            artifacts,
             dir,
             stopping: AtomicBool::new(false),
             inputs: Mutex::new(Inputs::default()),
             next_build: AtomicU64::new(1),
             next_run: AtomicU64::new(1),
         });
-        for stage in [
-            "device.lease_wait",
-            "ui.ready",
-            "observation.capture",
-            "artifact.publish",
-        ] {
+        for stage in ["device.lease_wait", "ui.ready", "observation.capture"] {
             session.timing.not_instrumented(
                 stage,
                 &Scope::default(),

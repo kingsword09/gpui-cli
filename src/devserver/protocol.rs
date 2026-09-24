@@ -11,7 +11,8 @@ use serde::de::DeserializeOwned;
 use std::io::{Read, Write};
 
 pub use gpui_dev_protocol::{
-    AssetManifestEntry, ClientMessage, MAX_FRAME_LEN, PROTO_VERSION, ServerMessage,
+    ArtifactKind, ArtifactManifest, AssetManifestEntry, ClientMessage, MAX_FRAME_LEN,
+    PROTO_VERSION, ServerMessage,
 };
 
 pub fn encode<T: Serialize>(message: &T) -> Result<Vec<u8>> {

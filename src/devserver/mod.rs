@@ -1,6 +1,7 @@
 //! Live app transport, event storage and agent control API.
 
 mod app_channel;
+pub mod artifacts;
 pub mod control;
 pub mod events;
 pub mod inputs;

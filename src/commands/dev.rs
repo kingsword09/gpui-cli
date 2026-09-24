@@ -2,8 +2,12 @@ use crate::devserver::control::{self, ApiError, Command, Reply};
 use crate::devserver::events::{self, Event, Kind, Page, SCHEMA_VERSION};
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use gpui_dev_protocol::ARTIFACT_CHUNK_BYTES;
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::fs;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Args)]
 pub struct DevArgs {
@@ -36,6 +40,31 @@ pub enum DevCommand {
         #[arg(long)]
         follow: bool,
     },
+    /// Inspect, download or pin a verified artifact
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ArtifactCommand {
+    /// Show artifact metadata and publication state
+    Info { artifact_id: String },
+    /// Download a published artifact by its opaque id
+    Get {
+        artifact_id: String,
+        /// Output file to create
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+        /// Replace an existing regular file
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Keep an artifact beyond the normal retention period
+    Pin { artifact_id: String },
+    /// Remove the retention pin from an artifact
+    Unpin { artifact_id: String },
 }
 
 pub fn parse_timeout(value: &str) -> std::result::Result<u64, String> {
@@ -86,17 +115,33 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
     let root =
         control::project_root().map_err(|e| ApiError::new("invalid_project", e.to_string()))?;
     let registration = control::discover(&root, args.session.as_deref())?;
+    if let DevCommand::Artifact { command } = &args.command {
+        let result = execute_artifact(&registration, command)?;
+        if args.json {
+            write_value(
+                &Reply::success(
+                    &registration.session_id,
+                    control::next_request_id("dev.artifact"),
+                    result,
+                ),
+                false,
+            )?;
+        } else {
+            write_value(&result, true)?;
+        }
+        return Ok(());
+    }
     let request_id = control::next_request_id("dev");
-    let (mut after, timeout, follow) = match args.command {
+    let (mut after, timeout, follow) = match &args.command {
         DevCommand::Events {
             after,
             timeout,
             follow,
-        } => (after, timeout, follow),
+        } => (*after, *timeout, *follow),
         _ => (0, 0, false),
     };
     loop {
-        let command = match args.command {
+        let command = match &args.command {
             DevCommand::Status => Command::Status,
             DevCommand::Diagnostics => Command::Diagnostics,
             DevCommand::Windows => Command::Windows,
@@ -108,6 +153,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
                     timeout
                 },
             },
+            DevCommand::Artifact { .. } => unreachable!("artifact commands return above"),
         };
         let reply = match control::request(&registration, &request_id, command) {
             Ok(reply) => reply,
@@ -148,7 +194,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
                 .map(Into::into)
                 .unwrap_or_else(|| ApiError::new("request_failed", "Control request failed")));
         }
-        if matches!(args.command, DevCommand::Events { .. }) {
+        if matches!(&args.command, DevCommand::Events { .. }) {
             let page: Page = serde_json::from_value(reply.result.clone().unwrap_or_default())
                 .map_err(|e| ApiError::new("invalid_response", e.to_string()))?;
             if page.gap {
@@ -174,6 +220,200 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         }
         return Ok(());
     }
+}
+
+fn execute_artifact(
+    registration: &control::Registration,
+    command: &ArtifactCommand,
+) -> std::result::Result<serde_json::Value, ApiError> {
+    match command {
+        ArtifactCommand::Info { artifact_id } => artifact_request(
+            registration,
+            Command::ArtifactInfo {
+                artifact_id: artifact_id.clone(),
+            },
+        ),
+        ArtifactCommand::Get {
+            artifact_id,
+            output,
+            overwrite,
+        } => download_artifact(registration, artifact_id, output, *overwrite),
+        ArtifactCommand::Pin { artifact_id } => artifact_request(
+            registration,
+            Command::ArtifactPin {
+                artifact_id: artifact_id.clone(),
+                pinned: true,
+            },
+        ),
+        ArtifactCommand::Unpin { artifact_id } => artifact_request(
+            registration,
+            Command::ArtifactPin {
+                artifact_id: artifact_id.clone(),
+                pinned: false,
+            },
+        ),
+    }
+}
+
+fn artifact_request(
+    registration: &control::Registration,
+    command: Command,
+) -> std::result::Result<serde_json::Value, ApiError> {
+    let request_id = control::next_request_id("dev.artifact");
+    let reply = control::request(registration, &request_id, command)
+        .map_err(|error| ApiError::new("connection_failed", error.to_string()))?;
+    if reply.ok {
+        Ok(reply.result.unwrap_or_default())
+    } else {
+        Err(reply
+            .error
+            .map(Into::into)
+            .unwrap_or_else(|| ApiError::new("request_failed", "Artifact request failed")))
+    }
+}
+
+fn download_artifact(
+    registration: &control::Registration,
+    artifact_id: &str,
+    output: &Path,
+    overwrite: bool,
+) -> std::result::Result<serde_json::Value, ApiError> {
+    let info = artifact_request(
+        registration,
+        Command::ArtifactInfo {
+            artifact_id: artifact_id.to_owned(),
+        },
+    )?;
+    if info["status"] != "published" {
+        return Err(ApiError::new(
+            "invalid_artifact_state",
+            "Only published artifacts can be downloaded",
+        ));
+    }
+    let declared_bytes = info["declared_bytes"]
+        .as_u64()
+        .ok_or_else(|| ApiError::new("invalid_response", "Artifact size is missing"))?;
+    let expected_hash = info["sha256"]
+        .as_str()
+        .and_then(|value| value.strip_prefix("sha256:"))
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| ApiError::new("invalid_response", "Artifact SHA-256 is invalid"))?;
+
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.is_dir() {
+        return Err(ApiError::new(
+            "invalid_output_path",
+            "Output parent directory does not exist",
+        ));
+    }
+    if let Ok(metadata) = fs::symlink_metadata(output) {
+        if metadata.file_type().is_symlink() || metadata.is_dir() {
+            return Err(ApiError::new(
+                "unsafe_output_path",
+                "Output must not be a symbolic link or directory",
+            ));
+        }
+        if !overwrite {
+            return Err(ApiError::new(
+                "destination_exists",
+                "Output file already exists; pass --overwrite to replace it",
+            ));
+        }
+    }
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| ApiError::new("output_failed", error.to_string()))?;
+    let mut hasher = Sha256::new();
+    let mut offset = 0u64;
+    let mut saw_eof = false;
+    while offset < declared_bytes {
+        let length = (declared_bytes - offset).min(ARTIFACT_CHUNK_BYTES as u64) as u32;
+        let chunk = artifact_request(
+            registration,
+            Command::ArtifactRead {
+                artifact_id: artifact_id.to_owned(),
+                offset,
+                length,
+            },
+        )?;
+        let actual_offset = chunk["offset"]
+            .as_u64()
+            .ok_or_else(|| ApiError::new("invalid_response", "Artifact chunk has no offset"))?;
+        if actual_offset != offset {
+            return Err(ApiError::new(
+                "invalid_response",
+                format!("Expected artifact offset {offset}, received {actual_offset}"),
+            ));
+        }
+        let encoded = chunk["data"]
+            .as_str()
+            .ok_or_else(|| ApiError::new("invalid_response", "Artifact chunk has no data"))?;
+        let bytes = crate::devserver::protocol::b64::decode(encoded)
+            .ok_or_else(|| ApiError::new("invalid_response", "Artifact chunk is invalid base64"))?;
+        if bytes.is_empty()
+            || bytes.len() as u64 > declared_bytes - offset
+            || chunk["bytes"].as_u64() != Some(bytes.len() as u64)
+        {
+            return Err(ApiError::new(
+                "invalid_response",
+                "Artifact chunk length does not match its response metadata",
+            ));
+        }
+        temporary
+            .write_all(&bytes)
+            .map_err(|error| ApiError::new("output_failed", error.to_string()))?;
+        hasher.update(&bytes);
+        offset += bytes.len() as u64;
+        saw_eof = chunk["eof"].as_bool().unwrap_or(false);
+        if saw_eof != (offset == declared_bytes) {
+            return Err(ApiError::new(
+                "invalid_response",
+                "Artifact stream ended before or after its declared size",
+            ));
+        }
+    }
+    if offset != declared_bytes || !saw_eof {
+        return Err(ApiError::new(
+            "invalid_response",
+            "Artifact stream did not terminate at its declared size",
+        ));
+    }
+    let actual_hash = format!("{:x}", hasher.finalize());
+    if actual_hash != expected_hash {
+        return Err(ApiError::new(
+            "checksum_mismatch",
+            "Downloaded artifact does not match its declared SHA-256",
+        ));
+    }
+    temporary
+        .as_file_mut()
+        .sync_all()
+        .map_err(|error| ApiError::new("output_failed", error.to_string()))?;
+    if overwrite {
+        temporary
+            .persist(output)
+            .map_err(|error| ApiError::new("output_failed", error.error.to_string()))?;
+    } else {
+        temporary.persist_noclobber(output).map_err(|error| {
+            let code = if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                "destination_exists"
+            } else {
+                "output_failed"
+            };
+            ApiError::new(code, error.error.to_string())
+        })?;
+    }
+    Ok(json!({
+        "artifact_id": artifact_id,
+        "output": output,
+        "bytes": declared_bytes,
+        "sha256": format!("sha256:{actual_hash}"),
+        "downloaded": true,
+    }))
 }
 
 /// One event, in the shape `--json` (one JSON object per line) or human mode emits.
@@ -209,4 +449,60 @@ fn write_line(text: &str) -> std::result::Result<(), ApiError> {
                 e.to_string(),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::devserver::control::ControlServer;
+    use crate::devserver::session::Session;
+    use gpui_dev_protocol::ArtifactKind;
+
+    #[test]
+    fn artifact_get_downloads_chunks_verifies_hash_and_respects_overwrite() {
+        let project = tempfile::tempdir().unwrap();
+        let session = Session::start(project.path(), "test", "desktop:test").unwrap();
+        let server = ControlServer::start(session.clone()).unwrap();
+        let bytes = vec![42u8; ARTIFACT_CHUNK_BYTES + 31];
+        let digest = Sha256::digest(&bytes);
+        let transfer = "cli-artifact-transfer";
+        session
+            .artifacts
+            .begin(gpui_dev_protocol::ArtifactManifest {
+                artifact_id: "cli-artifact".into(),
+                transfer_id: transfer.into(),
+                run_id: None,
+                kind: ArtifactKind::Blob,
+                mime: "application/octet-stream".into(),
+                declared_bytes: bytes.len() as u64,
+                sha256: format!("sha256:{digest:x}"),
+            })
+            .unwrap();
+        for chunk in bytes.chunks(ARTIFACT_CHUNK_BYTES) {
+            let offset = session
+                .artifacts
+                .info("cli-artifact")
+                .unwrap()
+                .received_bytes;
+            session
+                .artifacts
+                .write_chunk("cli-artifact", transfer, offset, chunk)
+                .unwrap();
+        }
+        session.artifacts.finish("cli-artifact", transfer).unwrap();
+
+        let output = project.path().join("download.bin");
+        let result =
+            download_artifact(&server.registration, "cli-artifact", &output, false).unwrap();
+        assert_eq!(result["bytes"], bytes.len() as u64);
+        assert_eq!(fs::read(&output).unwrap(), bytes);
+        assert_eq!(
+            download_artifact(&server.registration, "cli-artifact", &output, false)
+                .unwrap_err()
+                .code,
+            "destination_exists"
+        );
+        assert!(download_artifact(&server.registration, "cli-artifact", &output, true).is_ok());
+        assert_eq!(fs::read(&output).unwrap(), bytes);
+    }
 }

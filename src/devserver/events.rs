@@ -89,6 +89,14 @@ pub enum Kind {
     WindowClosed,
     #[serde(rename = "ui.probe_result")]
     UiProbeResult,
+    #[serde(rename = "artifact.declared")]
+    ArtifactDeclared,
+    #[serde(rename = "artifact.published")]
+    ArtifactPublished,
+    #[serde(rename = "artifact.rejected")]
+    ArtifactRejected,
+    #[serde(rename = "artifact.expired")]
+    ArtifactExpired,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -29,7 +29,7 @@
 | T04 | G1 | core | L | T03, F02 | T-06, T-07, C-02 | in_progress |
 | O01 | G1 | core | M | F02, P01 | O-04, O-05 | in_progress |
 | O02 | G1 | core | M | F02 | O-06, O-07 | in_progress |
-| O03 | G1 | core | M | F02 | O-08, O-12, C-05 | planned |
+| O03 | G1 | core | M | F02 | O-08, O-12, C-05 | in_progress |
 | O04 | G1 | core | L | O01, O02, O03 | O-01, O-02, O-03, O-04, O-08, O-09, O-10 | planned |
 | O05 | G2 | core | L | P01, F02, O01 | O-10, O-11 | planned |
 | O06 | G2 | core | M | O05, O03 | O-11, A-03 | planned |
