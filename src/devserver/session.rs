@@ -806,6 +806,7 @@ impl Session {
             "capture_started_at_ms": capture.started_at_ms,
             "capture_finished_at_ms": capture.finished_at_ms,
             "window_number": capture.window_number,
+            "window_match": capture.window_match,
             "window_bounds": capture.bounds,
             "pixel_width": pixel_width,
             "pixel_height": pixel_height,

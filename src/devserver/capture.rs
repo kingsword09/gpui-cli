@@ -42,6 +42,7 @@ impl std::error::Error for CaptureError {}
 pub struct WindowCapture {
     pub window_number: u32,
     pub bounds: WindowBounds,
+    pub window_match: String,
     pub bytes: Vec<u8>,
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
@@ -87,19 +88,38 @@ let expectedTitle = environment["GPUI_CAPTURE_TITLE"] ?? ""
 guard CGPreflightScreenCaptureAccess() else { exit(4) }
 let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
 let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
-for window in windows {
-    guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue == pid,
-          (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
-          let number = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
-          let name = window[kCGWindowName as String] as? String,
-          name == expectedTitle,
+var unnamedWindows: [[String: Any]] = []
+
+func printWindow(_ window: [String: Any], match: String) -> Never {
+    guard let number = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
           let bounds = window[kCGWindowBounds as String] as? [String: Any],
           let x = (bounds["X"] as? NSNumber)?.intValue,
           let y = (bounds["Y"] as? NSNumber)?.intValue,
           let width = (bounds["Width"] as? NSNumber)?.uint32Value,
-          let height = (bounds["Height"] as? NSNumber)?.uint32Value else { continue }
-    print("\(number)\t\(x)\t\(y)\t\(width)\t\(height)")
+          let height = (bounds["Height"] as? NSNumber)?.uint32Value,
+          width > 0,
+          height > 0 else { exit(2) }
+    print("\(number)\t\(x)\t\(y)\t\(width)\t\(height)\t\(match)")
     exit(0)
+}
+
+for window in windows {
+    guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.intValue == pid,
+          (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+          let bounds = window[kCGWindowBounds as String] as? [String: Any],
+          let width = (bounds["Width"] as? NSNumber)?.uint32Value,
+          let height = (bounds["Height"] as? NSNumber)?.uint32Value,
+          width > 0,
+          height > 0 else { continue }
+    if (window[kCGWindowName as String] as? String) == expectedTitle {
+        printWindow(window, match: "exact_title")
+    }
+    if (window[kCGWindowName as String] as? String ?? "").isEmpty {
+        unnamedWindows.append(window)
+    }
+}
+if unnamedWindows.count == 1 {
+    printWindow(unnamedWindows[0], match: "pid_single_unnamed")
 }
 exit(3)
 "#;
@@ -151,7 +171,7 @@ exit(3)
             )
         })?;
     let fields = line.split('\t').collect::<Vec<_>>();
-    if fields.len() != 5 {
+    if fields.len() != 6 {
         bail!("macOS window enumeration returned malformed bounds");
     }
     let window_number = fields[0].parse::<u32>()?;
@@ -164,6 +184,7 @@ exit(3)
     if bounds.width == 0 || bounds.height == 0 {
         bail!("the matched macOS window has empty bounds");
     }
+    let window_match = fields[5].to_owned();
 
     let output_dir = tempfile::tempdir().context("creating a private screenshot directory")?;
     let png_path = output_dir.path().join("window.png");
@@ -203,6 +224,7 @@ exit(3)
     Ok(WindowCapture {
         window_number,
         bounds,
+        window_match,
         bytes,
         started_at_ms,
         finished_at_ms: epoch_ms(),
