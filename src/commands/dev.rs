@@ -29,6 +29,8 @@ pub enum DevCommand {
     Diagnostics,
     /// List windows registered by the current run and their UI heartbeat state
     Windows,
+    /// Request a fresh build through the live supervisor
+    Build,
     /// Replay events after a cursor, then optionally wait for new events
     Events {
         #[arg(long, default_value_t = 0)]
@@ -145,6 +147,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             DevCommand::Status => Command::Status,
             DevCommand::Diagnostics => Command::Diagnostics,
             DevCommand::Windows => Command::Windows,
+            DevCommand::Build => Command::Build,
             DevCommand::Events { .. } => Command::Events {
                 after,
                 timeout_ms: if follow && timeout == 0 {

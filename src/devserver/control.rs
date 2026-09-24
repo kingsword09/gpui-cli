@@ -38,6 +38,7 @@ pub enum Command {
     Status,
     Diagnostics,
     Windows,
+    Build,
     Events {
         after: u64,
         timeout_ms: u64,
@@ -318,6 +319,8 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
                 .and_then(|run| run.scope.run_id.clone());
             json!({"run_id": run_id, "windows": session.windows.snapshots(run_id.as_deref())})
         }
+        Command::Build => serde_json::to_value(session.request_build(&request_id))
+            .expect("serializable build request result"),
         Command::Events { after, timeout_ms } => {
             if timeout_ms > MAX_WAIT_MS || after > session.store.state().seq {
                 return error_reply(
