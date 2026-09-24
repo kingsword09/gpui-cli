@@ -29,6 +29,7 @@ coordinator 消费路径。当前 runtime 没有截图或语义 provider，因�
 
 ## 边界
 
-此功能已经提供可信失败与查询/取消入口，但尚未实现 successful observe。
-后续切片必须先接入真实 scene/window/device capture provider；随后 coordinator 才能在
-`--sync` 下等待 build/run/window/scene，发布不可变 observation 并关联已验证产物。
+此切片已接入 macOS `screencapture` window provider，并能发布经过 PNG 哈希和尺寸
+校验的 best_effort artifact。scene readback、设备截图、语义快照和 scene/present
+一致性仍未实现；后续需要把这些真实 provider 分别接入 operation，再完善 settle
+和 immutable observation 汇总。

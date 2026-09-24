@@ -145,7 +145,7 @@ fn observe_submission_is_version_bound_and_fails_without_a_capture_provider() {
         Command::Observe {
             sync: true,
             window_id: None,
-            require: vec!["screenshot".into()],
+            require: vec!["screenshot".into(), "semantics".into()],
             deadline_ms: 10_000,
         },
     )
@@ -179,6 +179,48 @@ fn observe_submission_is_version_bound_and_fails_without_a_capture_provider() {
         event.kind == Kind::OperationFinished
             && event.data["operation"]["error"]["code"] == "unavailable"
     }));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sync_observe_waits_for_asset_confirmation_before_capture() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("main.rs"), "fn main() {}").unwrap();
+    let session = Session::start(project.path(), "test", "desktop:macos").unwrap();
+    let submitted = session
+        .submit_observe(
+            "test.observe.assets",
+            true,
+            None,
+            vec!["screenshot".into()],
+            10_000,
+        )
+        .unwrap();
+    let operation_id = match submitted {
+        SubmitResult::Created(snapshot) => snapshot.operation_id,
+        SubmitResult::Existing(_) => panic!("expected a new observe operation"),
+    };
+
+    session.advance_observe_requests();
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    session.emit(Kind::AppStarted, &run, json!({"pid": std::process::id()}));
+    session.emit(Kind::AppConnected, &run, json!({"pid": std::process::id()}));
+    build.finish(true, None);
+
+    session.advance_observe_requests();
+    let operation = session
+        .operations
+        .get(&operation_id, super::events::now_ms())
+        .unwrap();
+    assert_eq!(operation.state, super::operations::OperationState::Running);
+    assert!(
+        session
+            .store
+            .state()
+            .running
+            .is_some_and(|running| !running.assets_confirmed)
+    );
 }
 
 #[test]

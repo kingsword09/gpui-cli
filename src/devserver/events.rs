@@ -47,6 +47,8 @@ pub enum Kind {
     OperationQueued,
     #[serde(rename = "operation.started")]
     OperationStarted,
+    #[serde(rename = "operation.bound")]
+    OperationBound,
     #[serde(rename = "operation.finished")]
     OperationFinished,
     #[serde(rename = "build.started")]

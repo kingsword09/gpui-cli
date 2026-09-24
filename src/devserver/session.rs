@@ -1,6 +1,7 @@
 //! One live session, shared by build, process, app-channel and control workers.
 
 use super::artifacts::{ArtifactLimits, ArtifactStore};
+use super::capture;
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
 use super::inputs::{AssetDelta, Inputs};
 use super::operations::{
@@ -11,12 +12,15 @@ use super::protocol::AssetManifestEntry;
 use super::timing::{SpanGuard, Timing};
 use super::windows::WindowRegistry;
 use anyhow::{Context, Result};
+use gpui_dev_protocol::{ARTIFACT_CHUNK_BYTES, ArtifactKind, ArtifactManifest};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub struct Session {
     pub id: String,
@@ -49,6 +53,15 @@ pub struct ObserveRequest {
     pub require: Vec<String>,
     pub target_revision: Revision,
     pub input_hash: String,
+    pub build_requested: bool,
+}
+
+struct WindowCaptureTarget<'a> {
+    run: &'a super::events::RunState,
+    window: &'a super::events::WindowSnapshot,
+    pid: u32,
+    provider: &'a str,
+    timeout: Duration,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -94,8 +107,10 @@ impl Session {
                 "native_mobile_logs": false, "timing_spans": true,
                 "capture.scene": {"available": false, "reason": "backend_unsupported",
                     "provider": null, "constraints": {}},
-                "capture.window": {"available": false, "reason": "backend_unsupported",
-                    "provider": null, "constraints": {}},
+                "capture.window": {"available": capture::window_capture_available(),
+                    "reason": if capture::window_capture_available() { Value::Null } else { json!("backend_unsupported") },
+                    "provider": if capture::window_capture_available() { json!("macos_screencapture") } else { Value::Null },
+                    "constraints": {"scope": "window", "consistency": "best_effort"}},
                 "capture.device": {"available": false, "reason": "backend_unsupported",
                     "provider": null, "constraints": {}},
                 "semantics.read": {"available": false, "reason": "backend_unsupported",
@@ -184,16 +199,12 @@ impl Session {
             ));
         }
         let require = normalize_requirements(&require)?;
-        let (target_revision, _) = self
-            .sync_inputs_with_delta()
+        let (target_revision, _, input_hash) = self
+            .sync_inputs_with_delta_and_hash()
             .map_err(|error| OperationError::new("input_scan_failed", error.to_string()))?;
-        let input_hash = self.input_hash();
-        let run_id = self
-            .store
-            .state()
-            .running
-            .as_ref()
-            .and_then(|run| run.scope.run_id.clone());
+        let state = self.store.state();
+        let run = state.running.as_ref();
+        let run_id = run.and_then(|run| run.scope.run_id.clone());
         let windows = self.windows.snapshots(run_id.as_deref());
         if window_id.is_none() && windows.len() > 1 {
             return Err(OperationError::with_details(
@@ -220,12 +231,14 @@ impl Session {
             "sync": sync,
             "window_id": window_id,
             "require": require,
+            "target_revision": target_revision,
             "input_hash": input_hash,
             "input_consistency": "tracked_scan",
         });
         let scope = Scope {
+            build_id: run.and_then(|run| run.scope.build_id.clone()),
+            run_id,
             revision: target_revision.clone(),
-            ..Scope::default()
         };
         let result = self.submit_operation(request_id, "observe", scope, target, deadline_at_ms)?;
         if let SubmitResult::Created(snapshot) = &result {
@@ -239,6 +252,7 @@ impl Session {
                     require,
                     target_revision,
                     input_hash,
+                    build_requested: false,
                 });
         }
         Ok(result)
@@ -251,66 +265,537 @@ impl Session {
             .pop_front()
     }
 
-    /// Advances queued observe operations from the single live coordinator.
-    /// Capability resolution happens here rather than in a control worker so a
-    /// later provider can use the same transition boundary for build, run and
-    /// capture work. Until a real provider is registered, an observation ends
-    /// explicitly as unavailable instead of claiming scene evidence is an
-    /// image or semantics result.
+    /// Advances observe work on the single live coordinator. Pending requests
+    /// stay queued while a requested build or app window becomes ready.
     pub fn advance_observe_requests(&self) {
         self.expire_operations();
-        while let Some(request) = self.take_observe_request() {
-            let Ok(started) = self.start_operation(&request.operation_id) else {
-                continue;
+        let pending_count = self
+            .observe_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        for _ in 0..pending_count {
+            let Some(mut request) = self.take_observe_request() else {
+                break;
             };
-            if !started.changed {
+            let operation = match self.operations.get(&request.operation_id, events::now_ms()) {
+                Ok(operation) if operation.state.is_terminal() => continue,
+                Ok(operation) if operation.state == OperationState::Queued => {
+                    match self.start_operation(&request.operation_id) {
+                        Ok(transition) => transition.snapshot,
+                        Err(_) => continue,
+                    }
+                }
+                Ok(operation) => operation,
+                Err(_) => continue,
+            };
+            if operation.state != OperationState::Running {
                 continue;
             }
-            let unavailable = self.unavailable_observe_requirements(&request.require);
-            let error = OperationError::with_details(
-                "unavailable",
-                "no requested observation provider is currently available",
-                json!({
-                    "operation_id": request.operation_id,
-                    "sync": request.sync,
-                    "window_id": request.window_id,
-                    "required": request.require,
-                    "unavailable": unavailable,
-                    "source_revision": request.target_revision.source_revision,
-                    "asset_revision": request.target_revision.asset_revision,
-                    "input_hash": request.input_hash,
-                }),
-            );
-            let _ = self.finish_operation(
-                &started.snapshot.operation_id,
-                OperationState::Failed,
-                None,
-                Some(error),
-            );
+            if let Some(unavailable) = self.unavailable_observe_requirements(&request.require) {
+                self.fail_observe(
+                    &operation,
+                    "unavailable",
+                    "a required observation capability has no available provider",
+                    json!({"unavailable": unavailable}),
+                );
+                continue;
+            }
+            let state = self.store.state();
+            if request.sync {
+                let (current_revision, _, current_input_hash) =
+                    match self.sync_inputs_with_delta_and_hash() {
+                        Ok(value) => value,
+                        Err(error) => {
+                            self.fail_observe(
+                                &operation,
+                                "input_scan_failed",
+                                "could not verify the requested input snapshot",
+                                json!({"message": error.to_string()}),
+                            );
+                            continue;
+                        }
+                    };
+                if current_revision != request.target_revision
+                    || current_input_hash != request.input_hash
+                {
+                    let _ = self.finish_operation(
+                        &request.operation_id,
+                        OperationState::Superseded,
+                        None,
+                        Some(OperationError::with_details(
+                            "superseded",
+                            "project inputs changed after the observe target was recorded",
+                            json!({"target_revision": request.target_revision,
+                                "current_revision": current_revision,
+                                "target_input_hash": request.input_hash,
+                                "current_input_hash": current_input_hash}),
+                        )),
+                    );
+                    continue;
+                }
+                let current_run = state.running.as_ref();
+                let run_matches = current_run.is_some_and(|run| {
+                    run.scope.revision == request.target_revision && run.process == "running"
+                });
+                if !run_matches {
+                    if current_run.is_some_and(|run| {
+                        run.scope.revision == request.target_revision
+                            && matches!(run.process.as_str(), "exited" | "launch_failed")
+                    }) && state.build.as_ref().is_some_and(|build| {
+                        build.scope.revision == request.target_revision
+                            && build.status == "succeeded"
+                    }) {
+                        let run = current_run.expect("run was matched by the condition");
+                        self.fail_observe(
+                            &operation,
+                            "launch_failed",
+                            "the build succeeded but its app did not remain available",
+                            json!({"run_id": run.scope.run_id, "process": run.process}),
+                        );
+                        continue;
+                    }
+                    if state.build.as_ref().is_some_and(|build| {
+                        build.scope.revision == request.target_revision && build.status == "failed"
+                    }) {
+                        self.fail_observe(
+                            &operation,
+                            "build_failed",
+                            "the build for the observe target revision failed",
+                            json!({"build": state.build}),
+                        );
+                        continue;
+                    }
+                    let build_in_progress = state.build.as_ref().is_some_and(|build| {
+                        build.scope.revision == request.target_revision
+                            && build.status == "building"
+                    });
+                    let target_run_starting = current_run.is_some_and(|run| {
+                        run.scope.revision == request.target_revision
+                            && matches!(run.process.as_str(), "starting" | "launched")
+                    });
+                    if !request.build_requested && !build_in_progress && !target_run_starting {
+                        self.request_build(&request.operation_id);
+                        request.build_requested = true;
+                    }
+                    self.requeue_observe(request);
+                    continue;
+                }
+                if !current_run.is_some_and(|run| {
+                    run.assets_confirmed
+                        && run.scope.revision.asset_revision
+                            == request.target_revision.asset_revision
+                }) {
+                    self.requeue_observe(request);
+                    continue;
+                }
+            }
+            let Some(run) = state.running.as_ref() else {
+                self.fail_observe(
+                    &operation,
+                    "target_unavailable",
+                    "there is no running app to observe",
+                    json!({}),
+                );
+                continue;
+            };
+            let mut observed_scope = operation.scope.clone();
+            observed_scope.build_id = run.scope.build_id.clone();
+            observed_scope.run_id = run.scope.run_id.clone();
+            observed_scope.revision = run.scope.revision.clone();
+            let operation = match self.bind_operation_scope(&request.operation_id, observed_scope) {
+                Ok(transition) => transition.snapshot,
+                Err(_) => continue,
+            };
+            if run.process != "running" || run.channel != "connected" {
+                if run.process == "exited" || run.process == "launch_failed" {
+                    self.fail_observe(
+                        &operation,
+                        "target_exited",
+                        "the selected app run is no longer available",
+                        json!({"run_id": run.scope.run_id, "process": run.process,
+                            "channel": run.channel}),
+                    );
+                } else {
+                    self.requeue_observe(request);
+                }
+                continue;
+            }
+            let windows = self.windows.snapshots(run.scope.run_id.as_deref());
+            if request.window_id.is_none() && windows.len() > 1 {
+                self.fail_observe(
+                    &operation,
+                    "ambiguous_window",
+                    "multiple live windows require an explicit window_id",
+                    json!({"windows": windows.iter().map(|window| &window.window_id).collect::<Vec<_>>() }),
+                );
+                continue;
+            }
+            if let Some(window_id) = &request.window_id
+                && !windows.is_empty()
+                && !windows.iter().any(|window| &window.window_id == window_id)
+            {
+                self.fail_observe(
+                    &operation,
+                    "unknown_window",
+                    "the requested window is not registered in the current run",
+                    json!({"window_id": window_id, "run_id": run.scope.run_id}),
+                );
+                continue;
+            }
+            let selected = request
+                .window_id
+                .as_deref()
+                .and_then(|id| windows.iter().find(|window| window.window_id == id))
+                .or_else(|| (windows.len() == 1).then(|| &windows[0]));
+            let Some(window) = selected else {
+                self.requeue_observe(request);
+                continue;
+            };
+            if window.lifecycle != "open" {
+                self.fail_observe(
+                    &operation,
+                    "window_closed",
+                    "the selected window is closed",
+                    json!({"window_id": window.window_id}),
+                );
+                continue;
+            }
+            if window.ui == "unresponsive" {
+                self.fail_observe(
+                    &operation,
+                    "ui_unresponsive",
+                    "the selected UI did not answer its heartbeat",
+                    json!({"window_id": window.window_id, "reason": window.reason}),
+                );
+                continue;
+            }
+            if window.ui != "responsive" {
+                self.requeue_observe(request);
+                continue;
+            }
+            let Some(pid) = run.pid else {
+                self.requeue_observe(request);
+                continue;
+            };
+            let provider = self.selected_window_provider(&request.require);
+            let Some(provider) = provider else {
+                self.fail_observe(
+                    &operation,
+                    "unavailable",
+                    "no screenshot provider is available for this request",
+                    json!({"required": request.require}),
+                );
+                continue;
+            };
+            let remaining =
+                Duration::from_millis(operation.deadline_at_ms.saturating_sub(events::now_ms()));
+            if remaining.is_zero() {
+                self.expire_operations();
+                continue;
+            }
+            match self.capture_observation(
+                &operation,
+                &request,
+                WindowCaptureTarget {
+                    run,
+                    window,
+                    pid,
+                    provider,
+                    timeout: remaining,
+                },
+            ) {
+                Ok(result) => {
+                    let _ = self.finish_operation(
+                        &request.operation_id,
+                        OperationState::Succeeded,
+                        Some(result),
+                        None,
+                    );
+                }
+                Err(error) => {
+                    let _ = self.finish_operation(
+                        &request.operation_id,
+                        OperationState::Failed,
+                        None,
+                        Some(error),
+                    );
+                }
+            }
         }
     }
 
-    fn unavailable_observe_requirements(&self, requirements: &[String]) -> Vec<Value> {
-        requirements
+    fn unavailable_observe_requirements(&self, requirements: &[String]) -> Option<Vec<Value>> {
+        let missing = requirements
             .iter()
-            .map(|requirement| match requirement.as_str() {
-                "screenshot" => json!({
-                    "requirement": requirement,
+            .filter_map(|requirement| match requirement.as_str() {
+                "screenshot" if capture::window_capture_available() => None,
+                "capture.window" if capture::window_capture_available() => None,
+                "screenshot" => Some(json!({"requirement": requirement,
                     "alternatives": ["capture.scene", "capture.window", "capture.device"],
-                    "reason": "backend_unsupported",
-                }),
-                "semantics" => json!({
-                    "requirement": requirement,
-                    "alternatives": ["semantics.read"],
-                    "reason": "backend_unsupported",
-                }),
-                capability => json!({
-                    "requirement": capability,
-                    "alternatives": [capability],
-                    "reason": "backend_unsupported",
-                }),
+                    "reason": "backend_unsupported"})),
+                "semantics" => Some(json!({"requirement": requirement,
+                    "alternatives": ["semantics.read"], "reason": "backend_unsupported"})),
+                capability => Some(json!({"requirement": capability,
+                    "alternatives": [capability], "reason": "backend_unsupported"})),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        (!missing.is_empty()).then_some(missing)
+    }
+
+    fn selected_window_provider(&self, requirements: &[String]) -> Option<&'static str> {
+        let explicit_window = requirements
+            .iter()
+            .any(|requirement| requirement == "capture.window");
+        let screenshot = requirements
+            .iter()
+            .any(|requirement| requirement == "screenshot");
+        if capture::window_capture_available() && (explicit_window || screenshot) {
+            Some("macos_screencapture")
+        } else {
+            None
+        }
+    }
+
+    fn requeue_observe(&self, request: ObserveRequest) {
+        self.observe_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(request);
+    }
+
+    fn fail_observe(
+        &self,
+        operation: &OperationSnapshot,
+        code: &str,
+        message: &str,
+        details: Value,
+    ) {
+        let _ = self.finish_operation(
+            &operation.operation_id,
+            OperationState::Failed,
+            None,
+            Some(OperationError::with_details(code, message, details)),
+        );
+    }
+
+    fn capture_observation(
+        &self,
+        operation: &OperationSnapshot,
+        request: &ObserveRequest,
+        target: WindowCaptureTarget<'_>,
+    ) -> Result<Value, OperationError> {
+        let WindowCaptureTarget {
+            run,
+            window,
+            pid,
+            provider,
+            timeout,
+        } = target;
+        let scene_epoch_before = window.scene_epoch;
+        if request
+            .require
+            .iter()
+            .any(|requirement| requirement == "semantics" || requirement == "semantics.read")
+        {
+            return Err(OperationError::with_details(
+                "unavailable",
+                "semantic capture is not available in this runtime",
+                json!({"provider": provider, "missing": ["semantics.read"]}),
+            ));
+        }
+        let capture = capture::capture_window(pid, &window.title, timeout).map_err(|error| {
+            OperationError::with_details(
+                "capture_failed",
+                error.to_string(),
+                json!({"provider": provider, "window_id": window.window_id,
+                    "run_id": run.scope.run_id, "pid": pid}),
+            )
+        })?;
+        if !self.operation_is_running(&operation.operation_id) {
+            return Err(OperationError::new(
+                "cancelled",
+                "observe was cancelled while the window screenshot was being captured",
+            ));
+        }
+
+        let current_state = self.store.state();
+        let same_run = current_state.running.as_ref().is_some_and(|current| {
+            current.scope.run_id == run.scope.run_id
+                && current.process == "running"
+                && (!request.sync || current.assets_confirmed)
+        });
+        let current_window = self
+            .windows
+            .snapshots(run.scope.run_id.as_deref())
+            .into_iter()
+            .find(|current| current.window_id == window.window_id);
+        let same_window = current_window.as_ref().is_some_and(|current| {
+            current.lifecycle == "open"
+                && current.title == window.title
+                && current.ui == "responsive"
+        });
+        if !same_run || !same_window {
+            return Err(OperationError::with_details(
+                "stale_observation",
+                "the app run or window changed during screenshot capture",
+                json!({"run_id": run.scope.run_id, "window_id": window.window_id}),
+            ));
+        }
+        let (latest_revision, _, latest_hash) = self
+            .sync_inputs_with_delta_and_hash()
+            .map_err(|error| OperationError::new("input_scan_failed", error.to_string()))?;
+        if latest_revision != request.target_revision || latest_hash != request.input_hash {
+            return Err(OperationError::with_details(
+                if request.sync {
+                    "superseded"
+                } else {
+                    "capture_unstable"
+                },
+                "project inputs changed during screenshot capture",
+                json!({"target_revision": request.target_revision,
+                    "current_revision": latest_revision,
+                    "target_input_hash": request.input_hash,
+                    "current_input_hash": latest_hash}),
+            ));
+        }
+        let (pixel_width, pixel_height) = png_dimensions(&capture.bytes)
+            .map_err(|message| OperationError::new("capture_invalid", message))?;
+        let digest = Sha256::digest(&capture.bytes);
+        let digest_hex = format!("{digest:x}");
+        let identity = format!("{:x}", Sha256::digest(operation.operation_id.as_bytes()));
+        let artifact_id = format!("obs-{}-window", &identity[..32]);
+        let transfer_id = format!("xfer-{}", &identity[..32]);
+        let manifest = ArtifactManifest {
+            artifact_id: artifact_id.clone(),
+            transfer_id: transfer_id.clone(),
+            run_id: run.scope.run_id.clone(),
+            kind: ArtifactKind::Png,
+            mime: "image/png".into(),
+            declared_bytes: capture.bytes.len() as u64,
+            sha256: digest_hex.clone(),
+        };
+        let event_scope = Scope {
+            build_id: run.scope.build_id.clone(),
+            run_id: run.scope.run_id.clone(),
+            revision: run.scope.revision.clone(),
+        };
+        let artifact = self.artifacts.begin(manifest).map_err(|error| {
+            self.emit(
+                Kind::ArtifactRejected,
+                &event_scope,
+                json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                    "code": error.code.as_str(), "message": error.message}),
+            );
+            OperationError::with_details(
+                error.code.as_str(),
+                error.message,
+                json!({"artifact_id": artifact_id}),
+            )
+        })?;
+        self.emit(
+            Kind::ArtifactDeclared,
+            &event_scope,
+            json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                "kind": "png", "declared_bytes": artifact.manifest.declared_bytes,
+                "sha256": digest_hex, "provider": provider, "scope": "window"}),
+        );
+        for (index, chunk) in capture.bytes.chunks(ARTIFACT_CHUNK_BYTES).enumerate() {
+            let offset = (index * ARTIFACT_CHUNK_BYTES) as u64;
+            if let Err(error) =
+                self.artifacts
+                    .write_chunk(&artifact_id, &transfer_id, offset, chunk)
+            {
+                let _ = self.artifacts.abort(&artifact_id, &transfer_id);
+                self.emit(
+                    Kind::ArtifactRejected,
+                    &event_scope,
+                    json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                        "code": error.code.as_str(), "message": error.message}),
+                );
+                return Err(OperationError::with_details(
+                    error.code.as_str(),
+                    error.message,
+                    json!({"artifact_id": artifact_id}),
+                ));
+            }
+        }
+        if !self.operation_is_running(&operation.operation_id) {
+            let _ = self.artifacts.abort(&artifact_id, &transfer_id);
+            return Err(OperationError::with_details(
+                "cancelled",
+                "observe was cancelled before its screenshot artifact was published",
+                json!({"artifact_id": artifact_id}),
+            ));
+        }
+        let artifact = self
+            .artifacts
+            .finish(&artifact_id, &transfer_id)
+            .map_err(|error| {
+                self.emit(
+                    Kind::ArtifactRejected,
+                    &event_scope,
+                    json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                    "code": error.code.as_str(), "message": error.message}),
+                );
+                OperationError::with_details(
+                    error.code.as_str(),
+                    error.message,
+                    json!({"artifact_id": artifact_id}),
+                )
+            })?;
+        self.emit(
+            Kind::ArtifactPublished,
+            &event_scope,
+            json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                "kind": "png", "declared_bytes": artifact.manifest.declared_bytes,
+                "sha256": digest_hex}),
+        );
+        let scene_matches = current_window.as_ref().is_some_and(|current| {
+            current.scene_epoch == scene_epoch_before
+                && current.scene_source_revision == Some(run.scope.revision.source_revision)
+                && current.scene_asset_revision == Some(run.scope.revision.asset_revision)
+        });
+        let observation_id = format!("observation-{}", &identity[..32]);
+        Ok(json!({
+            "observation_id": observation_id,
+            "run_id": run.scope.run_id,
+            "build_id": run.scope.build_id,
+            "source_revision": run.scope.revision.source_revision,
+            "asset_revision": run.scope.revision.asset_revision,
+            "input_hash": request.input_hash,
+            "input_consistency": "tracked_scan",
+            "window_id": window.window_id,
+            "foreground": window.foreground,
+            "target_source_revision": request.target_revision.source_revision,
+            "target_asset_revision": request.target_revision.asset_revision,
+            "scene_epoch_before": scene_epoch_before,
+            "scene_epoch_after": current_window.as_ref().map(|current| current.scene_epoch),
+            "presented_frame_id": current_window.as_ref().and_then(|current| current.presented_frame_id.clone()),
+            "provider": provider,
+            "scope": "window",
+            "consistency": "best_effort",
+            "capture_started_at_ms": capture.started_at_ms,
+            "capture_finished_at_ms": capture.finished_at_ms,
+            "window_number": capture.window_number,
+            "window_bounds": capture.bounds,
+            "pixel_width": pixel_width,
+            "pixel_height": pixel_height,
+            "scale_milli": window.scale_milli,
+            "freshness": {
+                "source": if run.scope.revision.source_revision == request.target_revision.source_revision { "current" } else { "stale" },
+                "assets": if run.assets_confirmed && run.scope.revision.asset_revision == request.target_revision.asset_revision { "applied" } else { "unknown" },
+                "scene": if scene_matches { "matches" } else { "unknown" },
+            },
+            "artifacts": [artifact],
+        }))
+    }
+
+    fn operation_is_running(&self, operation_id: &str) -> bool {
+        self.expire_operations();
+        self.operations
+            .get(operation_id, events::now_ms())
+            .is_ok_and(|operation| operation.state == OperationState::Running)
     }
 
     pub fn start_operation(&self, operation_id: &str) -> Result<Transition, OperationError> {
@@ -318,6 +803,20 @@ impl Session {
         let transition = self.operations.start(operation_id, events::now_ms())?;
         if transition.changed {
             self.emit_operation(Kind::OperationStarted, &transition.snapshot);
+        }
+        Ok(transition)
+    }
+
+    pub fn bind_operation_scope(
+        &self,
+        operation_id: &str,
+        scope: Scope,
+    ) -> Result<Transition, OperationError> {
+        let transition = self
+            .operations
+            .bind_scope(operation_id, scope, events::now_ms())?;
+        if transition.changed {
+            self.emit_operation(Kind::OperationBound, &transition.snapshot);
         }
         Ok(transition)
     }
@@ -428,6 +927,11 @@ impl Session {
     }
 
     pub fn sync_inputs_with_delta(&self) -> Result<(Revision, AssetDelta)> {
+        self.sync_inputs_with_delta_and_hash()
+            .map(|(revision, delta, _)| (revision, delta))
+    }
+
+    pub fn sync_inputs_with_delta_and_hash(&self) -> Result<(Revision, AssetDelta, String)> {
         let scan_scope = Scope {
             revision: self.store.state().desired,
             ..Scope::default()
@@ -445,6 +949,7 @@ impl Session {
             }
         };
         let asset_delta = AssetDelta::between(&previous.assets, &inputs.assets);
+        let input_hash = inputs.digest();
         let mut revision = self.store.state().desired;
         if revision.source_revision == 0 || inputs != *previous {
             if revision.source_revision == 0
@@ -462,7 +967,7 @@ impl Session {
             *previous = inputs;
         }
         scan.finish("ok", None);
-        Ok((revision, asset_delta))
+        Ok((revision, asset_delta, input_hash))
     }
 
     pub fn asset_manifest(&self) -> Vec<AssetManifestEntry> {
@@ -476,13 +981,6 @@ impl Session {
                 hash: hash.clone(),
             })
             .collect()
-    }
-
-    pub fn input_hash(&self) -> String {
-        self.inputs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .digest()
     }
 
     pub fn begin_build(self: &Arc<Self>) -> Result<Build> {
@@ -664,4 +1162,33 @@ pub fn normalize_requirements(values: &[String]) -> Result<Vec<String>, Operatio
         ));
     }
     Ok(normalized.into_iter().collect())
+}
+
+fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+    if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return Err("capture provider did not return a valid PNG header".into());
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().expect("four PNG width bytes"));
+    let height = u32::from_be_bytes(bytes[20..24].try_into().expect("four PNG height bytes"));
+    if width == 0 || height == 0 {
+        return Err("capture provider returned a PNG with empty dimensions".into());
+    }
+    Ok((width, height))
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::png_dimensions;
+
+    #[test]
+    fn png_dimensions_require_signature_and_nonzero_size() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend_from_slice(&640u32.to_be_bytes());
+        png.extend_from_slice(&480u32.to_be_bytes());
+        assert_eq!(png_dimensions(&png).unwrap(), (640, 480));
+        assert!(png_dimensions(b"not a png").is_err());
+
+        png[16..20].copy_from_slice(&0u32.to_be_bytes());
+        assert!(png_dimensions(&png).is_err());
+    }
 }

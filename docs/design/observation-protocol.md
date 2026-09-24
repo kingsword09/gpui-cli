@@ -117,6 +117,12 @@ F02 必须保存一个基线 CLI 二进制/测试客户端及 v1 模板夹具，
     "provider": "platform-adapter",
     "constraints": {}
   },
+  "capture.window": {
+    "available": true,
+    "reason": null,
+    "provider": "macos_screencapture",
+    "constraints": {"consistency": "best_effort", "scope": "window"}
+  },
   "capture.device": {
     "available": true,
     "reason": null,
@@ -206,7 +212,7 @@ v2 外层保留 `schema_version/session_id/ok/result|error`，增加 request_id�
 
 ## 7. `observe --sync` 算法
 
-1. 解析 project/session/window，读取能力；缺少必需能力立即返回 `unavailable` 或 `upgrade_required`。
+1. 解析 project/session/window，读取能力；缺少必需能力立即返回 `unavailable` 或 `upgrade_required`。macOS `screencapture` provider 只能提供 `best_effort/window`，不能替代 `capture.scene`。
 2. 在输入扫描锁内做主动内容扫描，生成目标 revision 和 input_hash；记录 `tracked_scan`。不能用当前 watcher 计数代替扫描。
 3. 登记操作、目标 revision、截止时间，再向构建编排器提交“确保该版本”的请求。若已有对应构建则等待；运行版本已匹配则不重建。
 4. 编排器在构建前后重核输入。输入变化则将原操作标为 superseded，新的 Live 构建可以继续，但原操作不偷偷改目标。
