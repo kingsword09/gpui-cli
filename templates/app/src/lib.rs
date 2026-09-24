@@ -62,11 +62,12 @@ pub fn pump_live_assets(cx: &mut App) {
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(200))
+                .timer(std::time::Duration::from_millis(200))
                     .await;
                 let asset_events = crate::live::take_asset_events();
                 let probes = crate::live::take_ui_probe_requests();
-                if asset_events.is_empty() && probes.is_empty() {
+                let required_loaded = crate::live::report_required_assets_loaded();
+                if asset_events.is_empty() && probes.is_empty() && !required_loaded {
                     continue;
                 }
                 cx.update(|cx| {

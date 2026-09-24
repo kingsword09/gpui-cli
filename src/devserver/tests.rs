@@ -107,6 +107,16 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
             failed: Vec::new(),
         },
     );
+    send(
+        &mut socket,
+        &ClientMessage::AssetsRequiredLoaded {
+            transfer_id: "asset-t1-r0".into(),
+            asset_revision: 0,
+            required: vec!["assets/x.png".into()],
+            loaded: vec!["assets/x.png".into()],
+            failed: Vec::new(),
+        },
+    );
 
     wait_until(|| {
         let events = session.store.events(0, Duration::ZERO);
@@ -126,6 +136,10 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
                 .events
                 .iter()
                 .any(|event| event.kind == Kind::AssetsReceived)
+            && events
+                .events
+                .iter()
+                .any(|event| event.kind == Kind::AssetsRequiredLoaded)
     });
     let events = session.store.events(0, Duration::ZERO);
     assert!(events.events.iter().any(|event| {

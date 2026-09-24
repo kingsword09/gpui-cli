@@ -12,8 +12,9 @@
 
 ## 边界
 
-本子 PR 只覆盖 iOS `asset_data` 路径；桌面/Android 仍在 AssetSource 读取阶段等待
-`required_loaded`/hash 绑定，分块 offset/重传和 `scene_epoch` 也尚未实现。
+本子 PR 的 iOS `asset_data` 校验已与桌面/Android AssetSource 读取校验分开；
+`assets_required_loaded` 的声明/回报属于紧随其后的 required-loaded 子 PR。分块 offset/重传
+和 `scene_epoch` 也尚未实现。
 
 ## 验证
 
