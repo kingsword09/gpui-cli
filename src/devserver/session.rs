@@ -12,6 +12,7 @@ use super::timing::{SpanGuard, Timing};
 use super::windows::WindowRegistry;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,6 +31,7 @@ pub struct Session {
     pub artifacts: Arc<ArtifactStore>,
     pub operations: Arc<OperationStore>,
     build_requests: Mutex<Option<BuildRequest>>,
+    observe_requests: Mutex<VecDeque<ObserveRequest>>,
     next_build: AtomicU64,
     next_run: AtomicU64,
 }
@@ -37,6 +39,16 @@ pub struct Session {
 #[derive(Clone, Debug)]
 pub struct BuildRequest {
     pub request_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ObserveRequest {
+    pub operation_id: String,
+    pub sync: bool,
+    pub window_id: Option<String>,
+    pub require: Vec<String>,
+    pub target_revision: Revision,
+    pub input_hash: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -80,6 +92,14 @@ impl Session {
             "run_identity": "launch_token", "ui_observation": true, "asset_confirmation": true,
                 "actions": false, "checks": false, "input_scope": "project_files",
                 "native_mobile_logs": false, "timing_spans": true,
+                "capture.scene": {"available": false, "reason": "backend_unsupported",
+                    "provider": null, "constraints": {}},
+                "capture.window": {"available": false, "reason": "backend_unsupported",
+                    "provider": null, "constraints": {}},
+                "capture.device": {"available": false, "reason": "backend_unsupported",
+                    "provider": null, "constraints": {}},
+                "semantics.read": {"available": false, "reason": "backend_unsupported",
+                    "provider": null, "constraints": {}},
                 "artifact_store": {"available": true, "provider": "session_file_store",
                     "constraints": {"chunk_bytes": gpui_dev_protocol::ARTIFACT_CHUNK_BYTES,
                         "session_bytes": ArtifactLimits::default().session_quota_bytes,
@@ -108,6 +128,7 @@ impl Session {
             artifacts,
             operations: Arc::new(OperationStore::new(MAX_ACTIVE_OPERATIONS)),
             build_requests: Mutex::new(None),
+            observe_requests: Mutex::new(VecDeque::new()),
             dir,
             stopping: AtomicBool::new(false),
             inputs: Mutex::new(Inputs::default()),
@@ -146,6 +167,150 @@ impl Session {
             self.emit_operation(Kind::OperationQueued, snapshot);
         }
         Ok(result)
+    }
+
+    pub fn submit_observe(
+        &self,
+        request_id: &str,
+        sync: bool,
+        window_id: Option<String>,
+        require: Vec<String>,
+        deadline_ms: u64,
+    ) -> Result<SubmitResult, OperationError> {
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(OperationError::new(
+                "session_ended",
+                "the live session is stopping",
+            ));
+        }
+        let require = normalize_requirements(&require)?;
+        let (target_revision, _) = self
+            .sync_inputs_with_delta()
+            .map_err(|error| OperationError::new("input_scan_failed", error.to_string()))?;
+        let input_hash = self.input_hash();
+        let run_id = self
+            .store
+            .state()
+            .running
+            .as_ref()
+            .and_then(|run| run.scope.run_id.clone());
+        let windows = self.windows.snapshots(run_id.as_deref());
+        if window_id.is_none() && windows.len() > 1 {
+            return Err(OperationError::with_details(
+                "ambiguous_window",
+                "multiple live windows require an explicit window_id",
+                json!({"windows": windows.iter().map(|window| &window.window_id).collect::<Vec<_>>() }),
+            ));
+        }
+        if let Some(window_id) = &window_id
+            && !windows.is_empty()
+            && !windows.iter().any(|window| &window.window_id == window_id)
+        {
+            return Err(OperationError::with_details(
+                "unknown_window",
+                "the requested window is not registered in the current run",
+                json!({"window_id": window_id}),
+            ));
+        }
+        let now_ms = events::now_ms();
+        let deadline_at_ms = now_ms.checked_add(deadline_ms).ok_or_else(|| {
+            OperationError::new("invalid_deadline", "operation deadline overflowed")
+        })?;
+        let target = json!({
+            "sync": sync,
+            "window_id": window_id,
+            "require": require,
+            "input_hash": input_hash,
+            "input_consistency": "tracked_scan",
+        });
+        let scope = Scope {
+            revision: target_revision.clone(),
+            ..Scope::default()
+        };
+        let result = self.submit_operation(request_id, "observe", scope, target, deadline_at_ms)?;
+        if let SubmitResult::Created(snapshot) = &result {
+            self.observe_requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back(ObserveRequest {
+                    operation_id: snapshot.operation_id.clone(),
+                    sync,
+                    window_id,
+                    require,
+                    target_revision,
+                    input_hash,
+                });
+        }
+        Ok(result)
+    }
+
+    pub fn take_observe_request(&self) -> Option<ObserveRequest> {
+        self.observe_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+
+    /// Advances queued observe operations from the single live coordinator.
+    /// Capability resolution happens here rather than in a control worker so a
+    /// later provider can use the same transition boundary for build, run and
+    /// capture work. Until a real provider is registered, an observation ends
+    /// explicitly as unavailable instead of claiming scene evidence is an
+    /// image or semantics result.
+    pub fn advance_observe_requests(&self) {
+        self.expire_operations();
+        while let Some(request) = self.take_observe_request() {
+            let Ok(started) = self.start_operation(&request.operation_id) else {
+                continue;
+            };
+            if !started.changed {
+                continue;
+            }
+            let unavailable = self.unavailable_observe_requirements(&request.require);
+            let error = OperationError::with_details(
+                "unavailable",
+                "no requested observation provider is currently available",
+                json!({
+                    "operation_id": request.operation_id,
+                    "sync": request.sync,
+                    "window_id": request.window_id,
+                    "required": request.require,
+                    "unavailable": unavailable,
+                    "source_revision": request.target_revision.source_revision,
+                    "asset_revision": request.target_revision.asset_revision,
+                    "input_hash": request.input_hash,
+                }),
+            );
+            let _ = self.finish_operation(
+                &started.snapshot.operation_id,
+                OperationState::Failed,
+                None,
+                Some(error),
+            );
+        }
+    }
+
+    fn unavailable_observe_requirements(&self, requirements: &[String]) -> Vec<Value> {
+        requirements
+            .iter()
+            .map(|requirement| match requirement.as_str() {
+                "screenshot" => json!({
+                    "requirement": requirement,
+                    "alternatives": ["capture.scene", "capture.window", "capture.device"],
+                    "reason": "backend_unsupported",
+                }),
+                "semantics" => json!({
+                    "requirement": requirement,
+                    "alternatives": ["semantics.read"],
+                    "reason": "backend_unsupported",
+                }),
+                capability => json!({
+                    "requirement": capability,
+                    "alternatives": [capability],
+                    "reason": "backend_unsupported",
+                }),
+            })
+            .collect()
     }
 
     pub fn start_operation(&self, operation_id: &str) -> Result<Transition, OperationError> {
@@ -313,6 +478,13 @@ impl Session {
             .collect()
     }
 
+    pub fn input_hash(&self) -> String {
+        self.inputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .digest()
+    }
+
     pub fn begin_build(self: &Arc<Self>) -> Result<Build> {
         self.sync_inputs()?;
         let inputs = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
@@ -452,4 +624,44 @@ pub fn random_token() -> Result<String> {
     getrandom::fill(&mut bytes)
         .map_err(|error| anyhow::anyhow!("generating live credentials: {error}"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+pub fn normalize_requirements(values: &[String]) -> Result<Vec<String>, OperationError> {
+    let values = if values.is_empty() {
+        vec!["screenshot".to_owned()]
+    } else {
+        values
+            .iter()
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let allowed = [
+        "screenshot",
+        "semantics",
+        "capture.scene",
+        "capture.window",
+        "capture.device",
+        "semantics.read",
+    ];
+    let mut normalized = BTreeSet::new();
+    for value in values {
+        if !allowed.contains(&value.as_str()) {
+            return Err(OperationError::with_details(
+                "invalid_requirement",
+                format!("unsupported observe requirement `{value}`"),
+                json!({"requirement": value, "allowed": allowed}),
+            ));
+        }
+        normalized.insert(value);
+    }
+    if normalized.is_empty() {
+        return Err(OperationError::new(
+            "invalid_requirement",
+            "observe requires at least one capability",
+        ));
+    }
+    Ok(normalized.into_iter().collect())
 }

@@ -1355,6 +1355,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         &mut last_failed,
     )?;
     while !quit && !session.stopping.load(Ordering::SeqCst) {
+        session.advance_observe_requests();
         if session.take_build_request().is_some() {
             quit = run_cycles(
                 project,

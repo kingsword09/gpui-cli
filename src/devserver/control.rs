@@ -40,6 +40,12 @@ pub enum Command {
     Diagnostics,
     Windows,
     Build,
+    Observe {
+        sync: bool,
+        window_id: Option<String>,
+        require: Vec<String>,
+        deadline_ms: u64,
+    },
     OperationGet {
         operation_id: String,
     },
@@ -340,6 +346,23 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
         }
         Command::Build => serde_json::to_value(session.request_build(&request_id))
             .expect("serializable build request result"),
+        Command::Observe {
+            sync,
+            window_id,
+            require,
+            deadline_ms,
+        } => {
+            let result =
+                match session.submit_observe(&request_id, sync, window_id, require, deadline_ms) {
+                    Ok(result) => result,
+                    Err(error) => return operation_error_reply(session, &request_id, error),
+                };
+            let snapshot = match result {
+                super::operations::SubmitResult::Created(snapshot)
+                | super::operations::SubmitResult::Existing(snapshot) => snapshot,
+            };
+            serde_json::to_value(snapshot).expect("serializable operation snapshot")
+        }
         Command::OperationGet { operation_id } => {
             session.expire_operations();
             let snapshot = match session.operations.get(&operation_id, now_ms()) {
