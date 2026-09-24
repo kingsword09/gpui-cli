@@ -98,6 +98,7 @@ fn operation_get_and_cancel_preserve_terminal_state() {
         "test.operation.get",
         Command::OperationGet {
             operation_id: operation.operation_id.clone(),
+            wait_ms: 0,
         },
     )
     .unwrap();
@@ -133,6 +134,52 @@ fn operation_get_and_cancel_preserve_terminal_state() {
 }
 
 #[test]
+fn operation_get_can_wait_for_a_terminal_transition() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("main.rs"), "fn main() {}").unwrap();
+    let session = Session::start(project.path(), "test", "desktop:test").unwrap();
+    let operation = match session
+        .submit_operation(
+            "test.wait",
+            "observe",
+            Scope::default(),
+            json!({"window_id": "main"}),
+            super::events::now_ms() + 10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot,
+        SubmitResult::Existing(_) => panic!("expected a new operation"),
+    };
+    session.start_operation(&operation.operation_id).unwrap();
+    let worker = session.clone();
+    let operation_id = operation.operation_id.clone();
+    let join = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(20));
+        worker
+            .finish_operation(
+                &operation_id,
+                super::operations::OperationState::Succeeded,
+                Some(json!({"observation_id": "obs-1"})),
+                None,
+            )
+            .unwrap();
+    });
+    let control = ControlServer::start(session).unwrap();
+    let reply = control::request(
+        &control.registration,
+        "test.wait.get",
+        Command::OperationGet {
+            operation_id: operation.operation_id,
+            wait_ms: 1_000,
+        },
+    )
+    .unwrap();
+    join.join().unwrap();
+    assert_eq!(reply.result.unwrap()["state"], "succeeded");
+}
+
+#[test]
 fn observe_submission_is_version_bound_and_fails_without_a_capture_provider() {
     let project = tempfile::tempdir().unwrap();
     fs::write(project.path().join("main.rs"), "fn main() {}").unwrap();
@@ -160,7 +207,10 @@ fn observe_submission_is_version_bound_and_fails_without_a_capture_provider() {
     let completed = control::request(
         &control.registration,
         "test.observe.get",
-        Command::OperationGet { operation_id },
+        Command::OperationGet {
+            operation_id,
+            wait_ms: 0,
+        },
     )
     .unwrap()
     .result

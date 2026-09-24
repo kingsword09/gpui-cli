@@ -48,6 +48,8 @@ pub enum Command {
     },
     OperationGet {
         operation_id: String,
+        #[serde(default)]
+        wait_ms: u64,
     },
     OperationCancel {
         operation_id: String,
@@ -363,9 +365,23 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
             };
             serde_json::to_value(snapshot).expect("serializable operation snapshot")
         }
-        Command::OperationGet { operation_id } => {
+        Command::OperationGet {
+            operation_id,
+            wait_ms,
+        } => {
+            if wait_ms > MAX_WAIT_MS {
+                return operation_error_reply(
+                    session,
+                    &request_id,
+                    OperationError::with_details(
+                        "invalid_wait",
+                        "operation wait exceeds the maximum allowed duration",
+                        json!({"max_ms": MAX_WAIT_MS}),
+                    ),
+                );
+            }
             session.expire_operations();
-            let snapshot = match session.operations.get(&operation_id, now_ms()) {
+            let snapshot = match session.wait_operation(&operation_id, wait_ms) {
                 Ok(snapshot) => snapshot,
                 Err(error) => return operation_error_reply(session, &request_id, error),
             };
@@ -464,8 +480,9 @@ pub fn request(registration: &Registration, request_id: &str, command: Command) 
     }
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, registration.port));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
-    let timeout = match command {
-        Command::Events { timeout_ms, .. } => timeout_ms,
+    let timeout = match &command {
+        Command::Events { timeout_ms, .. } => *timeout_ms,
+        Command::OperationGet { wait_ms, .. } => *wait_ms,
         _ => 0,
     };
     stream.set_read_timeout(Some(Duration::from_millis(timeout + 3000)))?;

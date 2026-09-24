@@ -863,6 +863,16 @@ impl Session {
         Ok(transition)
     }
 
+    pub fn wait_operation(
+        &self,
+        operation_id: &str,
+        wait_ms: u64,
+    ) -> Result<OperationSnapshot, OperationError> {
+        let _ = self.operations.wait(operation_id, wait_ms)?;
+        self.expire_operations();
+        self.operations.get(operation_id, events::now_ms())
+    }
+
     pub fn cancel_operation(&self, operation_id: &str) -> Result<Transition, OperationError> {
         self.expire_operations();
         let transition = self.operations.cancel(operation_id, events::now_ms())?;

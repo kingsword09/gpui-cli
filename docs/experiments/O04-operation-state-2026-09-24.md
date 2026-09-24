@@ -11,12 +11,15 @@
 - operation 有总 deadline 上限，过期工作进入 `timed_out`；
 - request_id 按 kind、scope 和规范化 target 做幂等去重，参数变化返回
   `idempotency_conflict`；查询记录淘汰后仍保留有界 request tombstone，不能静默重放；
-- `gpui dev operation get/cancel` 使用已有 control 身份和 session 绑定；
+- `gpui dev operation get/cancel` 使用已有 control 身份和 session 绑定；`operation get`
+  支持有界 `--wait`，服务端通过 Condvar 等待终态或 operation deadline，不让 CLI
+  以固定短间隔忙轮询；
 - queued、started、finished 变更写入有序事件日志，取消和迟到完成均有测试证据。
 
 ## 证据
 
 - 纯状态机测试覆盖生命周期、deadline、幂等冲突、取消竞争、历史淘汰和活动工作保留；
+- 长轮询测试覆盖运行中 operation 在终态转换后唤醒查询；
 - control 集成测试覆盖查询、取消、终态稳定性及 operation 事件；
 - workspace 测试、clippy、格式和设计文档检查通过。
 
