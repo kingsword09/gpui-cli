@@ -400,7 +400,28 @@ impl Drop for DevServer {
 }
 
 fn heartbeat_loop(shared: &Arc<Shared>) {
+    let mut last_artifact_gc = Instant::now();
     while !shared.shutdown.load(Ordering::SeqCst) {
+        if last_artifact_gc.elapsed() >= Duration::from_secs(60) {
+            if let Some(session) = &shared.session {
+                let scope = shared.current_scope().unwrap_or_default();
+                match session.artifacts.expire(now_ms()) {
+                    Ok(expired) if !expired.is_empty() => session.emit(
+                        Kind::ArtifactExpired,
+                        &scope,
+                        json!({"artifact_ids": expired.iter().take(128).collect::<Vec<_>>(),
+                            "count": expired.len()}),
+                    ),
+                    Ok(_) => {}
+                    Err(error) => session.emit(
+                        Kind::ArtifactRejected,
+                        &scope,
+                        json!({"stage": "expiration", "error": clip(&error.to_string(), 512)}),
+                    ),
+                }
+            }
+            last_artifact_gc = Instant::now();
+        }
         if let Some(scope) = shared.current_scope() {
             let tick = shared.windows.tick(scope.run_id.as_deref(), Instant::now());
             for timeout in tick.timeouts {
@@ -878,6 +899,213 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                         shared.changed.notify_all();
                     }
                 }
+                ClientMessage::ArtifactBegin { mut manifest } => {
+                    let artifact_id = manifest.artifact_id.clone();
+                    let transfer_id = manifest.transfer_id.clone();
+                    let kind = manifest.kind.clone();
+                    let declared_bytes = manifest.declared_bytes;
+                    let sha256 = manifest.sha256.clone();
+                    let result = if manifest.run_id.is_some() && manifest.run_id != scope.run_id {
+                        Err(super::artifacts::ArtifactError {
+                            code: super::artifacts::ArtifactErrorCode::TransferMismatch,
+                            message: "artifact run_id does not match the connected run".into(),
+                        })
+                    } else if let Some(session) = &shared.session {
+                        manifest.run_id = scope.run_id.clone();
+                        session
+                            .artifacts
+                            .begin(manifest)
+                            .map(|info| (info.status, info.received_bytes))
+                    } else {
+                        Err(super::artifacts::ArtifactError {
+                            code: super::artifacts::ArtifactErrorCode::InvalidState,
+                            message: "artifact storage is unavailable".into(),
+                        })
+                    };
+                    let (status, offset, error) = match result {
+                        Ok((status, offset)) => {
+                            shared.emit(
+                                Kind::ArtifactDeclared,
+                                &scope,
+                                json!({"artifact_id": artifact_id, "transfer_id": transfer_id,
+                                    "kind": kind, "declared_bytes": declared_bytes, "sha256": sha256,
+                                    "received_bytes": offset}),
+                            );
+                            (format!("{status:?}").to_ascii_lowercase(), offset, None)
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            shared.emit(
+                                Kind::ArtifactRejected,
+                                &scope,
+                                json!({"artifact_id": artifact_id,
+                                    "transfer_id": transfer_id, "stage": "begin",
+                                    "error": clip(&message, 512)}),
+                            );
+                            ("rejected".into(), 0, Some(message))
+                        }
+                    };
+                    let _ = shared.send_to(
+                        id,
+                        &ServerMessage::ArtifactAck {
+                            artifact_id,
+                            transfer_id,
+                            status,
+                            offset,
+                            accepted: error.is_none(),
+                            error,
+                        },
+                    );
+                }
+                ClientMessage::ArtifactChunk {
+                    artifact_id,
+                    transfer_id,
+                    offset,
+                    data,
+                } => {
+                    let result = shared.session.as_ref().map_or_else(
+                        || {
+                            Err(super::artifacts::ArtifactError {
+                                code: super::artifacts::ArtifactErrorCode::InvalidState,
+                                message: "artifact storage is unavailable".into(),
+                            })
+                        },
+                        |session| {
+                            let bytes = protocol::b64::decode(&data).ok_or_else(|| {
+                                super::artifacts::ArtifactError {
+                                    code: super::artifacts::ArtifactErrorCode::InvalidRequest,
+                                    message: "artifact chunk is not valid base64".into(),
+                                }
+                            })?;
+                            session.artifacts.write_chunk(
+                                &artifact_id,
+                                &transfer_id,
+                                offset,
+                                &bytes,
+                            )
+                        },
+                    );
+                    let (status, next_offset, error) = match result {
+                        Ok(next_offset) => ("receiving".into(), next_offset, None),
+                        Err(error) => {
+                            let message = error.to_string();
+                            shared.emit(
+                                Kind::ArtifactRejected,
+                                &scope,
+                                json!({"artifact_id": artifact_id,
+                                    "transfer_id": transfer_id, "stage": "chunk",
+                                    "offset": offset, "error": clip(&message, 512)}),
+                            );
+                            ("rejected".into(), offset, Some(message))
+                        }
+                    };
+                    let _ = shared.send_to(
+                        id,
+                        &ServerMessage::ArtifactAck {
+                            artifact_id,
+                            transfer_id,
+                            status,
+                            offset: next_offset,
+                            accepted: error.is_none(),
+                            error,
+                        },
+                    );
+                }
+                ClientMessage::ArtifactEnd {
+                    artifact_id,
+                    transfer_id,
+                } => {
+                    let span = shared.session.as_ref().map(|session| {
+                        session.start_span(
+                            "artifact.publish",
+                            &scope,
+                            None,
+                            json!({"artifact_id": artifact_id, "transfer_id": transfer_id}),
+                        )
+                    });
+                    let result = shared.session.as_ref().map_or_else(
+                        || {
+                            Err(super::artifacts::ArtifactError {
+                                code: super::artifacts::ArtifactErrorCode::InvalidState,
+                                message: "artifact storage is unavailable".into(),
+                            })
+                        },
+                        |session| session.artifacts.finish(&artifact_id, &transfer_id),
+                    );
+                    let (status, offset, error) = match result {
+                        Ok(info) => {
+                            if let Some(span) = &span {
+                                span.finish("ok", None);
+                            }
+                            shared.emit(
+                                Kind::ArtifactPublished,
+                                &scope,
+                                json!({"artifact_id": artifact_id,
+                                    "transfer_id": transfer_id, "kind": info.manifest.kind,
+                                    "bytes": info.manifest.declared_bytes,
+                                    "sha256": info.manifest.sha256,
+                                    "mime": info.manifest.mime}),
+                            );
+                            ("published".into(), info.received_bytes, None)
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            if let Some(span) = &span {
+                                span.finish("failed", Some(&message));
+                            }
+                            shared.emit(
+                                Kind::ArtifactRejected,
+                                &scope,
+                                json!({"artifact_id": artifact_id,
+                                    "transfer_id": transfer_id, "stage": "publish",
+                                    "error": clip(&message, 512)}),
+                            );
+                            ("rejected".into(), 0, Some(message))
+                        }
+                    };
+                    let _ = shared.send_to(
+                        id,
+                        &ServerMessage::ArtifactAck {
+                            artifact_id,
+                            transfer_id,
+                            status,
+                            offset,
+                            accepted: error.is_none(),
+                            error,
+                        },
+                    );
+                }
+                ClientMessage::ArtifactAbort {
+                    artifact_id,
+                    transfer_id,
+                    reason: _,
+                } => {
+                    let result = shared.session.as_ref().map_or_else(
+                        || {
+                            Err(super::artifacts::ArtifactError {
+                                code: super::artifacts::ArtifactErrorCode::InvalidState,
+                                message: "artifact storage is unavailable".into(),
+                            })
+                        },
+                        |session| session.artifacts.abort(&artifact_id, &transfer_id),
+                    );
+                    let error = result.err().map(|error| error.to_string());
+                    let _ = shared.send_to(
+                        id,
+                        &ServerMessage::ArtifactAck {
+                            artifact_id,
+                            transfer_id,
+                            status: if error.is_none() {
+                                "aborted".into()
+                            } else {
+                                "rejected".into()
+                            },
+                            offset: 0,
+                            accepted: error.is_none(),
+                            error,
+                        },
+                    );
+                }
                 ClientMessage::Hello { .. } => {}
             }
         }
@@ -901,6 +1129,8 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::devserver::artifacts::ArtifactStatus;
+    use sha2::{Digest, Sha256};
     use std::io::Read;
 
     fn connect(server: &DevServer, token: &str) -> (std::net::TcpStream, Vec<u8>) {
@@ -1066,6 +1296,89 @@ mod tests {
         stream.read_exact(&mut body).unwrap();
         let message: ServerMessage = protocol::decode(&body).unwrap();
         assert!(matches!(message, ServerMessage::AssetChanged { .. }));
+    }
+
+    #[test]
+    fn app_artifact_transfer_is_acknowledged_only_after_verified_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+        let server = DevServer::start_observed(session.clone()).unwrap();
+        let build = session.begin_build().unwrap();
+        let run = session.begin_run(&build);
+        let token = server.expect_run(run.clone()).unwrap();
+        let (mut socket, hello) = connect(&server, &token);
+        assert!(matches!(
+            protocol::decode::<ServerMessage>(&hello).unwrap(),
+            ServerMessage::HelloOk { .. }
+        ));
+
+        let bytes = b"hello artifact";
+        let digest = Sha256::digest(bytes);
+        send(
+            &mut socket,
+            &ClientMessage::ArtifactBegin {
+                manifest: protocol::ArtifactManifest {
+                    artifact_id: "obs-1".into(),
+                    transfer_id: "tx-1".into(),
+                    run_id: run.run_id.clone(),
+                    kind: protocol::ArtifactKind::Blob,
+                    mime: "application/octet-stream".into(),
+                    declared_bytes: bytes.len() as u64,
+                    sha256: format!("sha256:{digest:x}"),
+                },
+            },
+        );
+        let ack: ServerMessage =
+            protocol::decode(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+        assert!(
+            matches!(ack, ServerMessage::ArtifactAck { status, accepted: true, offset: 0, .. } if status == "receiving")
+        );
+        assert_eq!(
+            session.artifacts.info("obs-1").unwrap().status,
+            ArtifactStatus::Receiving
+        );
+
+        for (offset, part) in [(0, &bytes[..5]), (5, &bytes[5..])] {
+            send(
+                &mut socket,
+                &ClientMessage::ArtifactChunk {
+                    artifact_id: "obs-1".into(),
+                    transfer_id: "tx-1".into(),
+                    offset,
+                    data: protocol::b64::encode(part),
+                },
+            );
+            let ack: ServerMessage =
+                protocol::decode(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+            assert!(matches!(
+                ack,
+                ServerMessage::ArtifactAck { accepted: true, .. }
+            ));
+        }
+        send(
+            &mut socket,
+            &ClientMessage::ArtifactEnd {
+                artifact_id: "obs-1".into(),
+                transfer_id: "tx-1".into(),
+            },
+        );
+        let ack: ServerMessage =
+            protocol::decode(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+        assert!(
+            matches!(ack, ServerMessage::ArtifactAck { status, accepted: true, .. } if status == "published")
+        );
+        assert_eq!(
+            session.artifacts.info("obs-1").unwrap().status,
+            ArtifactStatus::Published
+        );
+        assert_eq!(
+            session.artifacts.read_chunk("obs-1", 0, 128).unwrap().data,
+            bytes
+        );
+    }
+
+    fn send(socket: &mut std::net::TcpStream, message: &ClientMessage) {
+        protocol::write_frame(socket, &protocol::encode(message).unwrap()).unwrap();
     }
 
     #[test]

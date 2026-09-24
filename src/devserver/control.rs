@@ -1,5 +1,6 @@
 //! Authenticated read-only control connections, separate from app connections.
 
+use super::artifacts::{ArtifactError, ArtifactErrorCode};
 use super::events::{atomic_json, now_ms};
 use super::protocol;
 use super::session::{Session, random_token};
@@ -37,7 +38,22 @@ pub enum Command {
     Status,
     Diagnostics,
     Windows,
-    Events { after: u64, timeout_ms: u64 },
+    Events {
+        after: u64,
+        timeout_ms: u64,
+    },
+    ArtifactInfo {
+        artifact_id: String,
+    },
+    ArtifactRead {
+        artifact_id: String,
+        offset: u64,
+        length: u32,
+    },
+    ArtifactPin {
+        artifact_id: String,
+        pinned: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -110,6 +126,27 @@ fn reply_id(request_id: &str) -> &str {
 
 fn error_reply(session: &str, request_id: &str, error: ApiError) -> Reply {
     V2Envelope::failure(session, reply_id(request_id), error.into())
+}
+
+fn artifact_error_reply(session: &Session, request_id: &str, error: ArtifactError) -> Reply {
+    let retryable = matches!(
+        error.code,
+        ArtifactErrorCode::Busy | ArtifactErrorCode::QuotaExceeded
+    );
+    let mut details = None;
+    if error.code == ArtifactErrorCode::QuotaExceeded {
+        details = Some(json!({"retry_after_cleanup": true}));
+    }
+    V2Envelope::failure(
+        &session.id,
+        reply_id(request_id),
+        V2Error {
+            code: error.code.as_str().into(),
+            message: error.message,
+            details,
+            retryable,
+        },
+    )
 }
 
 fn success_reply(session: &str, request_id: &str, result: Value) -> Reply {
@@ -296,6 +333,43 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
                 .store
                 .events(after, Duration::from_millis(timeout_ms));
             serde_json::to_value(page).expect("serializable event page")
+        }
+        Command::ArtifactInfo { artifact_id } => {
+            let info = match session.artifacts.info(&artifact_id) {
+                Ok(info) => info,
+                Err(error) => return artifact_error_reply(session, &request_id, error),
+            };
+            serde_json::to_value(info).expect("serializable artifact info")
+        }
+        Command::ArtifactRead {
+            artifact_id,
+            offset,
+            length,
+        } => {
+            let chunk = match session
+                .artifacts
+                .read_chunk(&artifact_id, offset, length as usize)
+            {
+                Ok(chunk) => chunk,
+                Err(error) => return artifact_error_reply(session, &request_id, error),
+            };
+            json!({
+                "artifact_id": chunk.artifact_id,
+                "offset": chunk.offset,
+                "bytes": chunk.data.len(),
+                "eof": chunk.eof,
+                "data": protocol::b64::encode(&chunk.data),
+            })
+        }
+        Command::ArtifactPin {
+            artifact_id,
+            pinned,
+        } => {
+            let info = match session.artifacts.pin(&artifact_id, pinned) {
+                Ok(info) => info,
+                Err(error) => return artifact_error_reply(session, &request_id, error),
+            };
+            serde_json::to_value(info).expect("serializable artifact info")
         }
     };
     success_reply(&session.id, &request_id, result)

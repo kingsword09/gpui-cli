@@ -16,6 +16,29 @@ pub const PROTO_VERSION: u32 = 2;
 pub const MAX_FRAME_LEN: u32 = 1024 * 1024;
 /// Control API schema used by the planned v2 observation surface.
 pub const CONTROL_SCHEMA_VERSION: u32 = 2;
+/// Raw artifact bytes per transfer chunk. Base64 framing keeps the encoded
+/// message comfortably below the one-megabyte app-channel frame limit.
+pub const ARTIFACT_CHUNK_BYTES: usize = 128 * 1024;
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Png,
+    Tree,
+    Blob,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArtifactManifest {
+    pub artifact_id: String,
+    pub transfer_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub kind: ArtifactKind,
+    pub mime: String,
+    pub declared_bytes: u64,
+    pub sha256: String,
+}
 
 #[derive(Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -99,6 +122,25 @@ pub enum ClientMessage {
         stale: Vec<String>,
         removed: Vec<String>,
     },
+    ArtifactBegin {
+        manifest: ArtifactManifest,
+    },
+    ArtifactChunk {
+        artifact_id: String,
+        transfer_id: String,
+        offset: u64,
+        data: String,
+    },
+    ArtifactEnd {
+        artifact_id: String,
+        transfer_id: String,
+    },
+    ArtifactAbort {
+        artifact_id: String,
+        transfer_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -149,6 +191,34 @@ pub enum ServerMessage {
     ProbeUi {
         request_id: String,
         window_id: String,
+    },
+    ArtifactBegin {
+        manifest: ArtifactManifest,
+    },
+    ArtifactChunk {
+        artifact_id: String,
+        transfer_id: String,
+        offset: u64,
+        data: String,
+    },
+    ArtifactEnd {
+        artifact_id: String,
+        transfer_id: String,
+    },
+    ArtifactAbort {
+        artifact_id: String,
+        transfer_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    ArtifactAck {
+        artifact_id: String,
+        transfer_id: String,
+        status: String,
+        offset: u64,
+        accepted: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 
@@ -445,6 +515,49 @@ mod tests {
         assert_eq!(
             decode::<ServerMessage>(&encode(&commit).unwrap()).unwrap(),
             commit
+        );
+    }
+
+    #[test]
+    fn artifact_transfer_messages_roundtrip_with_bounded_chunk_contract() {
+        assert_eq!(ARTIFACT_CHUNK_BYTES, 128 * 1024);
+        let manifest = ArtifactManifest {
+            artifact_id: "obs-1".into(),
+            transfer_id: "tx-1".into(),
+            run_id: Some("r1".into()),
+            kind: ArtifactKind::Tree,
+            mime: "application/json".into(),
+            declared_bytes: 5,
+            sha256: format!("sha256:{}", "0".repeat(64)),
+        };
+        let begin = ClientMessage::ArtifactBegin {
+            manifest: manifest.clone(),
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&begin).unwrap()).unwrap(),
+            begin
+        );
+        let chunk = ClientMessage::ArtifactChunk {
+            artifact_id: "obs-1".into(),
+            transfer_id: "tx-1".into(),
+            offset: 0,
+            data: "eyJ4IjoxfQ==".into(),
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&chunk).unwrap()).unwrap(),
+            chunk
+        );
+        let ack = ServerMessage::ArtifactAck {
+            artifact_id: "obs-1".into(),
+            transfer_id: "tx-1".into(),
+            status: "published".into(),
+            offset: 5,
+            accepted: true,
+            error: None,
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&ack).unwrap()).unwrap(),
+            ack
         );
     }
 }
