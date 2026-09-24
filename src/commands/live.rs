@@ -804,6 +804,7 @@ fn run_cycles(
                 Event::Change | Event::Assets(_) => {}
             }
         }
+        again |= channel.live.take_build_request().is_some();
         if quit {
             return Ok(true);
         }
@@ -1354,6 +1355,18 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         &mut last_failed,
     )?;
     while !quit && !session.stopping.load(Ordering::SeqCst) {
+        if session.take_build_request().is_some() {
+            quit = run_cycles(
+                project,
+                &plan,
+                &mut channel,
+                &server,
+                &mut child,
+                &rx,
+                &mut last_failed,
+            )?;
+            continue;
+        }
         if drain_asset_reconciliations(project, &plan, &server, &session) {
             quit = run_cycles(
                 project,

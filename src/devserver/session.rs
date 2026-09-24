@@ -24,8 +24,21 @@ pub struct Session {
     pub timing: Arc<Timing>,
     pub windows: Arc<WindowRegistry>,
     pub artifacts: Arc<ArtifactStore>,
+    build_requests: Mutex<Option<BuildRequest>>,
     next_build: AtomicU64,
     next_run: AtomicU64,
+}
+
+#[derive(Clone, Debug)]
+pub struct BuildRequest {
+    pub request_id: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BuildRequestResult {
+    pub accepted: bool,
+    pub coalesced: bool,
+    pub queue_depth: usize,
 }
 
 pub struct Build {
@@ -88,6 +101,7 @@ impl Session {
             timing,
             windows: Arc::new(WindowRegistry::default()),
             artifacts,
+            build_requests: Mutex::new(None),
             dir,
             stopping: AtomicBool::new(false),
             inputs: Mutex::new(Inputs::default()),
@@ -104,6 +118,52 @@ impl Session {
         session.emit(Kind::SessionStarted, &Scope::default(), json!({}));
         session.sync_inputs()?;
         Ok(session)
+    }
+
+    /// Enqueues a supervisor-owned build trigger. There is intentionally only
+    /// one pending trigger: edits and explicit requests that arrive together
+    /// must share the next build rather than creating an unbounded queue.
+    pub fn request_build(&self, request_id: &str) -> BuildRequestResult {
+        let mut pending = self
+            .build_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let coalesced = pending.is_some();
+        if pending.is_none() {
+            *pending = Some(BuildRequest {
+                request_id: request_id.to_owned(),
+            });
+        }
+        let queue_depth = usize::from(pending.is_some());
+        let scope = Scope {
+            revision: self.store.state().desired,
+            ..Scope::default()
+        };
+        self.emit(
+            Kind::BuildRequested,
+            &scope,
+            json!({
+                "request_id": request_id,
+                "accepted": true,
+                "coalesced": coalesced,
+                "queue_depth": queue_depth,
+            }),
+        );
+        BuildRequestResult {
+            accepted: true,
+            coalesced,
+            queue_depth,
+        }
+    }
+
+    /// Takes the current explicit build trigger for the live coordinator.
+    /// Watcher changes can still coalesce into the same cycle through its
+    /// existing event channel.
+    pub fn take_build_request(&self) -> Option<BuildRequest> {
+        self.build_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     pub fn emit(&self, kind: Kind, scope: &Scope, data: Value) {

@@ -52,6 +52,27 @@ fn registration_advertises_current_control_schema() {
 }
 
 #[test]
+fn control_build_request_is_queued_for_the_live_coordinator() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("main.rs"), "fn main() {}").unwrap();
+    let session = Session::start(project.path(), "test", "desktop:test").unwrap();
+    let control = ControlServer::start(session.clone()).unwrap();
+
+    let reply = control::request(&control.registration, "test.build", Command::Build).unwrap();
+    assert!(reply.ok);
+    let result = reply.result.unwrap();
+    assert_eq!(result["accepted"], true);
+    assert_eq!(result["coalesced"], false);
+    let second = control::request(&control.registration, "test.build.2", Command::Build).unwrap();
+    let second_result = second.result.unwrap();
+    assert_eq!(second_result["accepted"], true);
+    assert_eq!(second_result["coalesced"], true);
+    assert_eq!(second_result["queue_depth"], 1);
+    assert!(session.take_build_request().is_some());
+    assert!(session.take_build_request().is_none());
+}
+
+#[test]
 fn current_app_channel_routes_window_and_ui_probe_events() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();

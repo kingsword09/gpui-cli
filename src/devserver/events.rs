@@ -41,6 +41,8 @@ pub enum Kind {
     SessionEnded,
     #[serde(rename = "source.changed")]
     SourceChanged,
+    #[serde(rename = "build.requested")]
+    BuildRequested,
     #[serde(rename = "build.started")]
     BuildStarted,
     #[serde(rename = "build.finished")]
