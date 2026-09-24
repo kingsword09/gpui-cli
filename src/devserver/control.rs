@@ -2,6 +2,7 @@
 
 use super::artifacts::{ArtifactError, ArtifactErrorCode};
 use super::events::{atomic_json, now_ms};
+use super::operations::OperationError;
 use super::protocol;
 use super::session::{Session, random_token};
 use anyhow::{Context, Result, bail};
@@ -39,6 +40,12 @@ pub enum Command {
     Diagnostics,
     Windows,
     Build,
+    OperationGet {
+        operation_id: String,
+    },
+    OperationCancel {
+        operation_id: String,
+    },
     Events {
         after: u64,
         timeout_ms: u64,
@@ -146,6 +153,18 @@ fn artifact_error_reply(session: &Session, request_id: &str, error: ArtifactErro
             message: error.message,
             details,
             retryable,
+        },
+    )
+}
+
+fn operation_error_reply(session: &Session, request_id: &str, error: OperationError) -> Reply {
+    error_reply(
+        &session.id,
+        request_id,
+        ApiError {
+            code: error.code,
+            message: error.message,
+            details: error.details,
         },
     )
 }
@@ -321,6 +340,22 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
         }
         Command::Build => serde_json::to_value(session.request_build(&request_id))
             .expect("serializable build request result"),
+        Command::OperationGet { operation_id } => {
+            session.expire_operations();
+            let snapshot = match session.operations.get(&operation_id, now_ms()) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return operation_error_reply(session, &request_id, error),
+            };
+            serde_json::to_value(snapshot).expect("serializable operation snapshot")
+        }
+        Command::OperationCancel { operation_id } => {
+            session.expire_operations();
+            let transition = match session.cancel_operation(&operation_id) {
+                Ok(transition) => transition,
+                Err(error) => return operation_error_reply(session, &request_id, error),
+            };
+            serde_json::to_value(transition.snapshot).expect("serializable operation snapshot")
+        }
         Command::Events { after, timeout_ms } => {
             if timeout_ms > MAX_WAIT_MS || after > session.store.state().seq {
                 return error_reply(

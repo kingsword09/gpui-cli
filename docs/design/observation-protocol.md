@@ -1,7 +1,8 @@
 # 设计契约：版本绑定的 UI 观察协议
 
 状态：O01 窗口注册/UI heartbeat、O02 资源 ACK、O03 有界产物库、scene_completed
-事件和 supervisor build request 已实现；截图、语义和 observe 编排仍拟议。基线：`6d091b6`。
+事件、supervisor build request 和有界 operation 状态机已实现；截图、语义和
+observe 编排仍拟议。基线：`6d091b6`。
 任务：F02、O01–O06、A01。
 上位文档：[总路线](../ROADMAP-agent-native-development.md)。
 

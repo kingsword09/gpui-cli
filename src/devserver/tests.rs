@@ -1,6 +1,7 @@
 use super::DevServer;
 use super::control::{self, Command, ControlServer};
 use super::events::{Kind, RollingFile, Scope};
+use super::operations::SubmitResult;
 use super::protocol::{self, ClientMessage, ServerMessage};
 use super::session::Session;
 use serde_json::{Value, json};
@@ -70,6 +71,65 @@ fn control_build_request_is_queued_for_the_live_coordinator() {
     assert_eq!(second_result["queue_depth"], 1);
     assert!(session.take_build_request().is_some());
     assert!(session.take_build_request().is_none());
+}
+
+#[test]
+fn operation_get_and_cancel_preserve_terminal_state() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("main.rs"), "fn main() {}").unwrap();
+    let session = Session::start(project.path(), "test", "desktop:test").unwrap();
+    let operation = match session
+        .submit_operation(
+            "test.observe",
+            "observe",
+            Scope::default(),
+            json!({"window_id": "main"}),
+            super::events::now_ms() + 10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot,
+        SubmitResult::Existing(_) => panic!("expected a new operation"),
+    };
+    let control = ControlServer::start(session.clone()).unwrap();
+
+    let get = control::request(
+        &control.registration,
+        "test.operation.get",
+        Command::OperationGet {
+            operation_id: operation.operation_id.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(get.result.unwrap()["state"], "queued");
+
+    let cancel = control::request(
+        &control.registration,
+        "test.operation.cancel",
+        Command::OperationCancel {
+            operation_id: operation.operation_id.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(cancel.result.unwrap()["state"], "cancelled");
+
+    let late_cancel = session.cancel_operation(&operation.operation_id).unwrap();
+    assert!(!late_cancel.changed);
+    assert_eq!(
+        late_cancel.snapshot.state,
+        super::operations::OperationState::Cancelled
+    );
+    let events = session.store.events(0, Duration::ZERO).events;
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == Kind::OperationQueued)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == Kind::OperationFinished)
+    );
 }
 
 #[test]

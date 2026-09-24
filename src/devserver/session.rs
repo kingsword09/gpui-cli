@@ -3,6 +3,10 @@
 use super::artifacts::{ArtifactLimits, ArtifactStore};
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
 use super::inputs::{AssetDelta, Inputs};
+use super::operations::{
+    MAX_ACTIVE_OPERATIONS, OperationError, OperationSnapshot, OperationState, OperationStore,
+    SubmitResult, Transition,
+};
 use super::protocol::AssetManifestEntry;
 use super::timing::{SpanGuard, Timing};
 use super::windows::WindowRegistry;
@@ -24,6 +28,7 @@ pub struct Session {
     pub timing: Arc<Timing>,
     pub windows: Arc<WindowRegistry>,
     pub artifacts: Arc<ArtifactStore>,
+    pub operations: Arc<OperationStore>,
     build_requests: Mutex<Option<BuildRequest>>,
     next_build: AtomicU64,
     next_run: AtomicU64,
@@ -101,6 +106,7 @@ impl Session {
             timing,
             windows: Arc::new(WindowRegistry::default()),
             artifacts,
+            operations: Arc::new(OperationStore::new(MAX_ACTIVE_OPERATIONS)),
             build_requests: Mutex::new(None),
             dir,
             stopping: AtomicBool::new(false),
@@ -118,6 +124,75 @@ impl Session {
         session.emit(Kind::SessionStarted, &Scope::default(), json!({}));
         session.sync_inputs()?;
         Ok(session)
+    }
+
+    pub fn submit_operation(
+        &self,
+        request_id: &str,
+        kind: &str,
+        scope: Scope,
+        target: Value,
+        deadline_at_ms: u64,
+    ) -> Result<SubmitResult, OperationError> {
+        let result = self.operations.submit(
+            request_id,
+            kind,
+            scope,
+            target,
+            deadline_at_ms,
+            events::now_ms(),
+        )?;
+        if let SubmitResult::Created(snapshot) = &result {
+            self.emit_operation(Kind::OperationQueued, snapshot);
+        }
+        Ok(result)
+    }
+
+    pub fn start_operation(&self, operation_id: &str) -> Result<Transition, OperationError> {
+        self.expire_operations();
+        let transition = self.operations.start(operation_id, events::now_ms())?;
+        if transition.changed {
+            self.emit_operation(Kind::OperationStarted, &transition.snapshot);
+        }
+        Ok(transition)
+    }
+
+    pub fn finish_operation(
+        &self,
+        operation_id: &str,
+        state: OperationState,
+        result: Option<Value>,
+        error: Option<OperationError>,
+    ) -> Result<Transition, OperationError> {
+        self.expire_operations();
+        let transition =
+            self.operations
+                .finish(operation_id, state, result, error, events::now_ms())?;
+        if transition.changed {
+            self.emit_operation(Kind::OperationFinished, &transition.snapshot);
+        }
+        Ok(transition)
+    }
+
+    pub fn cancel_operation(&self, operation_id: &str) -> Result<Transition, OperationError> {
+        self.expire_operations();
+        let transition = self.operations.cancel(operation_id, events::now_ms())?;
+        if transition.changed {
+            self.emit_operation(Kind::OperationFinished, &transition.snapshot);
+        }
+        Ok(transition)
+    }
+
+    pub fn expire_operations(&self) -> Vec<OperationSnapshot> {
+        let expired = self.operations.expire_due(events::now_ms());
+        for snapshot in &expired {
+            self.emit_operation(Kind::OperationFinished, snapshot);
+        }
+        expired
+    }
+
+    fn emit_operation(&self, kind: Kind, snapshot: &OperationSnapshot) {
+        self.emit(kind, &snapshot.scope, json!({"operation": snapshot}));
     }
 
     /// Enqueues a supervisor-owned build trigger. There is intentionally only

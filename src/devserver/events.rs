@@ -43,6 +43,12 @@ pub enum Kind {
     SourceChanged,
     #[serde(rename = "build.requested")]
     BuildRequested,
+    #[serde(rename = "operation.queued")]
+    OperationQueued,
+    #[serde(rename = "operation.started")]
+    OperationStarted,
+    #[serde(rename = "operation.finished")]
+    OperationFinished,
     #[serde(rename = "build.started")]
     BuildStarted,
     #[serde(rename = "build.finished")]
