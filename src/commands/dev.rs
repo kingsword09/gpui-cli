@@ -77,7 +77,12 @@ pub enum DevCommand {
 #[derive(Subcommand)]
 pub enum OperationCommand {
     /// Read one operation snapshot
-    Get { operation_id: String },
+    Get {
+        operation_id: String,
+        /// Wait for a terminal transition or until this bounded duration elapses
+        #[arg(long, default_value = "0", value_parser = parse_timeout)]
+        wait: u64,
+    },
     /// Cancel a queued or running operation
     Cancel { operation_id: String },
 }
@@ -364,10 +369,17 @@ fn execute_observe(
     })?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
+        let remaining_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+            .min(control::MAX_WAIT_MS);
         let current = operation_request(
             registration,
             Command::OperationGet {
                 operation_id: operation_id.to_owned(),
+                wait_ms: remaining_ms,
             },
         )?;
         let state = current["state"].as_str().unwrap_or("unknown");
@@ -405,8 +417,9 @@ fn execute_operation(
     command: &OperationCommand,
 ) -> std::result::Result<serde_json::Value, ApiError> {
     let request = match command {
-        OperationCommand::Get { operation_id } => Command::OperationGet {
+        OperationCommand::Get { operation_id, wait } => Command::OperationGet {
             operation_id: operation_id.clone(),
+            wait_ms: *wait,
         },
         OperationCommand::Cancel { operation_id } => Command::OperationCancel {
             operation_id: operation_id.clone(),

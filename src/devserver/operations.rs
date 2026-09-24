@@ -4,13 +4,14 @@
 //! queryable state machine around it, so control requests never need to hold a
 //! build, app-channel, or artifact lock while waiting.
 
-use super::events::Scope;
+use super::events::{self, Scope};
 use gpui_dev_protocol::valid_request_id;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 pub const MAX_ACTIVE_OPERATIONS: usize = 4;
 pub const MAX_RETAINED_OPERATIONS: usize = 2048;
@@ -301,6 +302,44 @@ impl OperationStore {
             .ok_or_else(|| {
                 OperationError::new("operation_expired", "operation is unknown or expired")
             })
+    }
+
+    /// Waits for a terminal transition or until the caller's bounded wait
+    /// expires. The operation deadline is also an upper bound, but expiration
+    /// is applied by the session wrapper so it can emit the corresponding
+    /// operation.finished event exactly once.
+    pub fn wait(
+        &self,
+        operation_id: &str,
+        wait_ms: u64,
+    ) -> Result<OperationSnapshot, OperationError> {
+        validate_operation_id(operation_id)?;
+        let wait_until = Instant::now() + Duration::from_millis(wait_ms);
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        prune_locked(&mut inner, events::now_ms());
+        loop {
+            let record = inner.records.get(operation_id).ok_or_else(|| {
+                OperationError::new("operation_expired", "operation is unknown or expired")
+            })?;
+            let snapshot = record.snapshot.clone();
+            if snapshot.state.is_terminal() || wait_ms == 0 {
+                return Ok(snapshot);
+            }
+
+            let now_ms = events::now_ms();
+            let operation_remaining =
+                Duration::from_millis(snapshot.deadline_at_ms.saturating_sub(now_ms));
+            let wait_remaining = wait_until.saturating_duration_since(Instant::now());
+            let remaining = operation_remaining.min(wait_remaining);
+            if remaining.is_zero() {
+                return Ok(snapshot);
+            }
+            inner = self
+                .changed
+                .wait_timeout(inner, remaining)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
     }
 
     pub fn expire_due(&self, now_ms: u64) -> Vec<OperationSnapshot> {
@@ -623,6 +662,8 @@ fn canonicalize(value: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::devserver::events::Revision;
+    use std::sync::Arc;
+    use std::thread;
 
     fn scope() -> Scope {
         Scope {
@@ -733,6 +774,32 @@ mod tests {
             .unwrap();
         assert!(!late.changed);
         assert_eq!(late.snapshot.state, OperationState::Cancelled);
+    }
+
+    #[test]
+    fn wait_returns_when_a_running_operation_reaches_a_terminal_state() {
+        let store = Arc::new(OperationStore::new(4));
+        let queued = submit(&store, "req-1", events::now_ms());
+        store.start(&queued.operation_id, events::now_ms()).unwrap();
+        let worker = store.clone();
+        let operation_id = queued.operation_id.clone();
+        let join = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            worker
+                .finish(
+                    &operation_id,
+                    OperationState::Succeeded,
+                    Some(serde_json::json!({"ok": true})),
+                    None,
+                    events::now_ms(),
+                )
+                .unwrap();
+        });
+
+        let snapshot = store.wait(&queued.operation_id, 1_000).unwrap();
+        join.join().unwrap();
+        assert_eq!(snapshot.state, OperationState::Succeeded);
+        assert_eq!(snapshot.result.unwrap()["ok"], true);
     }
 
     #[test]
