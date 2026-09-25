@@ -97,9 +97,22 @@ pub struct UiProbeRequest {
     pub queued_at: std::time::Instant,
 }
 
+/// Semantics requests are accepted by the network thread but always executed
+/// by the foreground GPUI context.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticsReadRequest {
+    pub request_id: String,
+    pub window_id: String,
+    pub max_bytes: usize,
+}
+
 static UI_PROBES: Mutex<Vec<UiProbeRequest>> = Mutex::new(Vec::new());
+static SEMANTICS_READS: Mutex<Vec<SemanticsReadRequest>> = Mutex::new(Vec::new());
 static PENDING_CONTROL: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static REGISTERED_WINDOWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static REGISTERED_WINDOW_HANDLES: Mutex<BTreeMap<String, gpui::AnyWindowHandle>> =
+    Mutex::new(BTreeMap::new());
+const MAX_SEMANTICS_TREE_BYTES: usize = 256 * 1024;
 const PENDING_CONTROL_BOUND: usize = 16;
 
 /// Set by `dev_asset_source()`: only then does the hello advertise the
@@ -615,7 +628,59 @@ pub fn register_window(
     scale_milli: u32,
     foreground: bool,
 ) {
+    register_window_internal(
+        window_id,
+        title,
+        width,
+        height,
+        scale_milli,
+        foreground,
+        None,
+    );
+}
+
+/// Registers a window and retains its GPUI handle for UI-thread semantics
+/// reads. The handle is opaque to the network thread and is only used through
+/// `AnyWindowHandle::update` on the app context.
+pub fn register_window_with_handle(
+    window_id: &str,
+    title: &str,
+    width: u32,
+    height: u32,
+    scale_milli: u32,
+    foreground: bool,
+    handle: gpui::AnyWindowHandle,
+) {
+    register_window_internal(
+        window_id,
+        title,
+        width,
+        height,
+        scale_milli,
+        foreground,
+        Some(handle),
+    );
+}
+
+fn register_window_internal(
+    window_id: &str,
+    title: &str,
+    width: u32,
+    height: u32,
+    scale_milli: u32,
+    foreground: bool,
+    handle: Option<gpui::AnyWindowHandle>,
+) {
     remember_window(window_id);
+    let mut handles = REGISTERED_WINDOW_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(handle) = handle {
+        handles.insert(window_id.to_owned(), handle);
+    } else {
+        handles.remove(window_id);
+    }
+    drop(handles);
     queue_control(format!(
         "{{\"type\":\"window_registered\",\"window_id\":\"{}\",\"title\":\"{}\",\"width\":{},\"height\":{},\"scale_milli\":{},\"foreground\":{}}}",
         json_escape(window_id),
@@ -653,6 +718,11 @@ pub fn take_ui_probe_requests() -> Vec<UiProbeRequest> {
     std::mem::take(&mut UI_PROBES.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// Drains semantics requests for execution on the UI thread.
+pub fn take_semantics_read_requests() -> Vec<SemanticsReadRequest> {
+    std::mem::take(&mut SEMANTICS_READS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// Sends the result of a UI-thread probe back to the supervisor.
 pub fn respond_ui_probe(
     request_id: &str,
@@ -668,6 +738,107 @@ pub fn respond_ui_probe(
         json_escape(request_id),
         json_escape(window_id),
     ));
+}
+
+/// Reports one bounded semantics read. A tree is sent as an escaped JSON
+/// string so the app-channel envelope remains unambiguous and bounded.
+pub fn respond_semantics_read(
+    request_id: &str,
+    window_id: &str,
+    status: &str,
+    a11y_active: bool,
+    tree_json: Option<&str>,
+    reason: Option<&str>,
+    captured_at_ms: u64,
+) {
+    let tree = tree_json
+        .map(|tree| format!(",\"tree_json\":\"{}\"", json_escape(tree)))
+        .unwrap_or_default();
+    let reason = reason
+        .map(|reason| format!(",\"reason\":\"{}\"", json_escape(reason)))
+        .unwrap_or_default();
+    queue_control(format!(
+        "{{\"type\":\"semantics_result\",\"request_id\":\"{}\",\"window_id\":\"{}\",\"status\":\"{}\",\"a11y_active\":{a11y_active}{tree}{reason},\"captured_at_ms\":{captured_at_ms}}}",
+        json_escape(request_id),
+        json_escape(window_id),
+        json_escape(status),
+    ));
+}
+
+/// Executes a semantics query on the GPUI foreground context. No network or
+/// file I/O occurs inside the window callback; the immutable tree string is
+/// handed back to the channel writer after the short UI read completes.
+pub fn answer_semantics_read(cx: &mut gpui::App, request: SemanticsReadRequest) {
+    let captured_at_ms = now_ms();
+    let handle = REGISTERED_WINDOW_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&request.window_id)
+        .copied();
+    let Some(handle) = handle else {
+        respond_semantics_read(
+            &request.request_id,
+            &request.window_id,
+            "unavailable",
+            false,
+            None,
+            Some("window_handle_unavailable"),
+            captured_at_ms,
+        );
+        return;
+    };
+    let result = handle.update(cx, |_, window, _| {
+        let active = window.is_a11y_active();
+        let tree = active.then(|| window.debug_a11y_tree_json()).flatten();
+        (active, tree)
+    });
+    match result {
+        Ok((true, Some(tree))) if tree.len() <= request.max_bytes => respond_semantics_read(
+            &request.request_id,
+            &request.window_id,
+            "ready",
+            true,
+            Some(&tree),
+            None,
+            captured_at_ms,
+        ),
+        Ok((true, Some(_))) => respond_semantics_read(
+            &request.request_id,
+            &request.window_id,
+            "too_large",
+            true,
+            None,
+            Some("tree_exceeds_request_limit"),
+            captured_at_ms,
+        ),
+        Ok((false, _)) => respond_semantics_read(
+            &request.request_id,
+            &request.window_id,
+            "inactive",
+            false,
+            None,
+            Some("a11y_inactive"),
+            captured_at_ms,
+        ),
+        Ok((true, None)) => respond_semantics_read(
+            &request.request_id,
+            &request.window_id,
+            "unavailable",
+            true,
+            None,
+            Some("tree_unavailable"),
+            captured_at_ms,
+        ),
+        Err(_) => respond_semantics_read(
+            &request.request_id,
+            &request.window_id,
+            "unavailable",
+            false,
+            None,
+            Some("window_closed"),
+            captured_at_ms,
+        ),
+    }
 }
 
 /// Acknowledges an asset batch after the UI thread has invalidated its cache.
@@ -834,7 +1005,7 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
     };
 
     let hello = format!(
-        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\"{}]}}",
+        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\"{}]}}",
         json_escape(&config.token),
         json_escape(&config.project),
         std::process::id(),
@@ -1089,6 +1260,27 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                     queued_at: std::time::Instant::now(),
                 });
         }
+    } else if find_bytes(frame, b"\"semantics_query\"") {
+        if let (Some(request_id), Some(window_id)) = (
+            string_field(frame, "request_id"),
+            string_field(frame, "window_id"),
+        ) {
+            let max_bytes = number_field(frame, "max_bytes")
+                .unwrap_or(MAX_SEMANTICS_TREE_BYTES as u64)
+                .min(MAX_SEMANTICS_TREE_BYTES as u64) as usize;
+            let mut requests = SEMANTICS_READS.lock().unwrap_or_else(|e| e.into_inner());
+            if requests.len() < PENDING_CONTROL_BOUND {
+                requests.push(SemanticsReadRequest {
+                    request_id,
+                    window_id,
+                    max_bytes,
+                });
+            } else {
+                // A bounded queue is preferable to silently growing work on
+                // the UI thread. The supervisor deadline reports the missed
+                // request as unavailable if this queue is full.
+            }
+        }
     } else if find_bytes(frame, b"\"prepare_restart\"") {
         let Some(session) = string_field(frame, "session") else {
             return;
@@ -1228,9 +1420,19 @@ fn forget_window(window_id: &str) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|registered| registered != window_id);
+    REGISTERED_WINDOW_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(window_id);
 }
 
 // ── minimal JSON plumbing ────────────────────────────────────────────────────
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+}
 
 fn json_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -1864,6 +2066,27 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].request_id, "probe.1");
         assert_eq!(requests[0].window_id, "w-main");
+    }
+
+    #[test]
+    fn semantics_query_dispatch_queues_a_bounded_ui_thread_request() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        SEMANTICS_READS.lock().unwrap().clear();
+        dispatch(
+            br#"{"type":"semantics_query","request_id":"op-1","window_id":"w-main","max_bytes":9999999}"#,
+            &LiveConfig {
+                addr: String::new(),
+                token: String::new(),
+                project: String::new(),
+                session: None,
+                state_file: None,
+            },
+        );
+        let requests = take_semantics_read_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].request_id, "op-1");
+        assert_eq!(requests[0].window_id, "w-main");
+        assert_eq!(requests[0].max_bytes, MAX_SEMANTICS_TREE_BYTES);
     }
 
     #[test]

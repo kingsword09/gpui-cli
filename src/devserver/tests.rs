@@ -35,7 +35,7 @@ fn connect(server: &DevServer, token: &str) -> TcpStream {
             asset_reload: true,
             runtime_version: None,
             gpui_version: None,
-            capabilities: Vec::new(),
+            capabilities: vec!["semantics.read".into()],
         },
     );
     let reply: ServerMessage =
@@ -390,11 +390,152 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
             .is_some_and(|run| run.assets_confirmed)
     );
     assert_eq!(
+        session.store.state().capabilities["semantics.read"]["available"],
+        true
+    );
+    assert_eq!(
         session
             .windows
             .snapshots(Some(run.run_id.as_deref().unwrap()))[0]
             .scene_epoch,
         1
+    );
+}
+
+#[test]
+fn semantics_read_roundtrip_is_run_and_window_bound_and_publishes_tree_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    session.emit(Kind::AppStarted, &run, json!({"pid": std::process::id()}));
+    session.emit(Kind::AppConnected, &run, json!({"pid": std::process::id()}));
+    build.finish(true, None);
+    let token = server.expect_run(run.clone()).unwrap();
+    let mut socket = connect(&server, &token);
+
+    send(
+        &mut socket,
+        &ClientMessage::WindowRegistered {
+            window_id: "main".into(),
+            title: "Counter".into(),
+            width: 800,
+            height: 600,
+            scale_milli: 1000,
+            foreground: true,
+        },
+    );
+    wait_until(|| {
+        !session
+            .windows
+            .snapshots(Some(run.run_id.as_deref().unwrap()))
+            .is_empty()
+    });
+    let probe =
+        protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+    let (request_id, window_id) = match probe {
+        ServerMessage::ProbeUi {
+            request_id,
+            window_id,
+        } => (request_id, window_id),
+        other => panic!("expected heartbeat probe, got {other:?}"),
+    };
+    send(
+        &mut socket,
+        &ClientMessage::UiProbeResult {
+            request_id,
+            window_id,
+            responsive: true,
+            latency_ms: Some(1),
+        },
+    );
+    wait_until(|| {
+        session
+            .windows
+            .snapshots(Some(run.run_id.as_deref().unwrap()))
+            .first()
+            .is_some_and(|window| window.ui == "responsive")
+    });
+
+    let submitted = session
+        .submit_observe(
+            "test.observe.semantics",
+            false,
+            Some("main".into()),
+            vec!["semantics".into()],
+            10_000,
+        )
+        .unwrap();
+    let operation_id = match submitted {
+        SubmitResult::Created(snapshot) => snapshot.operation_id,
+        SubmitResult::Existing(_) => panic!("expected a new observe operation"),
+    };
+    session.advance_observe_requests();
+    let query =
+        protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+    assert!(matches!(
+        query,
+        ServerMessage::SemanticsQuery {
+            ref request_id,
+            ref window_id,
+            max_bytes: 262144,
+        } if request_id == &operation_id && window_id == "main"
+    ));
+    let tree = r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window"},"children":[]}}}"#;
+    send(
+        &mut socket,
+        &ClientMessage::SemanticsResult {
+            request_id: operation_id.clone(),
+            window_id: "main".into(),
+            status: "ready".into(),
+            a11y_active: true,
+            tree_json: Some(tree.into()),
+            reason: None,
+            captured_at_ms: 42,
+        },
+    );
+    wait_until(|| {
+        session
+            .store
+            .events(0, Duration::ZERO)
+            .events
+            .iter()
+            .any(|event| {
+                event.kind == Kind::SemanticsRead
+                    && event.data["request_id"] == operation_id
+                    && event.data["accepted"] == true
+            })
+    });
+    session.advance_observe_requests();
+    wait_until(|| {
+        session
+            .operations
+            .get(&operation_id, super::events::now_ms())
+            .is_ok_and(|operation| operation.state.is_terminal())
+    });
+    let operation = session
+        .operations
+        .get(&operation_id, super::events::now_ms())
+        .unwrap();
+    assert_eq!(
+        operation.state,
+        super::operations::OperationState::Succeeded
+    );
+    let result = operation.result.unwrap();
+    assert_eq!(result["semantics"]["provider"], "gpui-debug-a11y");
+    let artifact_id = result["semantics"]["artifact_id"].as_str().unwrap();
+    assert_eq!(
+        session.artifacts.info(artifact_id).unwrap().status,
+        super::artifacts::ArtifactStatus::Published
+    );
+    assert_eq!(
+        session
+            .artifacts
+            .read_chunk(artifact_id, 0, 1024)
+            .unwrap()
+            .data,
+        tree.as_bytes()
     );
 }
 

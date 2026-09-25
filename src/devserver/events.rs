@@ -99,6 +99,8 @@ pub enum Kind {
     WindowClosed,
     #[serde(rename = "ui.probe_result")]
     UiProbeResult,
+    #[serde(rename = "semantics.read")]
+    SemanticsRead,
     #[serde(rename = "scene.completed")]
     SceneCompleted,
     #[serde(rename = "artifact.declared")]
@@ -314,6 +316,7 @@ impl State {
             }
             Kind::AppStarting => {
                 self.windows.clear();
+                self.set_semantics_capability(false, Some("runtime_query_required"));
                 self.running = Some(RunState {
                     scope: event.scope.clone(),
                     pid: None,
@@ -486,6 +489,20 @@ impl State {
                         _ => {}
                     }
                 }
+                let current_run = self.running.as_ref().is_some_and(|run| {
+                    event.scope.run_id.is_some() && run.scope.run_id == event.scope.run_id
+                });
+                if current_run && event.kind == Kind::AppConnected {
+                    let supported = data["capabilities"].as_array().is_some_and(|capabilities| {
+                        capabilities.iter().any(|value| value == "semantics.read")
+                    });
+                    self.set_semantics_capability(
+                        supported,
+                        (!supported).then_some("runtime_unsupported"),
+                    );
+                } else if current_run && event.kind == Kind::AppDisconnected {
+                    self.set_semantics_capability(false, Some("app_channel_disconnected"));
+                }
                 if event.kind == Kind::AppExited
                     && data["success"] == false
                     && data["expected"] == false
@@ -536,6 +553,18 @@ impl State {
             }
             _ => {}
         }
+    }
+
+    fn set_semantics_capability(&mut self, available: bool, reason: Option<&str>) {
+        self.capabilities["semantics.read"] = json!({
+            "available": available,
+            "reason": reason,
+            "provider": "gpui-debug-a11y",
+            "constraints": {
+                "max_bytes": crate::devserver::windows::MAX_SEMANTICS_TREE_BYTES,
+                "max_nodes": crate::devserver::artifacts::MAX_TREE_NODES,
+            },
+        });
     }
 }
 

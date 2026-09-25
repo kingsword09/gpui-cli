@@ -6,12 +6,14 @@
 //! returned records use wall-clock milliseconds for persistence.
 
 use super::events::{Scope, WindowSnapshot};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub const PROBE_INTERVAL: Duration = Duration::from_secs(1);
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(3);
+pub const SEMANTICS_READ_DEADLINE: Duration = Duration::from_secs(5);
+const MAX_PENDING_SEMANTICS_REQUESTS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct WindowKey {
@@ -32,12 +34,22 @@ struct TrackedWindow {
     connection_id: u64,
     last_sent: Option<Instant>,
     in_flight: Option<ProbeFlight>,
+    semantics_in_flight: Option<SemanticsFlight>,
+}
+
+#[derive(Clone, Debug)]
+struct SemanticsFlight {
+    request_id: String,
+    connection_id: u64,
+    max_bytes: usize,
+    expires_at: Instant,
 }
 
 #[derive(Default)]
 struct Inner {
     windows: HashMap<WindowKey, TrackedWindow>,
     next_probe: u64,
+    semantics_requests: VecDeque<SemanticsRequest>,
 }
 
 /// Shared registry owned by a live session and used by both app/control
@@ -101,10 +113,39 @@ pub struct SceneResult {
     pub reason: Option<&'static str>,
 }
 
+pub const MAX_SEMANTICS_TREE_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticsRequest {
+    pub request_id: String,
+    pub window_id: String,
+    pub connection_id: u64,
+    pub max_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticsReadReply {
+    pub request_id: String,
+    pub window_id: String,
+    pub status: String,
+    pub a11y_active: bool,
+    pub tree_json: Option<String>,
+    pub reason: Option<String>,
+    pub captured_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticsResult {
+    pub accepted: bool,
+    pub reason: Option<&'static str>,
+    pub reply: Option<SemanticsReadReply>,
+}
+
 #[derive(Default)]
 pub struct HeartbeatTick {
     pub probes: Vec<ProbeRequest>,
     pub timeouts: Vec<ProbeTimeout>,
+    pub semantics_timeouts: Vec<SemanticsRequest>,
 }
 
 impl WindowRegistry {
@@ -113,6 +154,7 @@ impl WindowRegistry {
             run_id: scope.run_id.clone(),
             window_id: registration.window_id.clone(),
         };
+        let registered_window_id = registration.window_id.clone();
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.windows.insert(
             key,
@@ -141,8 +183,12 @@ impl WindowRegistry {
                 connection_id,
                 last_sent: None,
                 in_flight: None,
+                semantics_in_flight: None,
             },
         );
+        inner
+            .semantics_requests
+            .retain(|request| request.window_id != registered_window_id);
     }
 
     pub fn close(&self, scope: &Scope, window_id: &str, reason: Option<String>) {
@@ -156,6 +202,7 @@ impl WindowRegistry {
             window.snapshot.ui = "unavailable".into();
             window.snapshot.reason = reason;
             window.in_flight = None;
+            window.semantics_in_flight = None;
         }
     }
 
@@ -172,7 +219,168 @@ impl WindowRegistry {
             window.snapshot.ui = "unknown".into();
             window.snapshot.reason = Some("app_channel_disconnected".into());
             window.in_flight = None;
+            window.semantics_in_flight = None;
         }
+    }
+
+    /// Queues one bounded semantics read for a registered window. The request
+    /// is sent by the app-channel heartbeat worker, while the response is
+    /// accepted only from the connection that owned the window at request
+    /// time.
+    pub fn request_semantics(
+        &self,
+        scope: &Scope,
+        window_id: &str,
+        request_id: String,
+        max_bytes: usize,
+    ) -> Result<SemanticsRequest, &'static str> {
+        let key = WindowKey {
+            run_id: scope.run_id.clone(),
+            window_id: window_id.to_owned(),
+        };
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let active_semantics = inner
+            .windows
+            .values()
+            .filter(|window| window.semantics_in_flight.is_some())
+            .count();
+        if inner.semantics_requests.len() + active_semantics >= MAX_PENDING_SEMANTICS_REQUESTS {
+            return Err("semantics_busy");
+        }
+        let Some(window) = inner.windows.get_mut(&key) else {
+            return Err("unknown_window");
+        };
+        if window.snapshot.lifecycle != "open" {
+            return Err("window_closed");
+        }
+        if window.semantics_in_flight.is_some() {
+            return Err("semantics_busy");
+        }
+        let request = SemanticsRequest {
+            request_id,
+            window_id: window_id.to_owned(),
+            connection_id: window.connection_id,
+            max_bytes: max_bytes.min(MAX_SEMANTICS_TREE_BYTES),
+        };
+        window.semantics_in_flight = Some(SemanticsFlight {
+            request_id: request.request_id.clone(),
+            connection_id: request.connection_id,
+            max_bytes: request.max_bytes,
+            expires_at: Instant::now() + SEMANTICS_READ_DEADLINE,
+        });
+        inner.semantics_requests.push_back(request.clone());
+        Ok(request)
+    }
+
+    /// Takes requests for the current run. Requests left behind by an old run
+    /// or a replaced app connection are discarded before they can be sent.
+    pub fn take_semantics_requests(&self, run_id: Option<&str>) -> Vec<SemanticsRequest> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut requests = Vec::new();
+        while let Some(request) = inner.semantics_requests.pop_front() {
+            let key = WindowKey {
+                run_id: run_id.map(str::to_owned),
+                window_id: request.window_id.clone(),
+            };
+            let valid = inner.windows.get(&key).is_some_and(|window| {
+                window.connection_id == request.connection_id
+                    && window
+                        .semantics_in_flight
+                        .as_ref()
+                        .is_some_and(|flight| flight.request_id == request.request_id)
+            });
+            if valid {
+                requests.push(request);
+            }
+        }
+        requests
+    }
+
+    pub fn record_semantics_result(
+        &self,
+        scope: &Scope,
+        connection_id: u64,
+        mut reply: SemanticsReadReply,
+    ) -> SemanticsResult {
+        let key = WindowKey {
+            run_id: scope.run_id.clone(),
+            window_id: reply.window_id.clone(),
+        };
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(window) = inner.windows.get_mut(&key) else {
+            return SemanticsResult {
+                accepted: false,
+                reason: Some("unknown_window"),
+                reply: None,
+            };
+        };
+        let Some(flight) = &window.semantics_in_flight else {
+            return SemanticsResult {
+                accepted: false,
+                reason: Some("late_semantics"),
+                reply: None,
+            };
+        };
+        if flight.request_id != reply.request_id || flight.connection_id != connection_id {
+            return SemanticsResult {
+                accepted: false,
+                reason: Some("late_semantics"),
+                reply: None,
+            };
+        }
+        if window.snapshot.lifecycle != "open" {
+            return SemanticsResult {
+                accepted: false,
+                reason: Some("window_closed"),
+                reply: None,
+            };
+        }
+        if reply
+            .tree_json
+            .as_ref()
+            .is_some_and(|tree| tree.len() > flight.max_bytes)
+        {
+            reply.status = "too_large".into();
+            reply.a11y_active = true;
+            reply.tree_json = None;
+            reply.reason = Some("tree_exceeds_request_limit".into());
+        }
+        if reply.status == "ready" && (!reply.a11y_active || reply.tree_json.is_none()) {
+            reply.status = "unavailable".into();
+            reply.reason = Some("ready_result_missing_tree".into());
+            reply.tree_json = None;
+        }
+        window.semantics_in_flight = None;
+        SemanticsResult {
+            accepted: true,
+            reason: None,
+            reply: Some(reply),
+        }
+    }
+
+    /// Converts a delivery failure into a terminal unavailable response so an
+    /// observe operation cannot wait until its outer deadline for a request
+    /// that was never delivered.
+    pub fn fail_semantics_request(
+        &self,
+        scope: &Scope,
+        request: &SemanticsRequest,
+        reason: &str,
+        captured_at_ms: u64,
+    ) -> SemanticsResult {
+        self.record_semantics_result(
+            scope,
+            request.connection_id,
+            SemanticsReadReply {
+                request_id: request.request_id.clone(),
+                window_id: request.window_id.clone(),
+                status: "unavailable".into(),
+                a11y_active: false,
+                tree_json: None,
+                reason: Some(reason.into()),
+                captured_at_ms,
+            },
+        )
     }
 
     pub fn record_probe_result(&self, scope: &Scope, reply: ProbeReply) -> ProbeResult {
@@ -290,6 +498,16 @@ impl WindowRegistry {
                 && window.snapshot.foreground
                 && window.snapshot.run_id.as_deref() == run_id
         }) {
+            if let Some(flight) = &window.semantics_in_flight
+                && now >= flight.expires_at
+            {
+                tick.semantics_timeouts.push(SemanticsRequest {
+                    request_id: flight.request_id.clone(),
+                    window_id: window.snapshot.window_id.clone(),
+                    connection_id: flight.connection_id,
+                    max_bytes: flight.max_bytes,
+                });
+            }
             if let Some(flight) = &window.in_flight
                 && now.duration_since(flight.sent_at) >= PROBE_DEADLINE
             {
@@ -460,6 +678,65 @@ mod tests {
         let snapshot = registry.snapshots(Some("run-1")).pop().unwrap();
         assert_eq!(snapshot.scene_epoch, 3);
         assert_eq!(snapshot.scene_asset_revision, Some(9));
+    }
+
+    #[test]
+    fn semantics_reply_is_bound_to_the_window_connection_and_size_limit() {
+        let registry = WindowRegistry::default();
+        registry.register(
+            &scope(),
+            7,
+            WindowRegistration {
+                window_id: "main".into(),
+                title: "Counter".into(),
+                width: 800,
+                height: 600,
+                scale_milli: 1000,
+                foreground: true,
+                registered_at_ms: 10,
+            },
+        );
+        let request = registry
+            .request_semantics(&scope(), "main", "op-1".into(), 16)
+            .unwrap();
+        assert_eq!(
+            registry.take_semantics_requests(Some("run-1")),
+            vec![request]
+        );
+
+        let stale = registry.record_semantics_result(
+            &scope(),
+            8,
+            SemanticsReadReply {
+                request_id: "op-1".into(),
+                window_id: "main".into(),
+                status: "ready".into(),
+                a11y_active: true,
+                tree_json: Some("{}".into()),
+                reason: None,
+                captured_at_ms: 20,
+            },
+        );
+        assert_eq!(stale.reason, Some("late_semantics"));
+
+        let accepted = registry.record_semantics_result(
+            &scope(),
+            7,
+            SemanticsReadReply {
+                request_id: "op-1".into(),
+                window_id: "main".into(),
+                status: "ready".into(),
+                a11y_active: true,
+                tree_json: Some("0123456789abcdefg".into()),
+                reason: None,
+                captured_at_ms: 21,
+            },
+        );
+        assert_eq!(accepted.reason, None);
+        let reply = accepted.reply.unwrap();
+        assert_eq!(reply.status, "too_large");
+        assert_eq!(reply.reason.as_deref(), Some("tree_exceeds_request_limit"));
+        assert!(registry.take_semantics_requests(Some("run-1")).is_empty());
     }
 
     #[test]

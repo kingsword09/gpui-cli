@@ -32,13 +32,14 @@ fn main() {
         {{APP_LIB_NAME}}::pump_live_assets(cx);
 
         cx.open_window(WindowOptions::default(), |window, cx| {
-            {{APP_LIB_NAME}}::register_window(
+            {{APP_LIB_NAME}}::register_window_with_handle(
                 "main",
                 {{APP_TITLE_RUST}},
                 800,
                 600,
                 1000,
                 true,
+                window.window_handle(),
             );
             cx.on_app_quit(|_| async {
                 {{APP_LIB_NAME}}::close_window("main", Some("app_quit"));

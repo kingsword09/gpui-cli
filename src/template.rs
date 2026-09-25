@@ -278,13 +278,14 @@ fn open_main_window(cx: &mut App) {
     crate::pump_live_assets(cx);
 
     cx.open_window(WindowOptions::default(), |window, cx| {
-        crate::register_window(
+        crate::register_window_with_handle(
             "main",
             {{APP_TITLE_RUST}},
             800,
             600,
             1000,
             true,
+            window.window_handle(),
         );
         cx.on_app_quit(|_| async {
             crate::close_window("main", Some("app_quit"));
