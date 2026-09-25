@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -19,6 +19,7 @@ pub const MAX_TIMEOUT_MS: u64 = 120_000;
 pub const MAX_STEPS: usize = 200;
 pub const MAX_VIEWPORT: u32 = 8_192;
 pub const MAX_FIXTURE_BYTES: u64 = 16 * 1024 * 1024;
+pub const REGISTRY_SCHEMA_VERSION: u32 = 1;
 
 const DEFAULT_REQUIRES: &[&str] = &["screenshot", "semantics", "scenario.reset"];
 const ALLOWED_REQUIREMENTS: &[&str] = &[
@@ -51,6 +52,29 @@ const ALLOWED_ASSERTIONS: &[&str] = &[
 pub struct ScenarioFile {
     pub schema_version: u32,
     pub scenarios: Vec<ScenarioDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryManifest {
+    pub schema_version: u32,
+    pub components: Vec<RegistryComponent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryComponent {
+    pub name: String,
+    pub version: String,
+    pub fixture_schema: String,
+    #[serde(default)]
+    pub supports_reset: bool,
+    #[serde(default)]
+    pub ready_ids: Vec<String>,
+    #[serde(default)]
+    pub logical_ids: Vec<String>,
+    #[serde(default)]
+    pub environments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,7 +270,10 @@ fn hash_json<T: Serialize>(value: &T) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-fn load_registry(project_root: &Path, report: &mut ValidationReport) -> Option<BTreeSet<String>> {
+fn load_registry(
+    project_root: &Path,
+    report: &mut ValidationReport,
+) -> Option<BTreeMap<String, RegistryComponent>> {
     let path = project_root.join(".gpui/registry-manifest.json");
     let Ok(bytes) = fs::read(&path) else {
         report.warnings.push(Diagnostic {
@@ -256,8 +283,8 @@ fn load_registry(project_root: &Path, report: &mut ValidationReport) -> Option<B
         });
         return None;
     };
-    let value: Value = match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
+    let manifest: RegistryManifest = match serde_json::from_slice(&bytes) {
+        Ok(manifest) => manifest,
         Err(error) => {
             report.errors.push(Diagnostic {
                 path: "registry".into(),
@@ -267,27 +294,43 @@ fn load_registry(project_root: &Path, report: &mut ValidationReport) -> Option<B
             return None;
         }
     };
-    let Some(components) = value.get("components").and_then(Value::as_array) else {
+    if manifest.schema_version != REGISTRY_SCHEMA_VERSION {
         report.errors.push(Diagnostic {
-            path: "registry.components".into(),
-            message: "registry_invalid: components must be an array".into(),
+            path: "registry.schema_version".into(),
+            message: format!(
+                "registry_invalid: schema_version {}; expected {REGISTRY_SCHEMA_VERSION}",
+                manifest.schema_version
+            ),
             location: None,
         });
         return None;
-    };
-    let mut names = BTreeSet::new();
-    for (index, component) in components.iter().enumerate() {
-        let Some(name) = component.get("name").and_then(Value::as_str) else {
+    }
+    let mut components = BTreeMap::new();
+    for (index, component) in manifest.components.into_iter().enumerate() {
+        if component.name.trim().is_empty()
+            || component.version.trim().is_empty()
+            || component.fixture_schema.trim().is_empty()
+        {
             report.errors.push(Diagnostic {
                 path: format!("registry.components[{index}].name"),
-                message: "registry_invalid: component name must be a string".into(),
+                message: "registry_invalid: name, version and fixture_schema must be non-empty"
+                    .into(),
                 location: None,
             });
             continue;
-        };
-        names.insert(name.to_owned());
+        }
+        if components
+            .insert(component.name.clone(), component)
+            .is_some()
+        {
+            report.errors.push(Diagnostic {
+                path: format!("registry.components[{index}].name"),
+                message: "registry_invalid: duplicate component name".into(),
+                location: None,
+            });
+        }
     }
-    Some(names)
+    Some(components)
 }
 
 fn validate_file_model(
@@ -295,7 +338,7 @@ fn validate_file_model(
     source: &str,
     file: &Path,
     project_root: &Path,
-    registry: Option<&BTreeSet<String>>,
+    registry: Option<&BTreeMap<String, RegistryComponent>>,
     report: &mut ValidationReport,
 ) {
     if file_model.schema_version != SCHEMA_VERSION {
@@ -345,15 +388,42 @@ fn validate_file_model(
                 locate_marker(source, "component", &scenario.component),
             );
         }
-        if let Some(registry) = registry
-            && !registry.contains(&scenario.component)
-        {
-            error(
-                report,
-                &format!("{path}.component"),
-                format!("unknown component `{}` in registry", scenario.component),
-                locate_marker(source, "component", &scenario.component),
-            );
+        if let Some(registry) = registry {
+            if !registry.contains_key(&scenario.component) {
+                error(
+                    report,
+                    &format!("{path}.component"),
+                    format!("unknown component `{}` in registry", scenario.component),
+                    locate_marker(source, "component", &scenario.component),
+                );
+            } else if let Some(component) = registry.get(&scenario.component) {
+                if scenario
+                    .requires
+                    .iter()
+                    .any(|requirement| requirement == "scenario.reset")
+                    && !component.supports_reset
+                {
+                    error(
+                        report,
+                        &format!("{path}.requires"),
+                        "component registry does not advertise scenario.reset".into(),
+                        locate_field(source, "requires"),
+                    );
+                }
+                if let Some(ready_id) = &scenario.ready_id
+                    && !component
+                        .ready_ids
+                        .iter()
+                        .any(|candidate| candidate == ready_id)
+                {
+                    error(
+                        report,
+                        &format!("{path}.ready_id"),
+                        format!("ready_id `{ready_id}` is not declared by the component registry"),
+                        locate_field(source, "ready_id"),
+                    );
+                }
+            }
         }
         validate_timeout(
             scenario.timeout_ms,
@@ -491,7 +561,7 @@ fn validate_fixture(
     path: &str,
     file: &Path,
     project_root: &Path,
-    registry: Option<&BTreeSet<String>>,
+    registry: Option<&BTreeMap<String, RegistryComponent>>,
     source: &str,
     report: &mut ValidationReport,
 ) {
@@ -1239,5 +1309,56 @@ selector = { role = "button" }
                 .any(|error| error.message.contains("role/name selectors"))
         );
         assert!(report.errors.iter().all(|error| error.location.is_some()));
+    }
+
+    #[test]
+    fn registry_manifest_validates_reset_and_ready_contracts() {
+        let root = fixture_project();
+        fs::create_dir_all(root.join(".gpui")).unwrap();
+        fs::write(
+            root.join(".gpui/registry-manifest.json"),
+            r#"{
+                "schema_version": 1,
+                "components": [{
+                    "name": "Counter",
+                    "version": "0.1",
+                    "fixture_schema": "Counter",
+                    "supports_reset": true,
+                    "ready_ids": ["counter.value"],
+                    "logical_ids": ["counter.value", "counter.increment"],
+                    "environments": ["desktop"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let file = root.join("gpui.scenarios.toml");
+        fs::write(
+            &file,
+            r#"schema_version = 1
+
+[[scenarios]]
+id = "counter-basic"
+component = "Counter"
+fixture = "fixtures/counter.json"
+ready_id = "counter.value"
+viewport = { width = 640, height = 480 }
+
+[[scenarios.steps]]
+id = "initial"
+type = "assert"
+selector = { logical_id = "counter.value" }
+assertion = "value_equals"
+expected = 0
+"#,
+        )
+        .unwrap();
+        let report = validate_file(&file, &root).unwrap();
+        assert!(report.valid);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.message.starts_with("registry_unavailable"))
+        );
     }
 }

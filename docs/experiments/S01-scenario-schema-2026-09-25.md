@@ -12,9 +12,10 @@
   baseline_id、step timeout 和有界 capability 名称。
 - fixture 路径相对场景文件解析，并拒绝绝对路径、父目录逃逸、超大文件和组件不匹配；
   使用现有严格 fixture parser 计算 `fixture_hash`，默认值归一化后计算 `scenario_hash`。
-- `.gpui/registry-manifest.json` 存在时校验组件名；内置三种 fixture 使用严格 parser，
-  自定义组件/fixture schema 仍报告 `fixture_schema_unavailable`。registry 缺失时输出
-  `registry_unavailable` warning，不把 registry 缺失转换成成功检查。
+- `.gpui/registry-manifest.json` 采用显式 schema-v1 契约，校验组件名、版本、fixture schema、
+  reset capability 和 ready_id；内置三种 fixture 使用严格 parser，自定义组件/fixture
+  schema 仍报告 `fixture_schema_unavailable`。registry 缺失时输出 `registry_unavailable`
+  warning，不把 registry 缺失转换成成功检查。
 
 ## 验证
 

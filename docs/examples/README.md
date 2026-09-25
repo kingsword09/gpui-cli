@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | [observation-v2.json](observation-v2.json) | 等待型观察成功 envelope，版本/帧/产物关联 | F02/O04；[观察协议](../design/observation-protocol.md) |
 | [scenarios.toml](scenarios.toml) | Counter、LoginForm、VirtualList 三个场景 | S01/S04；[场景设计](../design/scenarios-and-checks.md) |
+| [registry-manifest.json](registry-manifest.json) | 显式组件、fixture schema、reset/ready/semantic capability 契约 | S02/S01 静态读取 |
 | [fixtures/counter-zero.json](fixtures/counter-zero.json) | Counter 初态 | F01/S02 |
 | [fixtures/login-invalid.json](fixtures/login-invalid.json) | 固定表单错误与允许的业务日志 | F01/S02 |
 | [fixtures/list-1000.json](fixtures/list-1000.json) | 确定性生成 1000 个稳定 key 的项目 | F01/S02 |
