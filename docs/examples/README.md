@@ -50,6 +50,6 @@ cargo x check-design-docs
 git diff --check
 ```
 
-校验器通过仓库的 Rust `x` 任务运行器执行，检查本路线文档的相对链接、任务/验收编号、依赖无环、JSON/TOML语法，以及示例间的基础引用和约束。它不是产品 schema validator，也不验证示例 hash 对应真实产物，更不证明任何 UI/GPU 能力通过。
+仓库的 Rust `x` 任务运行器检查本路线文档的相对链接、任务/验收编号、依赖无环、JSON/TOML 语法，以及示例间的基础引用和约束；`gpui scenario validate` 才是场景文件的产品级静态校验入口。静态校验不验证真实 registry 之外的 UI/GPU 能力，不启动应用，也不把示例 hash 当作真实产物证据。
 
 首个实现 PR 必须把这些示例移入/复制为正式 Rust 反序列化与契约测试输入，并加入非法字段和边界变体；实现规范改变时同步更新设计、示例与验收用例。

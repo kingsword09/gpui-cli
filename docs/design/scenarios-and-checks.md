@@ -1,6 +1,6 @@
 # 设计契约：组件场景、输入与可重复检查
 
-状态：拟议，未实现。任务：S01–S05、O05/O06、Q01。依赖：[观察协议](observation-protocol.md)。
+状态：S01 静态 schema 校验已实现；preview/check 执行仍未实现。任务：S01–S05、O05/O06、Q01。依赖：[观察协议](observation-protocol.md)。
 
 ## 1. 场景是预览、测试和性能测量的共同输入
 
