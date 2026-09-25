@@ -943,6 +943,31 @@ pub fn answer_semantics_read(cx: &mut gpui::App, request: SemanticsReadRequest) 
     }
 }
 
+/// Announces that the preview runtime created a fresh scenario state. The
+/// environment and uncontrolled-input values are already serialized JSON
+/// fragments produced by `previews.rs`; keeping this helper string-based lets
+/// the generated app retain its dependency-light dev channel.
+pub fn report_scenario_ready(
+    scenario_id: &str,
+    component: &str,
+    fixture_hash: &str,
+    environment_json: &str,
+    reset_generation: u64,
+    data_dir: &str,
+    uncontrolled_inputs_json: &str,
+) {
+    queue_control(format!(
+        "{{\"type\":\"scenario_ready\",\"scenario_id\":\"{}\",\"component\":\"{}\",\"fixture_hash\":\"{}\",\"environment\":{},\"reset_generation\":{},\"data_dir\":\"{}\",\"uncontrolled_inputs\":{}}}",
+        json_escape(scenario_id),
+        json_escape(component),
+        json_escape(fixture_hash),
+        environment_json,
+        reset_generation,
+        json_escape(data_dir),
+        uncontrolled_inputs_json,
+    ));
+}
+
 /// Acknowledges an asset batch after the UI thread has invalidated its cache.
 pub fn report_assets_applied(
     transfer_id: &str,

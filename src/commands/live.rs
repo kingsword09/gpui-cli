@@ -17,7 +17,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::error;
 use super::run::{
@@ -77,6 +77,25 @@ enum Plan {
     },
 }
 
+/// Explicit scenario inputs handed to the generated preview runtime. The
+/// preview path never carries a Live snapshot; every launch gets its own data
+/// directory and starts at reset_generation 1.
+#[derive(Clone, Debug)]
+pub struct PreviewLaunch {
+    pub scenario_id: String,
+    pub component: String,
+    pub fixture_path: PathBuf,
+    pub fixture_hash: String,
+    pub data_dir: PathBuf,
+    pub project_root: PathBuf,
+    pub theme: String,
+    pub locale: String,
+    pub clock: String,
+    pub clock_at: Option<String>,
+    pub random_seed: Option<i64>,
+    pub uncontrolled_inputs: Vec<String>,
+}
+
 /// Dev-channel credentials handed to the app at every launch.
 struct Channel {
     live: Arc<Session>,
@@ -89,6 +108,7 @@ struct Channel {
     /// Snapshot session to restore in the next launch, if the previous process
     /// saved one.
     session: Option<String>,
+    preview: Option<PreviewLaunch>,
 }
 
 impl Channel {
@@ -129,6 +149,50 @@ impl Channel {
                     .to_string_lossy()
                     .into_owned(),
             ));
+        }
+        if let Some(preview) = &self.preview {
+            env.extend([
+                (
+                    "GPUI_PREVIEW_SCENARIO_ID".to_string(),
+                    preview.scenario_id.clone(),
+                ),
+                (
+                    "GPUI_PREVIEW_COMPONENT".to_string(),
+                    preview.component.clone(),
+                ),
+                (
+                    "GPUI_PREVIEW_FIXTURE".to_string(),
+                    preview.fixture_path.to_string_lossy().into_owned(),
+                ),
+                (
+                    "GPUI_PREVIEW_FIXTURE_HASH".to_string(),
+                    preview.fixture_hash.clone(),
+                ),
+                (
+                    "GPUI_PREVIEW_DATA_DIR".to_string(),
+                    preview.data_dir.to_string_lossy().into_owned(),
+                ),
+                (
+                    "GPUI_PREVIEW_PROJECT_ROOT".to_string(),
+                    preview.project_root.to_string_lossy().into_owned(),
+                ),
+                ("GPUI_PREVIEW_THEME".to_string(), preview.theme.clone()),
+                ("GPUI_PREVIEW_LOCALE".to_string(), preview.locale.clone()),
+                ("GPUI_PREVIEW_CLOCK".to_string(), preview.clock.clone()),
+                (
+                    "GPUI_PREVIEW_UNCONTROLLED_INPUTS".to_string(),
+                    preview.uncontrolled_inputs.join(","),
+                ),
+            ]);
+            if let Some(clock_at) = &preview.clock_at {
+                env.push(("GPUI_PREVIEW_CLOCK_AT".to_string(), clock_at.clone()));
+            }
+            if let Some(random_seed) = preview.random_seed {
+                env.push((
+                    "GPUI_PREVIEW_RANDOM_SEED".to_string(),
+                    random_seed.to_string(),
+                ));
+            }
         }
         env
     }
@@ -1195,6 +1259,126 @@ fn resolve_plan(project: &Project, target: &str, flags: &DeviceFlags) -> Result<
     }
 }
 
+/// Runs one non-watching preview launch. Preview intentionally starts without
+/// a Live snapshot and keeps the process attached until the user interrupts
+/// it, so the runtime's `scenario_ready` event belongs to one isolated run.
+pub fn handle_preview(project: &Project, target: &str, preview: PreviewLaunch) -> Result<()> {
+    if !matches!(
+        target.to_ascii_lowercase().as_str(),
+        "desktop" | "macos" | "windows" | "linux"
+    ) {
+        bail!("the S02 preview runtime currently supports the desktop target only");
+    }
+    let plan = resolve_plan(project, target, &DeviceFlags::default())?;
+    let target_id = format!("desktop:{}", std::env::consts::OS);
+    let session = Session::start(&project.root, &project.name, &target_id)?;
+    struct EndSession(Arc<Session>);
+    impl Drop for EndSession {
+        fn drop(&mut self) {
+            self.0.end();
+        }
+    }
+    let _end_session = EndSession(session.clone());
+    let _control = ControlServer::start(session.clone())?;
+    let server = DevServer::start_observed(session.clone())?;
+    if !server.set_asset_manifest(
+        session.store.state().desired.asset_revision,
+        session.asset_manifest(),
+    ) {
+        bail!("asset manifest exceeds the dev-channel frame limit");
+    }
+    let channel_dir = project.root.join(".gpui");
+    fs::create_dir_all(&channel_dir)?;
+    fs::write(channel_dir.join("dev-port"), server.port.to_string())?;
+    let overflow = Arc::new(AtomicBool::new(false));
+    let mut channel = Channel {
+        live: session.clone(),
+        scope: Scope::default(),
+        overflow,
+        project: project.name.clone(),
+        port: server.port,
+        token: server.token.clone(),
+        assets_dir: project.root.join(ASSETS_DIR),
+        session: None,
+        preview: Some(preview),
+    };
+    let interrupt = Arc::downgrade(&session);
+    ctrlc::set_handler(move || {
+        if let Some(session) = interrupt.upgrade() {
+            session.stopping.store(true, Ordering::SeqCst);
+        }
+    })
+    .context("installing the preview shutdown handler")?;
+
+    let mut event_seq = session.store.state().seq;
+    let expected_scenario = channel
+        .preview
+        .as_ref()
+        .map(|preview| preview.scenario_id.clone())
+        .unwrap_or_default();
+    let build = session.begin_build()?;
+    let mut child = None;
+    let iteration = run_iteration(project, &plan, &mut channel, &server, &mut child, &build);
+    match iteration {
+        Ok(Iteration::Rebuilt) => build.finish(true, None),
+        Ok(Iteration::BuildFailed) => {
+            build.finish(false, None);
+            bail!("preview build failed")
+        }
+        Ok(Iteration::Superseded) => {
+            build.superseded();
+            bail!("preview inputs changed while building; rerun the preview")
+        }
+        Err(error) => {
+            build.finish(false, Some(format!("{error:#}")));
+            return Err(error);
+        }
+    }
+
+    let ready_deadline = Instant::now() + Duration::from_secs(30);
+    let mut ready = false;
+    while !ready && !session.stopping.load(Ordering::SeqCst) {
+        let page = session.store.events(event_seq, Duration::from_millis(100));
+        event_seq = page.next_seq;
+        for event in page.events {
+            match event.kind {
+                Kind::ScenarioReady
+                    if event.data["scenario_id"].as_str() == Some(expected_scenario.as_str()) =>
+                {
+                    ready = true;
+                    println!(
+                        "Preview ready for `{}` (reset_generation={}). Press Ctrl-C to stop.",
+                        expected_scenario,
+                        event.data["reset_generation"].as_u64().unwrap_or(0)
+                    );
+                }
+                Kind::AppExited | Kind::AppLaunchFailed => {
+                    bail!("preview app exited before scenario_ready")
+                }
+                _ => {}
+            }
+        }
+        if Instant::now() >= ready_deadline {
+            bail!("preview runtime did not emit scenario_ready within 30 seconds")
+        }
+    }
+    while !session.stopping.load(Ordering::SeqCst) {
+        session.advance_observe_requests();
+        if session
+            .store
+            .state()
+            .running
+            .as_ref()
+            .is_some_and(|run| matches!(run.process.as_str(), "exited" | "launch_failed"))
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    drop(child);
+    Ok(())
+}
+
 pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Result<()> {
     let plan = resolve_plan(project, target, flags)?;
     let target_id = match &plan {
@@ -1233,6 +1417,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         token: server.token.clone(),
         assets_dir: project.root.join(ASSETS_DIR),
         session: None,
+        preview: None,
     };
     let (tx, rx) = mpsc::sync_channel::<Event>(64);
     let interrupt = Arc::downgrade(&session);

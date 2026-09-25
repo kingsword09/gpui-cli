@@ -433,6 +433,54 @@ fn current_app_channel_routes_window_and_ui_probe_events() {
 }
 
 #[test]
+fn scenario_ready_is_published_with_fixture_environment_and_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    let token = server.expect_run(run.clone()).unwrap();
+    let mut socket = connect(&server, &token);
+    send(
+        &mut socket,
+        &ClientMessage::ScenarioReady {
+            scenario_id: "counter-basic".into(),
+            component: "Counter".into(),
+            fixture_hash: format!("sha256:{}", "1".repeat(64)),
+            environment: std::collections::BTreeMap::from([
+                ("theme".into(), Value::String("light".into())),
+                ("locale".into(), Value::String("en-US".into())),
+            ]),
+            reset_generation: 3,
+            data_dir: ".gpui/previews/p-1/data".into(),
+            uncontrolled_inputs: vec!["os.clock".into()],
+        },
+    );
+    wait_until(|| {
+        session
+            .store
+            .events(0, Duration::ZERO)
+            .events
+            .iter()
+            .any(|event| {
+                event.kind == Kind::ScenarioReady
+                    && event.data["scenario_id"] == "counter-basic"
+                    && event.data["reset_generation"] == 3
+                    && event.scope.run_id == run.run_id
+            })
+    });
+    let event = session
+        .store
+        .events(0, Duration::ZERO)
+        .events
+        .into_iter()
+        .find(|event| event.kind == Kind::ScenarioReady)
+        .unwrap();
+    assert_eq!(event.data["environment"]["theme"], "light");
+    assert_eq!(event.data["uncontrolled_inputs"][0], "os.clock");
+}
+
+#[test]
 fn semantics_read_roundtrip_is_run_and_window_bound_and_publishes_tree_artifact() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();

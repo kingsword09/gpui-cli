@@ -13,6 +13,46 @@ compile_error!("feature `gpui-dev` is debug-only; use a debug build");
 
 #[cfg(debug_assertions)]
 pub mod live;
+pub mod previews;
+
+/// Starts the explicit preview registry and, when `gpui preview` supplied a
+/// scenario, creates its isolated fixture state before the first view.
+pub fn initialize_preview() {
+    previews::initialize();
+}
+
+/// Reports a scenario generation to the CLI dev channel. Release builds keep
+/// the same call site but do not retain the development transport.
+pub fn report_scenario_ready(
+    scenario_id: &str,
+    component: &str,
+    fixture_hash: &str,
+    environment_json: &str,
+    reset_generation: u64,
+    data_dir: &str,
+    uncontrolled_inputs_json: &str,
+) {
+    #[cfg(all(debug_assertions, feature = "gpui-dev"))]
+    live::report_scenario_ready(
+        scenario_id,
+        component,
+        fixture_hash,
+        environment_json,
+        reset_generation,
+        data_dir,
+        uncontrolled_inputs_json,
+    );
+    #[cfg(not(all(debug_assertions, feature = "gpui-dev")))]
+    let _ = (
+        scenario_id,
+        component,
+        fixture_hash,
+        environment_json,
+        reset_generation,
+        data_dir,
+        uncontrolled_inputs_json,
+    );
+}
 
 /// Connects to the `gpui run --live` dev server in debug builds and no-ops in
 /// release builds.
@@ -281,12 +321,14 @@ impl MainView {
 
         // Live mode: restore the snapshot the previous process published.
         // Unparseable data means a cold start — never a boot failure.
-        let clicks = restored_state()
-            .and_then(|json| {
-                json.split("\"clicks\":")
-                    .nth(1)
-                    .and_then(|rest| rest.split('}').next())
-                    .and_then(|value| value.trim().parse::<usize>().ok())
+        let clicks = crate::previews::counter_initial_value()
+            .or_else(|| {
+                restored_state().and_then(|json| {
+                    json.split("\"clicks\":")
+                        .nth(1)
+                        .and_then(|rest| rest.split('}').next())
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                })
             })
             .unwrap_or(0);
         Self { clicks }

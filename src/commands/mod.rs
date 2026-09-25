@@ -7,6 +7,7 @@ pub mod error;
 pub mod info;
 pub mod init;
 pub mod live;
+pub mod preview;
 pub mod run;
 pub mod scenario;
 pub mod upgrade;

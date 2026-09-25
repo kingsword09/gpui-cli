@@ -830,6 +830,40 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                         },
                     );
                 }
+                ClientMessage::ScenarioReady {
+                    scenario_id,
+                    component,
+                    fixture_hash,
+                    environment,
+                    reset_generation,
+                    data_dir,
+                    uncontrolled_inputs,
+                } => {
+                    let scenario_id = clip(&scenario_id, 128);
+                    let component = clip(&component, 128);
+                    let fixture_hash = clip(&fixture_hash, 128);
+                    let data_dir = clip(&data_dir, 1024);
+                    let uncontrolled_inputs = uncontrolled_inputs
+                        .iter()
+                        .take(32)
+                        .map(|value| clip(value, 128))
+                        .collect::<Vec<_>>();
+                    shared.emit(
+                        Kind::ScenarioReady,
+                        &scope,
+                        json!({
+                            "scenario_id": scenario_id,
+                            "component": component,
+                            "fixture_hash": fixture_hash,
+                            "environment": environment,
+                            "reset_generation": reset_generation,
+                            "data_dir": data_dir,
+                            "uncontrolled_inputs": uncontrolled_inputs,
+                            "connection_id": id,
+                            "received_at_ms": now_ms(),
+                        }),
+                    );
+                }
                 ClientMessage::SceneCompleted {
                     window_id,
                     scene_epoch,

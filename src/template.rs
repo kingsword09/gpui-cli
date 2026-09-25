@@ -310,6 +310,7 @@ fn open_main_window(cx: &mut App) {
 pub extern "C" fn gpui_ios_register_app() {
     // Debug builds connect back to `gpui run --live` for logs and panics.
     crate::init_live(None);
+    crate::initialize_preview();
 
     gpui_mobile::ios::ffi::set_app_callback(Box::new(|cx: &mut App| {
         open_main_window(cx);
@@ -358,6 +359,7 @@ pub fn android_main(app: android_activity::AndroidApp) {{
         .internal_data_path()
         .map(|dir| dir.join("gpui_live.txt"));
     crate::init_live(live_config.as_deref());
+    crate::initialize_preview();
 
     application.run(|cx: &mut App| {{
         open_main_window(cx);
@@ -673,6 +675,7 @@ fn template_path_for_output(relative: &Path) -> Option<String> {
         "crates/app/src/lib.rs" => Some("app/src/lib.rs"),
         "crates/app/src/live.rs" => Some("app/src/live.rs"),
         "crates/app/src/agent_runtime.rs" => Some("app/src/agent_runtime.rs"),
+        "crates/app/src/previews.rs" => Some("app/src/previews.rs"),
         "crates/app/src/legacy_runtime.rs" => Some("legacy/app/src/legacy_runtime.rs"),
         "crates/desktop/Cargo.toml" => Some("desktop/Cargo.toml.template"),
         "crates/desktop/src/main.rs" => Some("desktop/src/main.rs"),
@@ -981,6 +984,11 @@ fn scaffold_files(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
     render_file(
         "app/src/agent_runtime.rs",
         &target_dir.join("crates/app/src/agent_runtime.rs"),
+        &vars,
+    )?;
+    render_file(
+        "app/src/previews.rs",
+        &target_dir.join("crates/app/src/previews.rs"),
         &vars,
     )?;
     render_subtree("assets", &target_dir.join("assets"), &HashMap::new())?;

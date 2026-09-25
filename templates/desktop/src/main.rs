@@ -23,6 +23,7 @@ fn main() {
 
     // Debug builds connect back to `gpui run --live` for logs and panics.
     {{APP_LIB_NAME}}::init_live(None);
+    {{APP_LIB_NAME}}::initialize_preview();
 
     application.run(|cx: &mut App| {
         // Installs the theme and global state that `Root` needs to paint a

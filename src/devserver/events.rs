@@ -101,6 +101,8 @@ pub enum Kind {
     UiProbeResult,
     #[serde(rename = "semantics.read")]
     SemanticsRead,
+    #[serde(rename = "scenario.ready")]
+    ScenarioReady,
     #[serde(rename = "scene.completed")]
     SceneCompleted,
     #[serde(rename = "artifact.declared")]

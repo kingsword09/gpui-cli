@@ -193,6 +193,8 @@ pub enum Commands {
     Dev(commands::dev::DevArgs),
     /// Validate static preview/check scenario files
     Scenario(commands::scenario::ScenarioArgs),
+    /// Launch one explicitly registered component preview from a scenario
+    Preview(commands::preview::PreviewArgs),
     /// Print the project metadata read from gpui.toml
     Info,
     /// Plan a read-only template upgrade
@@ -255,6 +257,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Device { command }) => commands::device::handle_device(command)?,
         Some(Commands::Dev(args)) => commands::dev::handle_dev(args)?,
         Some(Commands::Scenario(args)) => commands::scenario::handle_scenario(args)?,
+        Some(Commands::Preview(args)) => commands::preview::handle_preview(args)?,
         Some(Commands::Info) => commands::info::handle_info()?,
         Some(Commands::Upgrade { command }) => {
             let exit_code = commands::upgrade::handle_upgrade(command)?;

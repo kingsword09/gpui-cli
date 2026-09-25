@@ -103,6 +103,16 @@ pub enum ClientMessage {
         reason: Option<String>,
         captured_at_ms: u64,
     },
+    ScenarioReady {
+        scenario_id: String,
+        component: String,
+        fixture_hash: String,
+        environment: BTreeMap<String, Value>,
+        reset_generation: u64,
+        data_dir: String,
+        #[serde(default)]
+        uncontrolled_inputs: Vec<String>,
+    },
     AssetsApplied {
         transfer_id: String,
         asset_revision: u64,
@@ -617,6 +627,23 @@ mod tests {
         assert_eq!(
             decode::<ClientMessage>(&encode(&result).unwrap()).unwrap(),
             result
+        );
+
+        let ready = ClientMessage::ScenarioReady {
+            scenario_id: "counter-basic".into(),
+            component: "Counter".into(),
+            fixture_hash: format!("sha256:{}", "0".repeat(64)),
+            environment: BTreeMap::from([
+                ("theme".into(), Value::String("light".into())),
+                ("locale".into(), Value::String("en-US".into())),
+            ]),
+            reset_generation: 1,
+            data_dir: ".gpui/previews/p-1/data".into(),
+            uncontrolled_inputs: vec!["os.clock".into()],
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&ready).unwrap()).unwrap(),
+            ready
         );
     }
 }
