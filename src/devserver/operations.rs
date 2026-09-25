@@ -304,6 +304,38 @@ impl OperationStore {
             })
     }
 
+    pub fn find_observation(
+        &self,
+        observation_id: &str,
+        now_ms: u64,
+    ) -> Result<OperationSnapshot, OperationError> {
+        if observation_id.is_empty() || observation_id.len() > 128 || !observation_id.is_ascii() {
+            return Err(OperationError::new(
+                "invalid_observation_id",
+                "observation_id must be a bounded ASCII identifier",
+            ));
+        }
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        prune_locked(&mut inner, now_ms);
+        inner
+            .records
+            .values()
+            .find(|record| {
+                record
+                    .snapshot
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result["observation_id"].as_str() == Some(observation_id))
+            })
+            .map(|record| record.snapshot.clone())
+            .ok_or_else(|| {
+                OperationError::new(
+                    "observation_not_found",
+                    "observation is unknown or its operation history expired",
+                )
+            })
+    }
+
     /// Waits for a terminal transition or until the caller's bounded wait
     /// expires. The operation deadline is also an upper bound, but expiration
     /// is applied by the session wrapper so it can emit the corresponding

@@ -482,7 +482,8 @@ fn semantics_read_roundtrip_is_run_and_window_bound_and_publishes_tree_artifact(
             max_bytes: 262144,
         } if request_id == &operation_id && window_id == "main"
     ));
-    let tree = r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window"},"children":[]}}}"#;
+    let tree =
+        r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window","label":"Counter"},"children":[]}}}"#;
     send(
         &mut socket,
         &ClientMessage::SemanticsResult {
@@ -524,6 +525,26 @@ fn semantics_read_roundtrip_is_run_and_window_bound_and_publishes_tree_artifact(
     );
     let result = operation.result.unwrap();
     assert_eq!(result["semantics"]["provider"], "gpui-debug-a11y");
+    let control = ControlServer::start(session.clone()).unwrap();
+    let observation_id = result["observation_id"].as_str().unwrap().to_owned();
+    let query = control::request(
+        &control.registration,
+        "test.query.semantics",
+        Command::Query {
+            observation_id,
+            node_ref: None,
+            logical_id: None,
+            role_name: Some("Window".into()),
+            name: Some("Counter".into()),
+            parent: None,
+            fields: vec!["node_ref".into(), "role".into(), "name".into()],
+            cursor: None,
+            limit: 1,
+        },
+    )
+    .unwrap();
+    assert!(query.ok);
+    assert_eq!(query.result.unwrap()["nodes"][0]["name"], "Counter");
     let artifact_id = result["semantics"]["artifact_id"].as_str().unwrap();
     assert_eq!(
         session.artifacts.info(artifact_id).unwrap().status,

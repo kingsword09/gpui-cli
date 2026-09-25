@@ -2,7 +2,8 @@
 
 状态：O01 窗口注册/UI heartbeat、O02 资源 ACK、O03 有界产物库、scene_completed
 事件、supervisor build request、有界 operation 状态机和 observe 提交已实现；
-截图、语义与成功观察编排仍拟议。基线：`6d091b6`。
+scene readback、完整语义导出与成功观察编排仍拟议；O05/O06 已提供受控语义树产物
+和只读查询第一切片。基线：`1550bf3`。
 任务：F02、O01–O06、A01。
 上位文档：[总路线](../ROADMAP-agent-native-development.md)。
 
@@ -183,7 +184,7 @@ UI 线程禁止等待网络、写大文件、编码 PNG、读取整个源目录�
 ### 6.2 拟议命令
 
 ```bash
-# 以下为计划接口，当前版本不能直接执行。
+# query 需要成功 observation；其余接口仍按计划逐步实现。
 gpui dev windows --schema-version 2 --json
 gpui dev observe --sync --window w1 --require screenshot --timeout 30s --json
 gpui dev observe --sync --window w1 --require screenshot,semantics --async --json
