@@ -34,7 +34,7 @@
 | O05 | G2 | core | L | P01, F02, O01 | O-10, O-11 | in_progress |
 | O06 | G2 | core | M | O05, O03 | O-11, A-03 | in_progress |
 | S01 | G2 | core | M | F02 | S-01, S-09 | planned |
-| S02 | G2 | core | L | S01, O04 | S-02, S-09 | planned |
+| S02 | G2 | core | L | S01, O04 | S-02, S-09 | in_progress |
 | S03 | G2 | core | L | O06, O04 | S-03, S-04, S-05, S-06, S-08 | planned |
 | M03 | G2 | core | M | T01, F02 | M-04, M-05, M-06 | planned |
 | M04 | G2 | core | L | T01, F01 | M-07, M-08 | planned |
@@ -278,18 +278,22 @@ assertion 参数，并输出规范化 scenario_hash。缺少 `.gpui/registry-man
 
 ### S02 · 原生组件 preview 与 reset
 
-代码落点：拟议 `src/commands/preview.rs`、`src/scenario/registry.rs`、runtime scenario adapter、`templates/app/src/previews.rs`。
+代码落点：`src/commands/preview.rs`、runtime scenario adapter、`templates/app/src/previews.rs`。
 
-当前已先交付 registry manifest schema-v1 的静态读取契约：`gpui scenario validate` 可检查
-组件版本、fixture_schema、supports_reset、ready_ids、logical_ids 和 environments；runtime
-生成 manifest、preview 宿主、scenario_ready/reset_generation 仍未实现。
+当前已交付 registry manifest schema-v1 的静态读取契约，并开始实现 desktop preview runtime：
+生成模板通过显式 `PreviewRegistry` 在启动时写出 `.gpui/registry-manifest.json`；`gpui preview`
+会校验场景、创建独立 preview data dir、以无 snapshot 的新进程启动并等待 runtime 发出
+`scenario_ready`。runtime 暴露 `reset_generation()`，每次新进程从 generation 1 开始。
 
 1. 用显式 registry 声明组件、fixture schema、create/reset 和环境适配，不反射构造任意 Render 类型。
 2. 编译输出 registry manifest；preview 选择组件并使用独立数据目录，首次构建后直接进入组件。
-3. 实现 scenario_ready/reset_generation；源码重启重新创建 fixture，不自动导入 Live 交互 state。
+3. 实现 scenario_ready/reset_generation；当前 desktop Counter 已接入，新进程重新创建 fixture，
+   不自动导入 Live 交互 state。
 4. 接入 theme/locale/clock/random adapter，回报实际环境和 uncontrolled_inputs；进程内 reset 作为可选优化单独证明。
 
-验收 S-02/S-09。输出 Counter/Form/List 的新进程初态及旧异步任务不泄漏证据。回退：进程内 reset 失败时采用新进程，不保留未知状态继续 check。
+验收 S-02/S-09。当前切片只覆盖 desktop Counter 的启动、fixture 初值、manifest、ready 事件和
+独立 data dir；LoginForm/VirtualList、真实旧异步任务取消、移动端 preview 和 check 执行仍未完成。
+回退：进程内 reset 失败时采用新进程，不保留未知状态继续 check。
 
 ### S03 · 正常输入路由与幂等
 
