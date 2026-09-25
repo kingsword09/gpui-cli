@@ -280,6 +280,10 @@ assertion 参数，并输出规范化 scenario_hash。缺少 `.gpui/registry-man
 
 代码落点：拟议 `src/commands/preview.rs`、`src/scenario/registry.rs`、runtime scenario adapter、`templates/app/src/previews.rs`。
 
+当前已先交付 registry manifest schema-v1 的静态读取契约：`gpui scenario validate` 可检查
+组件版本、fixture_schema、supports_reset、ready_ids、logical_ids 和 environments；runtime
+生成 manifest、preview 宿主、scenario_ready/reset_generation 仍未实现。
+
 1. 用显式 registry 声明组件、fixture schema、create/reset 和环境适配，不反射构造任意 Render 类型。
 2. 编译输出 registry manifest；preview 选择组件并使用独立数据目录，首次构建后直接进入组件。
 3. 实现 scenario_ready/reset_generation；源码重启重新创建 fixture，不自动导入 Live 交互 state。

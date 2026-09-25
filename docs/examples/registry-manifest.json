@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "components": [
+    {
+      "name": "Counter",
+      "version": "0.1",
+      "fixture_schema": "Counter",
+      "supports_reset": true,
+      "ready_ids": ["counter.value"],
+      "logical_ids": ["counter.value", "counter.increment"],
+      "environments": ["desktop"]
+    },
+    {
+      "name": "LoginForm",
+      "version": "0.1",
+      "fixture_schema": "LoginForm",
+      "supports_reset": true,
+      "ready_ids": ["login.password"],
+      "logical_ids": ["login.password", "login.submit", "login.error"],
+      "environments": ["desktop"]
+    },
+    {
+      "name": "VirtualList",
+      "version": "0.1",
+      "fixture_schema": "VirtualList",
+      "supports_reset": true,
+      "ready_ids": ["list.viewport"],
+      "logical_ids": ["list.viewport", "list.item.<stable-key>"],
+      "environments": ["desktop"]
+    }
+  ]
+}
