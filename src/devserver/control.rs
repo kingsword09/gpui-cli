@@ -46,6 +46,17 @@ pub enum Command {
         require: Vec<String>,
         deadline_ms: u64,
     },
+    Query {
+        observation_id: String,
+        node_ref: Option<String>,
+        logical_id: Option<String>,
+        role_name: Option<String>,
+        name: Option<String>,
+        parent: Option<String>,
+        fields: Vec<String>,
+        cursor: Option<String>,
+        limit: u32,
+    },
     OperationGet {
         operation_id: String,
         #[serde(default)]
@@ -364,6 +375,45 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
                 | super::operations::SubmitResult::Existing(snapshot) => snapshot,
             };
             serde_json::to_value(snapshot).expect("serializable operation snapshot")
+        }
+        Command::Query {
+            observation_id,
+            node_ref,
+            logical_id,
+            role_name,
+            name,
+            parent,
+            fields,
+            cursor,
+            limit,
+        } => {
+            match super::query::execute(
+                session,
+                super::query::QueryRequest {
+                    observation_id,
+                    node_ref,
+                    logical_id,
+                    role: role_name,
+                    name,
+                    parent,
+                    fields,
+                    cursor,
+                    limit: limit as usize,
+                },
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    return error_reply(
+                        &session.id,
+                        &request_id,
+                        ApiError {
+                            code: error.code,
+                            message: error.message,
+                            details: error.details,
+                        },
+                    );
+                }
+            }
         }
         Command::OperationGet {
             operation_id,

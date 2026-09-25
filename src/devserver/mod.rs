@@ -10,6 +10,7 @@ pub mod operations;
 pub mod output;
 mod process;
 pub mod protocol;
+pub mod query;
 pub mod session;
 pub mod timing;
 pub mod windows;

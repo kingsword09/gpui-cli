@@ -51,6 +51,33 @@ pub enum DevCommand {
         #[arg(long = "async")]
         asynchronous: bool,
     },
+    /// Query a bounded semantics tree attached to a completed observation
+    Query {
+        /// Observation id returned by a successful observe operation
+        #[arg(long)]
+        observation: String,
+        /// Exact temporary node reference from this observation
+        #[arg(long = "node-ref")]
+        node_ref: Option<String>,
+        /// Stable logical id, when the runtime exports one
+        #[arg(long = "id")]
+        logical_id: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        parent: Option<String>,
+        /// Project only these fields; may be repeated or comma-separated
+        #[arg(long = "field")]
+        fields: Vec<String>,
+        /// Opaque cursor returned by a previous query
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Maximum nodes to return, capped at 200
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+    },
     /// Query or cancel an asynchronous supervisor operation
     Operation {
         #[command(subcommand)]
@@ -240,6 +267,44 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         }
         return Ok(());
     }
+    if let DevCommand::Query {
+        observation,
+        node_ref,
+        logical_id,
+        role,
+        name,
+        parent,
+        fields,
+        cursor,
+        limit,
+    } = &args.command
+    {
+        let result = query_request(
+            &registration,
+            observation,
+            node_ref.clone(),
+            logical_id.clone(),
+            role.clone(),
+            name.clone(),
+            parent.clone(),
+            fields.clone(),
+            cursor.clone(),
+            *limit,
+        )?;
+        if args.json {
+            write_value(
+                &Reply::success(
+                    &registration.session_id,
+                    control::next_request_id("dev.query"),
+                    result,
+                ),
+                false,
+            )?;
+        } else {
+            write_value(&result, true)?;
+        }
+        return Ok(());
+    }
     let request_id = control::next_request_id("dev");
     let (mut after, timeout, follow) = match &args.command {
         DevCommand::Events {
@@ -256,6 +321,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             DevCommand::Windows => Command::Windows,
             DevCommand::Build => Command::Build,
             DevCommand::Observe { .. } => unreachable!("observe commands return above"),
+            DevCommand::Query { .. } => unreachable!("query commands return above"),
             DevCommand::Operation { .. } => unreachable!("operation commands return above"),
             DevCommand::Events { .. } => Command::Events {
                 after,
@@ -409,6 +475,45 @@ fn execute_observe(
             });
         }
         thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn query_request(
+    registration: &control::Registration,
+    observation_id: &str,
+    node_ref: Option<String>,
+    logical_id: Option<String>,
+    role: Option<String>,
+    name: Option<String>,
+    parent: Option<String>,
+    fields: Vec<String>,
+    cursor: Option<String>,
+    limit: u32,
+) -> std::result::Result<serde_json::Value, ApiError> {
+    let reply = control::request(
+        registration,
+        &control::next_request_id("dev.query"),
+        Command::Query {
+            observation_id: observation_id.to_owned(),
+            node_ref,
+            logical_id,
+            role_name: role,
+            name,
+            parent,
+            fields,
+            cursor,
+            limit,
+        },
+    )
+    .map_err(|error| ApiError::new("connection_failed", error.to_string()))?;
+    if reply.ok {
+        Ok(reply.result.unwrap_or_default())
+    } else {
+        Err(reply
+            .error
+            .map(Into::into)
+            .unwrap_or_else(|| ApiError::new("request_failed", "Query request failed")))
     }
 }
 
