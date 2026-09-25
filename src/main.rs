@@ -7,6 +7,7 @@ mod config;
 pub mod device;
 pub mod devserver;
 pub mod fixtures;
+pub mod scenario;
 pub mod template;
 pub mod template_manifest;
 pub mod toolchain;
@@ -190,6 +191,8 @@ pub enum Commands {
     },
     /// Query diagnostics and events from a running live session
     Dev(commands::dev::DevArgs),
+    /// Validate static preview/check scenario files
+    Scenario(commands::scenario::ScenarioArgs),
     /// Print the project metadata read from gpui.toml
     Info,
     /// Plan a read-only template upgrade
@@ -251,6 +254,7 @@ fn main() -> anyhow::Result<()> {
         }) => commands::build::handle_build(Some(target), release, device.into())?,
         Some(Commands::Device { command }) => commands::device::handle_device(command)?,
         Some(Commands::Dev(args)) => commands::dev::handle_dev(args)?,
+        Some(Commands::Scenario(args)) => commands::scenario::handle_scenario(args)?,
         Some(Commands::Info) => commands::info::handle_info()?,
         Some(Commands::Upgrade { command }) => {
             let exit_code = commands::upgrade::handle_upgrade(command)?;

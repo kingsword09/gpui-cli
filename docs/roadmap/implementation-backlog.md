@@ -261,7 +261,8 @@ logical_id)` bridge；runtime 只为声明成功且在当前 debug tree 中匹�
 
 ### S01 · 场景 schema 与静态校验
 
-代码落点：拟议 `src/scenario/{schema,validate}.rs`、配置 examples/schema fixtures；挂载命令由 S02/S04 完成。
+代码落点：`src/scenario.rs`、`src/commands/scenario.rs`、配置 examples/schema fixtures；
+S01 提供静态 validate 命令，preview/check 执行挂载由 S02/S04 完成。
 
 1. 为 [场景配置](../examples/scenarios.toml) 定义 deny_unknown_fields 类型、位置化错误、字段和 step 限制。
 2. 校验 ID、fixture 路径/大小/JSON、timeout、viewport、clock、selectors 和 assertion 参数。
@@ -269,6 +270,11 @@ logical_id)` bridge；runtime 只为声明成功且在当前 debug tree 中匹�
 4. 生成规范化 scenario_hash/fixture_hash；未经默认值规范化和版本标记的 TOML 文本 hash 不作语义比较。
 
 验收 S-01/S-09。输出合法/非法 fixture corpus 及规范化快照。回退：未识别 schema 拒绝执行，不静默忽略拼错断言。
+
+当前代码已交付 `gpui scenario validate` 静态入口：schema v1 使用 deny-unknown-fields，
+校验场景/step ID、路径边界、fixture 内容与哈希、timeout/viewport/clock、selector 和
+assertion 参数，并输出规范化 scenario_hash。缺少 `.gpui/registry-manifest.json` 时报告
+`registry_unavailable` 警告，不冒充已检查组件；preview/check 执行器仍未实现。
 
 ### S02 · 原生组件 preview 与 reset
 

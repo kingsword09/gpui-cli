@@ -1,4 +1,4 @@
-# Draft schema: not supported by the current CLI.
+# Schema v1: validate with `gpui scenario validate --file gpui.scenarios.toml`.
 schema_version = 1
 
 [[scenarios]]
