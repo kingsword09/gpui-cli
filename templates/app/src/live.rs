@@ -16,6 +16,7 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+use serde_json::Value;
 
 const PROTO_VERSION: u32 = 2;
 const RUNTIME_VERSION: &str = "agent-native-dev-runtime-v1";
@@ -43,6 +44,12 @@ static PUBLISHED_STATE: Mutex<Option<String>> = Mutex::new(None);
 /// Snapshot bytes from the previous process, consumed by the view once via
 /// `take_restored_state`.
 static PENDING_STATE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Explicit developer declarations that bridge a GPUI debug `element_id` to
+/// the stable logical id exported to agent tooling. The bridge is deliberately
+/// opt-in: `.id()` and the debug tree's `element_id` are never promoted on
+/// their own.
+static DECLARED_LOGICAL_IDS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Sender half of the current connection; `None` while disconnected.
 static OUTBOUND: Mutex<Option<mpsc::SyncSender<String>>> = Mutex::new(None);
@@ -243,6 +250,90 @@ pub fn image_source(name: &str) -> gpui::ImageSource {
     {
         gpui::ImageSource::Resource(gpui::Resource::Embedded(name.to_string().into()))
     }
+}
+
+/// Declares the stable logical id for one explicitly named GPUI element.
+///
+/// `element_id` is only a bridge key used within the debug semantics adapter;
+/// it is not exported as the logical id. A logical id and an element id may
+/// each be declared only once so duplicate mappings fail before a query can
+/// pretend they are stable.
+pub fn declare_logical_id(element_id: &str, logical_id: &str) -> Result<(), &'static str> {
+    if element_id.is_empty() || element_id.len() > 256 || element_id.contains('\0') {
+        return Err("invalid_element_id");
+    }
+    if logical_id.is_empty() || logical_id.len() > 256 || logical_id.contains('\0') {
+        return Err("invalid_logical_id");
+    }
+    let mut declarations = DECLARED_LOGICAL_IDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if declarations
+        .get(element_id)
+        .is_some_and(|declared| declared != logical_id)
+    {
+        return Err("element_id_already_declared");
+    }
+    if declarations
+        .iter()
+        .any(|(declared_element, declared_id)| {
+            declared_id == logical_id && declared_element != element_id
+        })
+    {
+        return Err("logical_id_already_declared");
+    }
+    declarations.insert(element_id.to_owned(), logical_id.to_owned());
+    Ok(())
+}
+
+/// Clears explicit logical-id declarations, for a process-local scenario
+/// reset. It does not infer or retain ids from a previous run.
+pub fn clear_declared_logical_ids() {
+    DECLARED_LOGICAL_IDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+fn enrich_semantics_tree(tree: &str) -> Result<String, &'static str> {
+    let declarations = DECLARED_LOGICAL_IDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if declarations.is_empty() {
+        return Ok(tree.to_owned());
+    }
+    let mut value: Value = serde_json::from_str(tree).map_err(|_| "semantics_invalid_json")?;
+    let nodes = value
+        .get_mut("nodes")
+        .and_then(Value::as_object_mut)
+        .ok_or("semantics_nodes_missing")?;
+    let mut matched = BTreeMap::<String, String>::new();
+    for (node_ref, node) in nodes.iter_mut() {
+        let Some(element_id) = node.get("element_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(logical_id) = declarations.get(element_id) else {
+            continue;
+        };
+        if let Some(existing) = node.get("logical_id").and_then(Value::as_str) {
+            if existing != logical_id {
+                return Err("logical_id_conflict_in_tree");
+            }
+            continue;
+        }
+        if matched
+            .insert(logical_id.clone(), node_ref.clone())
+            .is_some()
+        {
+            return Err("logical_id_duplicate_in_tree");
+        }
+        node.as_object_mut().expect("node is an object").insert(
+            "logical_id".into(),
+            Value::String(logical_id.clone()),
+        );
+    }
+    serde_json::to_string(&value).map_err(|_| "semantics_serialization_failed")
 }
 
 /// Asset paths reported changed by the CLI since the last call.
@@ -793,24 +884,35 @@ pub fn answer_semantics_read(cx: &mut gpui::App, request: SemanticsReadRequest) 
         (active, tree)
     });
     match result {
-        Ok((true, Some(tree))) if tree.len() <= request.max_bytes => respond_semantics_read(
-            &request.request_id,
-            &request.window_id,
-            "ready",
-            true,
-            Some(&tree),
-            None,
-            captured_at_ms,
-        ),
-        Ok((true, Some(_))) => respond_semantics_read(
-            &request.request_id,
-            &request.window_id,
-            "too_large",
-            true,
-            None,
-            Some("tree_exceeds_request_limit"),
-            captured_at_ms,
-        ),
+        Ok((true, Some(tree))) => match enrich_semantics_tree(&tree) {
+            Ok(tree) if tree.len() <= request.max_bytes => respond_semantics_read(
+                &request.request_id,
+                &request.window_id,
+                "ready",
+                true,
+                Some(&tree),
+                None,
+                captured_at_ms,
+            ),
+            Ok(_) => respond_semantics_read(
+                &request.request_id,
+                &request.window_id,
+                "too_large",
+                true,
+                None,
+                Some("tree_exceeds_request_limit"),
+                captured_at_ms,
+            ),
+            Err(reason) => respond_semantics_read(
+                &request.request_id,
+                &request.window_id,
+                "unavailable",
+                true,
+                None,
+                Some(reason),
+                captured_at_ms,
+            ),
+        },
         Ok((false, _)) => respond_semantics_read(
             &request.request_id,
             &request.window_id,
@@ -1005,7 +1107,7 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
     };
 
     let hello = format!(
-        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\"{}]}}",
+        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\",\"semantics.logical_id\"{}]}}",
         json_escape(&config.token),
         json_escape(&config.project),
         std::process::id(),
@@ -2087,6 +2189,25 @@ mod tests {
         assert_eq!(requests[0].request_id, "op-1");
         assert_eq!(requests[0].window_id, "w-main");
         assert_eq!(requests[0].max_bytes, MAX_SEMANTICS_TREE_BYTES);
+    }
+
+    #[test]
+    fn logical_id_enrichment_requires_explicit_declarations_and_rejects_duplicate_matches() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_declared_logical_ids();
+        assert!(declare_logical_id("increment", "counter.increment").is_ok());
+        let tree = enrich_semantics_tree(
+            r#"{"nodes":{"a":{"element_id":"increment","aria":{}}}}"#,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&tree).unwrap();
+        assert_eq!(value["nodes"]["a"]["logical_id"], "counter.increment");
+        assert!(declare_logical_id("other", "counter.increment").is_err());
+        let duplicate = enrich_semantics_tree(
+            r#"{"nodes":{"a":{"element_id":"increment"},"b":{"element_id":"increment"}}}"#,
+        );
+        assert_eq!(duplicate, Err("logical_id_duplicate_in_tree"));
+        clear_declared_logical_ids();
     }
 
     #[test]

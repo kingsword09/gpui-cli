@@ -17,5 +17,6 @@ gpui-profile = []
 [dependencies]
 gpui.workspace = true
 gpui-kit.workspace = true
+serde_json.workspace = true
 log.workspace = true
 {{MOBILE_DEP}}{{ANDROID_SECTION}}

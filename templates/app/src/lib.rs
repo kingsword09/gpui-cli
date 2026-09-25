@@ -231,6 +231,28 @@ pub fn dev_asset_source(
     }
 }
 
+/// Declares a stable logical id for a named GPUI element in debug semantic
+/// observations. The mapping is explicit; the runtime never promotes `.id()`
+/// or a debug `element_id` by itself.
+pub fn declare_logical_id(element_id: &str, logical_id: &str) -> Result<(), &'static str> {
+    #[cfg(debug_assertions)]
+    {
+        live::declare_logical_id(element_id, logical_id)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (element_id, logical_id);
+        Ok(())
+    }
+}
+
+/// Clears process-local logical-id declarations before constructing a fresh
+/// scenario in debug builds.
+pub fn clear_declared_logical_ids() {
+    #[cfg(debug_assertions)]
+    live::clear_declared_logical_ids();
+}
+
 /// Root view of the application.
 ///
 /// The click counter exists to demonstrate the live-mode state snapshot: with
@@ -252,6 +274,11 @@ fn restored_state() -> Option<String> {
 
 impl MainView {
     pub fn new() -> Self {
+        // The debug adapter only exports declarations made through this API;
+        // `.id("increment")` remains a GPUI element identity, not a logical id.
+        #[cfg(debug_assertions)]
+        let _ = crate::declare_logical_id("increment", "counter.increment");
+
         // Live mode: restore the snapshot the previous process published.
         // Unparseable data means a cold start — never a boot failure.
         let clicks = restored_state()
@@ -301,6 +328,7 @@ impl Render for MainView {
             .child(
                 div()
                     .id("increment")
+                    .accessibility_id("counter.increment")
                     .px_4()
                     .py_2()
                     .rounded_md()

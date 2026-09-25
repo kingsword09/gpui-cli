@@ -135,13 +135,13 @@ live 负责确定性的构建、运行、采集和执行；agent 负责判断与
 
 | GPUI 0.3.5 接口/模块 | 可复用部分 | 边界 |
 | --- | --- | --- |
-| `Window::debug_a11y_tree_json()`；`window/a11y/debug.rs` | 帧元数据、角色、文本/值、部分状态；debug 下的 view、element_id、source_location | 依赖无障碍树实际激活；返回 `None` 或历史帧时要明确区分；当前 JSON 未导出节点边界等全部属性 |
+| `Window::debug_a11y_tree_json()`；`window/a11y/debug.rs` | 帧元数据、角色、文本/值、部分状态；debug 下的 view、element_id、source_location | 依赖无障碍树实际激活；返回 `None` 或历史帧时要明确区分；当前 JSON 未导出 author/accessibility ID、节点边界等全部属性 |
 | `.id()`、`.role()`、`.accessibility_id()`、`.aria_label()` | 为模板和组件补全语义及稳定选择器 | `.id()` 不等同于外部可见的 accessibility_id；无 role 的自绘 div 可能不会进入语义树 |
 | `inspector.rs` | 源码位置和元素检查基础 | 当前检查器不等于可远程导出的完整元素/样式树 |
 | `Window::render_to_image()` | 当前 scene 的像素读回；macOS/Windows 有相应实现 | 受 `test-support` 门控，需要验证 feature 传递、成本和平台支持；不包含所有原生嵌入视图/系统弹窗 |
 | `Window::dispatch_event()` | 通过 GPUI 正常输入分发路径注入事件 | 需要在 UI 线程执行；平台输入法、系统对话框还需系统层测试 |
 
-语义树激活必须纳入最初的 PoC：通过受支持的平台无障碍客户端激活，或给 GPUI 增加仅开发模式生效的观察接口；不要求用户一直开着屏幕阅读器。当前 JSON 中的 `a/b/c` 是每次导出的临时别名，不能作为跨帧测试选择器。当前 JSON 也未包含节点的 author/accessibility ID、bounds、disabled 等关键属性，需要扩展 GPUI 导出或通过适配层采集；CLI 不能凭截图猜测后填充为已知事实。
+语义树激活必须纳入最初的 PoC：通过受支持的平台无障碍客户端激活，或给 GPUI 增加仅开发模式生效的观察接口；不要求用户一直开着屏幕阅读器。当前 JSON 中的 `a/b/c` 是每次导出的临时别名，不能作为跨帧测试选择器。当前 JSON 也未包含节点的 author/accessibility ID、bounds、disabled 等关键属性。模板现在提供显式 `declare_logical_id(element_id, logical_id)` bridge，并只把声明后的映射写入 adapter 输出；未声明时仍保持 unsupported，CLI 不能凭截图或 `.id()` 猜测后填充为已知事实。完整 author ID/bounds 导出仍需上游 GPUI API 或后续 adapter。
 
 推荐默认模板为关键控件设置稳定 `accessibility_id`、role 和名称。例如计数按钮使用 `counter.increment`；测试按这个 ID 查找，不依赖文案语言、坐标或源码行号。无障碍与自动化复用同一套业务语义。
 

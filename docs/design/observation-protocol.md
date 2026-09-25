@@ -133,7 +133,7 @@ F02 必须保存一个基线 CLI 二进制/测试客户端及 v1 模板夹具，
 }
 ```
 
-规范能力名：`ui.heartbeat`、`windows.list`、`capture.scene`、`capture.window`、`capture.device`、`semantics.read`、`semantics.bounds`、`input.pointer`、`input.keyboard`、`assets.applied`、`scenario.reset`、`metrics.cpu`、`metrics.gpu`。
+规范能力名：`ui.heartbeat`、`windows.list`、`capture.scene`、`capture.window`、`capture.device`、`semantics.read`、`semantics.logical_id`、`semantics.bounds`、`input.pointer`、`input.keyboard`、`assets.applied`、`scenario.reset`、`metrics.cpu`、`metrics.gpu`。
 
 能力按 app、backend、设备权限的交集计算，不只按操作系统名称预设。运行中权限撤销或窗口关闭会生成 `capabilities.changed`；旧缓存不能继续使用。
 
@@ -262,6 +262,7 @@ PoC 必须记录：截图读取哪个 scene、文字/布局数据什么时候冻
 
 - `node_ref` 仅在 observation 中有效；下一次观察重新定位。
 - `logical_id` 来自开发者声明的 accessibility ID，重复列表项结合稳定业务 key；不使用导出中的临时 a/b/c 别名。
+- 当前模板的 GPUI 0.3.5 adapter 要求显式 `declare_logical_id(element_id, logical_id)`；该映射只在 debug 语义导出阶段使用，`.id()`/`element_id` 本身不会自动成为 logical_id。
 - 查询支持按 logical_id、role/name、父节点及分页。默认 200 节点或 128 KiB，先到者截断并返回游标。
 - 变化摘要显式接收 before/after 两个 observation。唯一 `logical_id` 的节点按 added/removed/changed/unchanged 比较；同一 logical ID 的临时 `node_ref` 变化不算节点替换。
 - 缺失或重复 `logical_id` 的节点不与另一棵树猜测配对，报告为 `subtree_replaced`，并保留两侧 observation、artifact、run 身份。跨 run 的显式比较允许执行，但 `same_run=false`。

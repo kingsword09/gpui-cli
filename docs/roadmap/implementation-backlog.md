@@ -238,6 +238,11 @@ PR 拆分：操作状态机/假 runner → build request 接入 → runtime capt
 
 验收 O-10/O-11，Counter/Form/List 的实际树对照。回退：G1 保留截图，G2 对依赖语义的用例 unavailable；不以 OCR 猜测填充树。
 
+当前模板已交付 `semantics.logical_id` capability 和显式 `declare_logical_id(element_id,
+logical_id)` bridge；runtime 只为声明成功且在当前 debug tree 中匹配的节点写入 logical_id，
+冲突映射明确失败。GPUI 原生 author/accessibility ID、bounds 与真实 macOS a11y 激活仍需
+平台验收或最小上游补丁，不能把 bridge 编译通过当作 O05 完成。
+
 ### O06 · 查询、分页与变化摘要
 
 代码落点：拟议 `src/devserver/query.rs`、`src/commands/dev.rs` 和 artifact tree index。

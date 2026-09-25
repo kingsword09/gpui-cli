@@ -22,6 +22,14 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 fn connect(server: &DevServer, token: &str) -> TcpStream {
+    connect_with_capabilities(server, token, vec!["semantics.read".into()])
+}
+
+fn connect_with_capabilities(
+    server: &DevServer,
+    token: &str,
+    capabilities: Vec<String>,
+) -> TcpStream {
     let mut socket = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
@@ -37,13 +45,33 @@ fn connect(server: &DevServer, token: &str) -> TcpStream {
             asset_reload: true,
             runtime_version: None,
             gpui_version: None,
-            capabilities: vec!["semantics.read".into()],
+            capabilities,
         },
     );
     let reply: ServerMessage =
         protocol::decode(&protocol::read_frame(&mut socket).unwrap()).unwrap();
     assert!(matches!(reply, ServerMessage::HelloOk { .. }));
     socket
+}
+
+#[test]
+fn logical_id_capability_is_reported_only_when_the_runtime_declares_the_adapter() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    let token = server.expect_run(run).unwrap();
+    let _socket = connect_with_capabilities(
+        &server,
+        &token,
+        vec!["semantics.read".into(), "semantics.logical_id".into()],
+    );
+    wait_until(|| session.store.state().capabilities["semantics.logical_id"]["available"] == true);
+    assert_eq!(
+        session.store.state().capabilities["semantics.logical_id"]["provider"],
+        "gpui-debug-a11y-declared"
+    );
 }
 
 #[test]

@@ -316,7 +316,7 @@ impl State {
             }
             Kind::AppStarting => {
                 self.windows.clear();
-                self.set_semantics_capability(false, Some("runtime_query_required"));
+                self.set_semantics_capability(false, Some("runtime_query_required"), false);
                 self.running = Some(RunState {
                     scope: event.scope.clone(),
                     pid: None,
@@ -496,12 +496,19 @@ impl State {
                     let supported = data["capabilities"].as_array().is_some_and(|capabilities| {
                         capabilities.iter().any(|value| value == "semantics.read")
                     });
+                    let logical_id_supported =
+                        data["capabilities"].as_array().is_some_and(|capabilities| {
+                            capabilities
+                                .iter()
+                                .any(|value| value == "semantics.logical_id")
+                        });
                     self.set_semantics_capability(
                         supported,
                         (!supported).then_some("runtime_unsupported"),
+                        supported && logical_id_supported,
                     );
                 } else if current_run && event.kind == Kind::AppDisconnected {
-                    self.set_semantics_capability(false, Some("app_channel_disconnected"));
+                    self.set_semantics_capability(false, Some("app_channel_disconnected"), false);
                 }
                 if event.kind == Kind::AppExited
                     && data["success"] == false
@@ -555,7 +562,12 @@ impl State {
         }
     }
 
-    fn set_semantics_capability(&mut self, available: bool, reason: Option<&str>) {
+    fn set_semantics_capability(
+        &mut self,
+        available: bool,
+        reason: Option<&str>,
+        logical_id_available: bool,
+    ) {
         self.capabilities["semantics.read"] = json!({
             "available": available,
             "reason": reason,
@@ -563,6 +575,22 @@ impl State {
             "constraints": {
                 "max_bytes": crate::devserver::windows::MAX_SEMANTICS_TREE_BYTES,
                 "max_nodes": crate::devserver::artifacts::MAX_TREE_NODES,
+            },
+        });
+        let logical_id_reason = if logical_id_available {
+            Value::Null
+        } else if available {
+            json!("runtime_unsupported")
+        } else {
+            json!(reason)
+        };
+        self.capabilities["semantics.logical_id"] = json!({
+            "available": logical_id_available,
+            "reason": logical_id_reason,
+            "provider": "gpui-debug-a11y-declared",
+            "constraints": {
+                "requires_explicit_declaration": true,
+                "max_id_bytes": 256,
             },
         });
     }
