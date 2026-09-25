@@ -57,6 +57,11 @@ pub enum Command {
         cursor: Option<String>,
         limit: u32,
     },
+    Diff {
+        before_observation_id: String,
+        after_observation_id: String,
+        limit: u32,
+    },
     OperationGet {
         operation_id: String,
         #[serde(default)]
@@ -398,6 +403,33 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
                     parent,
                     fields,
                     cursor,
+                    limit: limit as usize,
+                },
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    return error_reply(
+                        &session.id,
+                        &request_id,
+                        ApiError {
+                            code: error.code,
+                            message: error.message,
+                            details: error.details,
+                        },
+                    );
+                }
+            }
+        }
+        Command::Diff {
+            before_observation_id,
+            after_observation_id,
+            limit,
+        } => {
+            match super::query::execute_diff(
+                session,
+                super::query::DiffRequest {
+                    before_observation_id,
+                    after_observation_id,
                     limit: limit as usize,
                 },
             ) {

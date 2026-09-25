@@ -249,6 +249,11 @@ PR 拆分：操作状态机/假 runner → build request 接入 → runtime capt
 
 验收 O-11/A-03。输出 50k 节点压力、虚拟化列表分页、跨 observation 游标误用测试。回退：可关闭 diff，保留完整有界快照查询。
 
+当前代码已交付 observation 绑定的 query 与 diff control/CLI：查询支持过滤、投影和游标；diff
+比较两个成功 observation 的唯一 logical_id，返回 bounded added/removed/changed/unchanged
+摘要，并将缺失/重复 ID 的区域降级为 subtree_replaced。真实 GPUI adapter 的稳定 ID 导出、
+50k 节点压力、虚拟列表跨帧重定位和大节点独立 artifact 仍未完成，不能把本切片标为 done。
+
 ### S01 · 场景 schema 与静态校验
 
 代码落点：拟议 `src/scenario/{schema,validate}.rs`、配置 examples/schema fixtures；挂载命令由 S02/S04 完成。

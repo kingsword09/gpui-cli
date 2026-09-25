@@ -4,7 +4,9 @@ use super::events::{Kind, RollingFile, Scope};
 use super::operations::SubmitResult;
 use super::protocol::{self, ClientMessage, ServerMessage};
 use super::session::Session;
+use gpui_dev_protocol::{ArtifactKind, ArtifactManifest};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::net::TcpStream;
 use std::sync::{Arc, mpsc};
@@ -558,6 +560,95 @@ fn semantics_read_roundtrip_is_run_and_window_bound_and_publishes_tree_artifact(
             .data,
         tree.as_bytes()
     );
+}
+
+#[test]
+fn control_diff_compares_two_published_observation_trees() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let scope = Scope {
+        build_id: Some("build-diff".into()),
+        run_id: Some("run-diff".into()),
+        ..Scope::default()
+    };
+    let observations = [
+        (
+            "observation-before",
+            "artifact-before",
+            r#"{"root":"a","nodes":{"a":{"logical_id":"counter.value","children":[],"aria":{"role":"StaticText","value":"0"}}}}"#,
+        ),
+        (
+            "observation-after",
+            "artifact-after",
+            r#"{"root":"x","nodes":{"x":{"logical_id":"counter.value","children":[],"aria":{"role":"StaticText","value":"1"}}}}"#,
+        ),
+    ];
+    for (index, (observation_id, artifact_id, tree)) in observations.iter().enumerate() {
+        let bytes = tree.as_bytes();
+        let digest = Sha256::digest(bytes);
+        let transfer_id = format!("transfer-{index}");
+        session
+            .artifacts
+            .begin(ArtifactManifest {
+                artifact_id: (*artifact_id).into(),
+                transfer_id: transfer_id.clone(),
+                run_id: scope.run_id.clone(),
+                kind: ArtifactKind::Tree,
+                mime: "application/json".into(),
+                declared_bytes: bytes.len() as u64,
+                sha256: format!("sha256:{digest:x}"),
+            })
+            .unwrap();
+        session
+            .artifacts
+            .write_chunk(artifact_id, &transfer_id, 0, bytes)
+            .unwrap();
+        session.artifacts.finish(artifact_id, &transfer_id).unwrap();
+
+        let operation = match session
+            .submit_operation(
+                &format!("test.diff.{index}"),
+                "observe",
+                scope.clone(),
+                json!({"observation_id": observation_id}),
+                super::events::now_ms() + 10_000,
+            )
+            .unwrap()
+        {
+            SubmitResult::Created(snapshot) => snapshot,
+            SubmitResult::Existing(_) => panic!("expected a new observation operation"),
+        };
+        session.start_operation(&operation.operation_id).unwrap();
+        session
+            .finish_operation(
+                &operation.operation_id,
+                super::operations::OperationState::Succeeded,
+                Some(json!({
+                    "observation_id": observation_id,
+                    "semantics": {"artifact_id": artifact_id}
+                })),
+                None,
+            )
+            .unwrap();
+    }
+
+    let control = ControlServer::start(session).unwrap();
+    let reply = control::request(
+        &control.registration,
+        "test.diff",
+        Command::Diff {
+            before_observation_id: "observation-before".into(),
+            after_observation_id: "observation-after".into(),
+            limit: 200,
+        },
+    )
+    .unwrap();
+    assert!(reply.ok);
+    let result = reply.result.unwrap();
+    assert_eq!(result["comparison"], "stable_ids");
+    assert_eq!(result["summary"]["changed"], 1);
+    assert_eq!(result["changed"][0]["logical_id"], "counter.value");
+    assert_eq!(result["changed"][0]["changes"][0]["after"], "1");
 }
 
 #[test]
