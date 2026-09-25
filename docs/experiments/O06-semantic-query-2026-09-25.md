@@ -1,6 +1,6 @@
 # O06：语义查询、分页与绑定（2026-09-25）
 
-状态：第一切片已实现。查询只读、绑定不可变 observation，并且不把 GPUI 临时节点
+状态：查询与变化摘要切片已实现。查询只读、绑定不可变 observation，并且不把 GPUI 临时节点
 引用或 `.id()` 猜成稳定 `logical_id`。
 
 ## 实现范围
@@ -21,15 +21,22 @@
 - cursor 绑定 artifact SHA、筛选条件、字段投影和 limit；跨 observation、跨 artifact
   或修改筛选条件都会返回 `invalid_cursor`。
 - 大单节点无法放进单页时返回 `query_result_too_large`，不静默截断字段。
+- 新增 `gpui dev diff --before BEFORE --after AFTER` 与 control `diff`；比较唯一
+  `logical_id` 的节点字段和稳定子节点关系，返回 added/removed/changed/unchanged。
+- diff 结果显式返回两侧 observation/artifact/run 身份；缺失或重复 ID 的不稳定子树只返回
+  `subtree_replaced`，不按 `node_ref` 配对；跨 run 比较标记 `same_run=false`。
+- diff 与 query 共用 200 条/128 KiB 上限，完整类别计数在 `summary`，截断数量在 `omitted`。
 
 ## 验证
 
-- query 单元测试覆盖 role/name/parent/投影、logical_id 诚实失败和 cursor 绑定。
+- query/diff 单元测试覆盖 role/name/parent/投影、logical_id 诚实失败、cursor 绑定、稳定
+  ID 变化、临时 node_ref 重排、不稳定子树和结果上限。
 - 实际 app-channel semantics roundtrip 测试随后通过 control API 查询刚发布的 tree
   artifact，验证 observation/artifact/run 绑定。
+- control 集成测试通过两个发布的 tree artifact 验证 diff 路由、run 绑定和字段变化。
 - O05 真实 macOS 环境仍为 `a11y_inactive`；因此没有把查询空树伪装成有节点结果。
 
 ## 未覆盖
 
-变化摘要（added/removed/changed）、稳定 logical_id 的 GPUI/runtime 导出、虚拟列表
-跨帧重定位和大节点独立 artifact 仍属于后续 O06/S 场景切片。
+稳定 logical_id 的 GPUI/runtime 导出、虚拟列表跨帧重定位和大节点独立 artifact
+仍属于后续 O05/O06/S 场景切片；当前 diff 对缺少稳定 ID 的区域保持诚实降级。

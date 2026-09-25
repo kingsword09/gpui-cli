@@ -20,6 +20,7 @@ CLI 和 MCP 调用同一个类型化 service 层。MCP 不另起一套 watcher/b
 | `gpui_windows` | A01 | windows.list | 只读 |
 | `gpui_observe` | A01 | observe；sync默认false | sync=true 可构建/重启 |
 | `gpui_query` | A01/O06 | 观察内节点查询 | 只读 |
+| `gpui_diff` | A01/O06 | 两个 observation 的语义变化摘要 | 只读 |
 | `gpui_artifact_read` | A01 | 受限产物读取 | 只读，严格大小上限 |
 | `gpui_operation_get` | A01 | 异步操作查询 | 只读 |
 | `gpui_operation_cancel` | A02 | 显式取消 | 改变操作状态，结果可能unknown |
@@ -43,6 +44,7 @@ CLI 和 MCP 调用同一个类型化 service 层。MCP 不另起一套 watcher/b
 
 - events：最多 128 条/512 KiB，wait最多30s；返回 next_seq/gap。
 - query：最多 200 节点/128 KiB，只返回选择的字段。
+- diff：显式绑定 before/after observation，最多 200 条变化记录/128 KiB；不稳定节点返回 subtree_replaced。
 - artifact_read：默认只返回 metadata；请求图片时先确认尺寸和字节配额。
 - operation_get：返回终态或明确 pending，不长期占住一次工具调用。
 - check/preview：允许异步启动，返回 operation_id；多分钟工作由状态查询完成。

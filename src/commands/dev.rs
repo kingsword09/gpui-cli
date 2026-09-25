@@ -78,6 +78,18 @@ pub enum DevCommand {
         #[arg(long, default_value_t = 200)]
         limit: u32,
     },
+    /// Summarize semantic changes between two completed observations
+    Diff {
+        /// Earlier observation id
+        #[arg(long)]
+        before: String,
+        /// Later observation id
+        #[arg(long)]
+        after: String,
+        /// Maximum change records to return, capped at 200
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+    },
     /// Query or cancel an asynchronous supervisor operation
     Operation {
         #[command(subcommand)]
@@ -305,6 +317,27 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         }
         return Ok(());
     }
+    if let DevCommand::Diff {
+        before,
+        after,
+        limit,
+    } = &args.command
+    {
+        let result = diff_request(&registration, before, after, *limit)?;
+        if args.json {
+            write_value(
+                &Reply::success(
+                    &registration.session_id,
+                    control::next_request_id("dev.diff"),
+                    result,
+                ),
+                false,
+            )?;
+        } else {
+            write_value(&result, true)?;
+        }
+        return Ok(());
+    }
     let request_id = control::next_request_id("dev");
     let (mut after, timeout, follow) = match &args.command {
         DevCommand::Events {
@@ -322,6 +355,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             DevCommand::Build => Command::Build,
             DevCommand::Observe { .. } => unreachable!("observe commands return above"),
             DevCommand::Query { .. } => unreachable!("query commands return above"),
+            DevCommand::Diff { .. } => unreachable!("diff commands return above"),
             DevCommand::Operation { .. } => unreachable!("operation commands return above"),
             DevCommand::Events { .. } => Command::Events {
                 after,
@@ -514,6 +548,32 @@ fn query_request(
             .error
             .map(Into::into)
             .unwrap_or_else(|| ApiError::new("request_failed", "Query request failed")))
+    }
+}
+
+fn diff_request(
+    registration: &control::Registration,
+    before_observation_id: &str,
+    after_observation_id: &str,
+    limit: u32,
+) -> std::result::Result<serde_json::Value, ApiError> {
+    let reply = control::request(
+        registration,
+        &control::next_request_id("dev.diff"),
+        Command::Diff {
+            before_observation_id: before_observation_id.to_owned(),
+            after_observation_id: after_observation_id.to_owned(),
+            limit,
+        },
+    )
+    .map_err(|error| ApiError::new("connection_failed", error.to_string()))?;
+    if reply.ok {
+        Ok(reply.result.unwrap_or_default())
+    } else {
+        Err(reply
+            .error
+            .map(Into::into)
+            .unwrap_or_else(|| ApiError::new("request_failed", "Diff request failed")))
     }
 }
 

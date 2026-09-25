@@ -263,6 +263,9 @@ PoC 必须记录：截图读取哪个 scene、文字/布局数据什么时候冻
 - `node_ref` 仅在 observation 中有效；下一次观察重新定位。
 - `logical_id` 来自开发者声明的 accessibility ID，重复列表项结合稳定业务 key；不使用导出中的临时 a/b/c 别名。
 - 查询支持按 logical_id、role/name、父节点及分页。默认 200 节点或 128 KiB，先到者截断并返回游标。
+- 变化摘要显式接收 before/after 两个 observation。唯一 `logical_id` 的节点按 added/removed/changed/unchanged 比较；同一 logical ID 的临时 `node_ref` 变化不算节点替换。
+- 缺失或重复 `logical_id` 的节点不与另一棵树猜测配对，报告为 `subtree_replaced`，并保留两侧 observation、artifact、run 身份。跨 run 的显式比较允许执行，但 `same_run=false`。
+- diff 结果最多返回 200 条记录和 128 KiB；完整计数保留在 `summary`，被边界截断的类别进入 `omitted`。
 - `.id()` 不自动视作 accessibility ID。自绘 div 缺语义时返回明确缺口。
 - source_location 是可选 debug 信息；生成代码/宏没有准确映射时返回 unknown。
 
