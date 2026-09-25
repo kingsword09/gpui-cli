@@ -132,6 +132,9 @@ impl Session {
                     "provider": "gpui-debug-a11y", "constraints": {
                         "max_bytes": MAX_SEMANTICS_TREE_BYTES,
                         "max_nodes": super::artifacts::MAX_TREE_NODES}},
+                "semantics.logical_id": {"available": false, "reason": "runtime_query_required",
+                    "provider": "gpui-debug-a11y-declared", "constraints": {
+                        "requires_explicit_declaration": true, "max_id_bytes": 256}},
                 "artifact_store": {"available": true, "provider": "session_file_store",
                     "constraints": {"chunk_bytes": gpui_dev_protocol::ARTIFACT_CHUNK_BYTES,
                         "session_bytes": ArtifactLimits::default().session_quota_bytes,

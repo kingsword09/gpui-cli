@@ -1224,7 +1224,9 @@ mod tests {
         let app_cargo = fs::read_to_string(dir.path().join("crates/app/Cargo.toml")).unwrap();
         assert!(app_cargo.contains("gpui-dev = []"));
         assert!(app_cargo.contains("gpui-profile = []"));
+        assert!(app_cargo.contains("serde_json.workspace = true"));
         let workspace_cargo = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        assert!(workspace_cargo.contains("serde_json = \"1.0\""));
         assert!(
             workspace_cargo
                 .contains("version = \"=0.6.1\", git = \"https://github.com/longbridge/gpui-kit\"")
@@ -1237,6 +1239,9 @@ mod tests {
         assert!(desktop_cargo.contains("version = \"0.1.0\", path = \"../app\""));
         assert!(desktop_cargo.contains("gpui-dev = [\"delta-mobile-app/gpui-dev\"]"));
         assert!(desktop_cargo.contains("gpui-profile = [\"delta-mobile-app/gpui-profile\"]"));
+        let app_source = fs::read_to_string(dir.path().join("crates/app/src/lib.rs")).unwrap();
+        assert!(app_source.contains("declare_logical_id(\"increment\", \"counter.increment\")"));
+        assert!(app_source.contains(".accessibility_id(\"counter.increment\")"));
     }
 
     #[test]

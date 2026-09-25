@@ -1,6 +1,6 @@
 # O05：语义快照第一切片（2026-09-25）
 
-状态：已实现受控 `semantics.read` 请求链路；GPUI 语义树是否可用仍由运行时的
+状态：已实现受控 `semantics.read` 请求链路与显式 logical-id adapter；GPUI 语义树是否可用仍由运行时的
 无障碍激活状态决定，不能把普通环境中的 `null` 树解释为成功。
 
 ## 实现范围
@@ -14,6 +14,9 @@
   在途 request 的回复；迟到回复、旧连接回复、关闭窗口回复不会改写当前结果。
 - runtime hello 携带 `semantics.read` 后，当前连接能力会动态标记为
   `available=true`；这表示 provider 支持受控读取，不表示每一帧都有可用语义树。
+- runtime hello 另携带 `semantics.logical_id`；模板提供显式
+  `declare_logical_id(element_id, logical_id)`，只在 debug adapter 中把声明映射写入节点。
+  冲突声明或同一树重复匹配会返回明确 unavailable，不把 `.id()` 自动提升为稳定选择器。
 - `ready` 树先验证 JSON，再以 `ArtifactKind::Tree` 写入会话 ArtifactStore，沿用
   SHA-256、分块、大小和节点数校验；observe 结果同时携带 artifact 引用、节点数、
   provider 和采集时间。
@@ -49,6 +52,6 @@ heartbeat → `gpui dev observe --require semantics` 闭环：
 
 ## 未覆盖
 
-当前仍未实现稳定 `logical_id` 查询、分页/投影、bounds 适配、scene readback 或
-present fence。GPUI debug 导出的 `a/b/c` 等临时节点引用不能跨观察复用，也不作为
-稳定自动化选择器。
+显式 logical-id bridge 已实现，但真实 macOS 无障碍激活环境尚未重新验收；仍未实现
+分页/投影以外的 bounds 适配、scene readback 或 present fence。GPUI debug 导出的
+`a/b/c` 等临时节点引用不能跨观察复用，也不作为稳定自动化选择器。

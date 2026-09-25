@@ -21,6 +21,7 @@ panic = "unwind"
 [workspace.dependencies]
 gpui = { package = "gpui-pre", version = "={{GPUI_PRE_VERSION}}" }
 gpui-kit = { version = "={{GPUI_KIT_VERSION}}", git = "{{GPUI_KIT_GIT}}", rev = "{{GPUI_KIT_REV}}", default-features = false, features = ["component"] }
+serde_json = "1.0"
 # Root crate of the gpui-mobile repository; the `package` key is required
 # because the repository is named differently from the crate inside it.
 gpui-mobile = { package = "{{GPUI_MOBILE_PKG}}", version = "={{GPUI_MOBILE_VERSION}}", git = "{{GPUI_MOBILE_GIT}}", rev = "{{GPUI_MOBILE_REV}}" }
