@@ -1,6 +1,6 @@
 //! One live session, shared by build, process, app-channel and control workers.
 
-use super::artifacts::{ArtifactLimits, ArtifactStore};
+use super::artifacts::{ArtifactInfo, ArtifactLimits, ArtifactStore};
 use super::capture;
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
 use super::inputs::{AssetDelta, Inputs};
@@ -10,12 +10,12 @@ use super::operations::{
 };
 use super::protocol::AssetManifestEntry;
 use super::timing::{SpanGuard, Timing};
-use super::windows::WindowRegistry;
+use super::windows::{MAX_SEMANTICS_TREE_BYTES, SemanticsReadReply, WindowRegistry};
 use anyhow::{Context, Result};
 use gpui_dev_protocol::{ARTIFACT_CHUNK_BYTES, ArtifactKind, ArtifactManifest};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,6 +36,7 @@ pub struct Session {
     pub operations: Arc<OperationStore>,
     build_requests: Mutex<Option<BuildRequest>>,
     observe_requests: Mutex<VecDeque<ObserveRequest>>,
+    semantics_results: Mutex<HashMap<String, SemanticsReadReply>>,
     next_build: AtomicU64,
     next_run: AtomicU64,
 }
@@ -54,14 +55,28 @@ pub struct ObserveRequest {
     pub target_revision: Revision,
     pub input_hash: String,
     pub build_requested: bool,
+    pub semantics_requested: bool,
 }
 
 struct WindowCaptureTarget<'a> {
     run: &'a super::events::RunState,
     window: &'a super::events::WindowSnapshot,
-    pid: u32,
-    provider: &'a str,
+    pid: Option<u32>,
+    provider: Option<&'a str>,
     timeout: Duration,
+}
+
+struct ArtifactPublication<'a> {
+    operation: &'a OperationSnapshot,
+    event_scope: &'a Scope,
+    run_id: Option<String>,
+    identity: &'a str,
+    suffix: &'a str,
+    bytes: &'a [u8],
+    kind: ArtifactKind,
+    mime: &'a str,
+    provider: Option<&'a str>,
+    scope: &'a str,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -113,8 +128,10 @@ impl Session {
                     "constraints": {"scope": "window", "consistency": "best_effort"}},
                 "capture.device": {"available": false, "reason": "backend_unsupported",
                     "provider": null, "constraints": {}},
-                "semantics.read": {"available": false, "reason": "backend_unsupported",
-                    "provider": null, "constraints": {}},
+                "semantics.read": {"available": false, "reason": "runtime_query_required",
+                    "provider": "gpui-debug-a11y", "constraints": {
+                        "max_bytes": MAX_SEMANTICS_TREE_BYTES,
+                        "max_nodes": super::artifacts::MAX_TREE_NODES}},
                 "artifact_store": {"available": true, "provider": "session_file_store",
                     "constraints": {"chunk_bytes": gpui_dev_protocol::ARTIFACT_CHUNK_BYTES,
                         "session_bytes": ArtifactLimits::default().session_quota_bytes,
@@ -144,6 +161,7 @@ impl Session {
             operations: Arc::new(OperationStore::new(MAX_ACTIVE_OPERATIONS)),
             build_requests: Mutex::new(None),
             observe_requests: Mutex::new(VecDeque::new()),
+            semantics_results: Mutex::new(HashMap::new()),
             dir,
             stopping: AtomicBool::new(false),
             inputs: Mutex::new(Inputs::default()),
@@ -253,6 +271,7 @@ impl Session {
                     target_revision,
                     input_hash,
                     build_requested: false,
+                    semantics_requested: false,
                 });
         }
         Ok(result)
@@ -263,6 +282,26 @@ impl Session {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .pop_front()
+    }
+
+    /// Stores only bounded, identity-checked replies from the app channel.
+    /// The live coordinator consumes them on its next non-blocking tick.
+    pub fn accept_semantics_result(&self, reply: SemanticsReadReply) {
+        let mut results = self
+            .semantics_results
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if results.len() >= 64 {
+            results.clear();
+        }
+        results.insert(reply.request_id.clone(), reply);
+    }
+
+    fn take_semantics_result(&self, request_id: &str) -> Option<SemanticsReadReply> {
+        self.semantics_results
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(request_id)
     }
 
     /// Advances observe work on the single live coordinator. Pending requests
@@ -474,12 +513,14 @@ impl Session {
                 self.requeue_observe(request);
                 continue;
             }
-            let Some(pid) = run.pid else {
-                self.requeue_observe(request);
-                continue;
-            };
             let provider = self.selected_window_provider(&request.require);
-            let Some(provider) = provider else {
+            let needs_screenshot = request.require.iter().any(|requirement| {
+                matches!(
+                    requirement.as_str(),
+                    "screenshot" | "capture.scene" | "capture.window" | "capture.device"
+                )
+            });
+            if needs_screenshot && provider.is_none() {
                 self.fail_observe(
                     &operation,
                     "unavailable",
@@ -487,6 +528,59 @@ impl Session {
                     json!({"required": request.require}),
                 );
                 continue;
+            }
+            let needs_semantics = request
+                .require
+                .iter()
+                .any(|requirement| matches!(requirement.as_str(), "semantics" | "semantics.read"));
+            let semantics = if needs_semantics {
+                if !request.semantics_requested {
+                    match self.windows.request_semantics(
+                        &operation.scope,
+                        &window.window_id,
+                        request.operation_id.clone(),
+                        MAX_SEMANTICS_TREE_BYTES,
+                    ) {
+                        Ok(_) => {
+                            request.semantics_requested = true;
+                            self.requeue_observe(request);
+                            continue;
+                        }
+                        Err("semantics_busy") => {
+                            self.requeue_observe(request);
+                            continue;
+                        }
+                        Err(reason) => {
+                            self.fail_observe(
+                                &operation,
+                                if reason == "window_closed" {
+                                    "window_closed"
+                                } else {
+                                    "unavailable"
+                                },
+                                "the selected window cannot answer a semantics read",
+                                json!({"window_id": window.window_id, "reason": reason}),
+                            );
+                            continue;
+                        }
+                    }
+                }
+                let Some(result) = self.take_semantics_result(&request.operation_id) else {
+                    self.requeue_observe(request);
+                    continue;
+                };
+                Some(result)
+            } else {
+                None
+            };
+            let pid = if provider.is_some() {
+                let Some(pid) = run.pid else {
+                    self.requeue_observe(request);
+                    continue;
+                };
+                Some(pid)
+            } else {
+                None
             };
             let remaining =
                 Duration::from_millis(operation.deadline_at_ms.saturating_sub(events::now_ms()));
@@ -504,6 +598,7 @@ impl Session {
                     provider,
                     timeout: remaining,
                 },
+                semantics,
             ) {
                 Ok(result) => {
                     let _ = self.finish_operation(
@@ -526,6 +621,12 @@ impl Session {
     }
 
     fn unavailable_observe_requirements(&self, requirements: &[String]) -> Option<Vec<Value>> {
+        let state = self.store.state();
+        let semantics_available = state.capabilities["semantics.read"]["available"] == true
+            && state
+                .running
+                .as_ref()
+                .is_some_and(|run| run.channel == "connected");
         let missing = requirements
             .iter()
             .filter_map(|requirement| match requirement.as_str() {
@@ -534,8 +635,9 @@ impl Session {
                 "screenshot" => Some(json!({"requirement": requirement,
                     "alternatives": ["capture.scene", "capture.window", "capture.device"],
                     "reason": "backend_unsupported"})),
-                "semantics" => Some(json!({"requirement": requirement,
-                    "alternatives": ["semantics.read"], "reason": "backend_unsupported"})),
+                "semantics" | "semantics.read" if semantics_available => None,
+                "semantics" | "semantics.read" => Some(json!({"requirement": requirement,
+                    "alternatives": ["semantics.read"], "reason": "runtime_unavailable"})),
                 capability => Some(json!({"requirement": capability,
                     "alternatives": [capability], "reason": "backend_unsupported"})),
             })
@@ -579,11 +681,128 @@ impl Session {
         );
     }
 
+    fn publish_observation_artifact(
+        &self,
+        publication: ArtifactPublication<'_>,
+    ) -> Result<ArtifactInfo, OperationError> {
+        let ArtifactPublication {
+            operation,
+            event_scope,
+            run_id,
+            identity,
+            suffix,
+            bytes,
+            kind,
+            mime,
+            provider,
+            scope,
+        } = publication;
+        let digest = Sha256::digest(bytes);
+        let digest_hex = format!("{digest:x}");
+        let artifact_id = format!("obs-{identity}-{suffix}");
+        let transfer_id = format!("xfer-{identity}-{suffix}");
+        let kind_name = match kind {
+            ArtifactKind::Png => "png",
+            ArtifactKind::Tree => "tree",
+            ArtifactKind::Blob => "blob",
+        };
+        let manifest = ArtifactManifest {
+            artifact_id: artifact_id.clone(),
+            transfer_id: transfer_id.clone(),
+            run_id,
+            kind,
+            mime: mime.into(),
+            declared_bytes: bytes.len() as u64,
+            sha256: digest_hex.clone(),
+        };
+        let artifact = self.artifacts.begin(manifest).map_err(|error| {
+            self.emit(
+                Kind::ArtifactRejected,
+                event_scope,
+                json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                    "code": error.code.as_str(), "message": error.message}),
+            );
+            OperationError::with_details(
+                error.code.as_str(),
+                error.message,
+                json!({"artifact_id": artifact_id}),
+            )
+        })?;
+        self.emit(
+            Kind::ArtifactDeclared,
+            event_scope,
+            json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                "kind": kind_name, "declared_bytes": artifact.manifest.declared_bytes,
+                "sha256": digest_hex, "provider": provider, "scope": scope}),
+        );
+        for (index, chunk) in bytes.chunks(ARTIFACT_CHUNK_BYTES).enumerate() {
+            if !self.operation_is_running(&operation.operation_id) {
+                let _ = self.artifacts.abort(&artifact_id, &transfer_id);
+                return Err(OperationError::with_details(
+                    "cancelled",
+                    "observe was cancelled while an observation artifact was transferring",
+                    json!({"artifact_id": artifact_id}),
+                ));
+            }
+            let offset = (index * ARTIFACT_CHUNK_BYTES) as u64;
+            if let Err(error) =
+                self.artifacts
+                    .write_chunk(&artifact_id, &transfer_id, offset, chunk)
+            {
+                let _ = self.artifacts.abort(&artifact_id, &transfer_id);
+                self.emit(
+                    Kind::ArtifactRejected,
+                    event_scope,
+                    json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                        "code": error.code.as_str(), "message": error.message}),
+                );
+                return Err(OperationError::with_details(
+                    error.code.as_str(),
+                    error.message,
+                    json!({"artifact_id": artifact_id}),
+                ));
+            }
+        }
+        if !self.operation_is_running(&operation.operation_id) {
+            let _ = self.artifacts.abort(&artifact_id, &transfer_id);
+            return Err(OperationError::with_details(
+                "cancelled",
+                "observe was cancelled before an observation artifact was published",
+                json!({"artifact_id": artifact_id}),
+            ));
+        }
+        let artifact = self
+            .artifacts
+            .finish(&artifact_id, &transfer_id)
+            .map_err(|error| {
+                self.emit(
+                    Kind::ArtifactRejected,
+                    event_scope,
+                    json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                        "code": error.code.as_str(), "message": error.message}),
+                );
+                OperationError::with_details(
+                    error.code.as_str(),
+                    error.message,
+                    json!({"artifact_id": artifact_id}),
+                )
+            })?;
+        self.emit(
+            Kind::ArtifactPublished,
+            event_scope,
+            json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
+                "kind": kind_name, "declared_bytes": artifact.manifest.declared_bytes,
+                "sha256": artifact.manifest.sha256}),
+        );
+        Ok(artifact)
+    }
+
     fn capture_observation(
         &self,
         operation: &OperationSnapshot,
         request: &ObserveRequest,
         target: WindowCaptureTarget<'_>,
+        semantics: Option<SemanticsReadReply>,
     ) -> Result<Value, OperationError> {
         let WindowCaptureTarget {
             run,
@@ -593,44 +812,62 @@ impl Session {
             timeout,
         } = target;
         let scene_epoch_before = window.scene_epoch;
-        if request
+        let semantics = if request
             .require
             .iter()
             .any(|requirement| requirement == "semantics" || requirement == "semantics.read")
         {
-            return Err(OperationError::with_details(
-                "unavailable",
-                "semantic capture is not available in this runtime",
-                json!({"provider": provider, "missing": ["semantics.read"]}),
-            ));
-        }
+            let Some(result) = semantics else {
+                return Err(OperationError::new(
+                    "unavailable",
+                    "the runtime did not return a semantics result",
+                ));
+            };
+            if result.status != "ready" || !result.a11y_active || result.tree_json.is_none() {
+                return Err(OperationError::with_details(
+                    "unavailable",
+                    "semantic capture is unavailable for the selected window",
+                    json!({"provider": "gpui-debug-a11y", "status": result.status,
+                        "a11y_active": result.a11y_active, "reason": result.reason,
+                        "captured_at_ms": result.captured_at_ms}),
+                ));
+            }
+            Some(result)
+        } else {
+            None
+        };
         if !self.operation_is_running(&operation.operation_id) {
             return Err(OperationError::new(
                 "cancelled",
                 "observe was cancelled before the window screenshot started",
             ));
         }
-        let capture = match capture::capture_window_with_cancel(pid, &window.title, timeout, || {
-            !self.operation_is_running(&operation.operation_id)
-        }) {
-            Ok(capture) => capture,
-            Err(_) if !self.operation_is_running(&operation.operation_id) => {
-                return Err(OperationError::new(
-                    "cancelled",
-                    "observe was cancelled while the window screenshot was being captured",
-                ));
+        let capture = if let Some(provider) = provider {
+            let pid = pid.expect("screenshot provider requires a process id");
+            match capture::capture_window_with_cancel(pid, &window.title, timeout, || {
+                !self.operation_is_running(&operation.operation_id)
+            }) {
+                Ok(capture) => Some(capture),
+                Err(_) if !self.operation_is_running(&operation.operation_id) => {
+                    return Err(OperationError::new(
+                        "cancelled",
+                        "observe was cancelled while the window screenshot was being captured",
+                    ));
+                }
+                Err(error) => {
+                    let code = error
+                        .downcast_ref::<capture::CaptureError>()
+                        .map_or("capture_failed", |failure| failure.code());
+                    return Err(OperationError::with_details(
+                        code,
+                        error.to_string(),
+                        json!({"provider": provider, "code": code, "window_id": window.window_id,
+                            "run_id": run.scope.run_id, "pid": pid}),
+                    ));
+                }
             }
-            Err(error) => {
-                let code = error
-                    .downcast_ref::<capture::CaptureError>()
-                    .map_or("capture_failed", |failure| failure.code());
-                return Err(OperationError::with_details(
-                    code,
-                    error.to_string(),
-                    json!({"provider": provider, "code": code, "window_id": window.window_id,
-                        "run_id": run.scope.run_id, "pid": pid}),
-                ));
-            }
+        } else {
+            None
         };
         if !self.operation_is_running(&operation.operation_id) {
             return Err(OperationError::new(
@@ -679,113 +916,83 @@ impl Session {
                     "current_input_hash": latest_hash}),
             ));
         }
-        let (pixel_width, pixel_height) = png_dimensions(&capture.bytes)
-            .map_err(|message| OperationError::new("capture_invalid", message))?;
-        let digest = Sha256::digest(&capture.bytes);
-        let digest_hex = format!("{digest:x}");
         let identity = format!("{:x}", Sha256::digest(operation.operation_id.as_bytes()));
-        let artifact_id = format!("obs-{}-window", &identity[..32]);
-        let transfer_id = format!("xfer-{}", &identity[..32]);
-        let manifest = ArtifactManifest {
-            artifact_id: artifact_id.clone(),
-            transfer_id: transfer_id.clone(),
-            run_id: run.scope.run_id.clone(),
-            kind: ArtifactKind::Png,
-            mime: "image/png".into(),
-            declared_bytes: capture.bytes.len() as u64,
-            sha256: digest_hex.clone(),
-        };
         let event_scope = Scope {
             build_id: run.scope.build_id.clone(),
             run_id: run.scope.run_id.clone(),
             revision: run.scope.revision.clone(),
         };
-        let artifact = self.artifacts.begin(manifest).map_err(|error| {
-            self.emit(
-                Kind::ArtifactRejected,
-                &event_scope,
-                json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
-                    "code": error.code.as_str(), "message": error.message}),
-            );
-            OperationError::with_details(
-                error.code.as_str(),
-                error.message,
-                json!({"artifact_id": artifact_id}),
-            )
-        })?;
-        self.emit(
-            Kind::ArtifactDeclared,
-            &event_scope,
-            json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
-                "kind": "png", "declared_bytes": artifact.manifest.declared_bytes,
-                "sha256": digest_hex, "provider": provider, "scope": "window"}),
-        );
-        for (index, chunk) in capture.bytes.chunks(ARTIFACT_CHUNK_BYTES).enumerate() {
-            if !self.operation_is_running(&operation.operation_id) {
-                let _ = self.artifacts.abort(&artifact_id, &transfer_id);
-                return Err(OperationError::with_details(
-                    "cancelled",
-                    "observe was cancelled while its screenshot artifact was transferring",
-                    json!({"artifact_id": artifact_id}),
-                ));
-            }
-            let offset = (index * ARTIFACT_CHUNK_BYTES) as u64;
-            if let Err(error) =
-                self.artifacts
-                    .write_chunk(&artifact_id, &transfer_id, offset, chunk)
-            {
-                let _ = self.artifacts.abort(&artifact_id, &transfer_id);
-                self.emit(
-                    Kind::ArtifactRejected,
-                    &event_scope,
-                    json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
-                        "code": error.code.as_str(), "message": error.message}),
-                );
-                return Err(OperationError::with_details(
-                    error.code.as_str(),
-                    error.message,
-                    json!({"artifact_id": artifact_id}),
-                ));
-            }
-        }
-        if !self.operation_is_running(&operation.operation_id) {
-            let _ = self.artifacts.abort(&artifact_id, &transfer_id);
-            return Err(OperationError::with_details(
-                "cancelled",
-                "observe was cancelled before its screenshot artifact was published",
-                json!({"artifact_id": artifact_id}),
-            ));
-        }
-        let artifact = self
-            .artifacts
-            .finish(&artifact_id, &transfer_id)
-            .map_err(|error| {
-                self.emit(
-                    Kind::ArtifactRejected,
-                    &event_scope,
-                    json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
-                    "code": error.code.as_str(), "message": error.message}),
-                );
+        let screenshot_artifact = if let Some(capture) = capture.as_ref() {
+            let (pixel_width, pixel_height) = png_dimensions(&capture.bytes)
+                .map_err(|message| OperationError::new("capture_invalid", message))?;
+            let artifact = self.publish_observation_artifact(ArtifactPublication {
+                operation,
+                event_scope: &event_scope,
+                run_id: run.scope.run_id.clone(),
+                identity: &identity[..32],
+                suffix: "window",
+                bytes: &capture.bytes,
+                kind: ArtifactKind::Png,
+                mime: "image/png",
+                provider,
+                scope: "window",
+            })?;
+            Some((artifact, pixel_width, pixel_height))
+        } else {
+            None
+        };
+        let semantics_artifact = if let Some(semantics) = semantics.as_ref() {
+            let tree = semantics
+                .tree_json
+                .as_ref()
+                .expect("ready semantics result has a tree");
+            let tree_value: Value = serde_json::from_str(tree).map_err(|error| {
                 OperationError::with_details(
-                    error.code.as_str(),
-                    error.message,
-                    json!({"artifact_id": artifact_id}),
+                    "semantics_invalid",
+                    "the runtime returned invalid semantics JSON",
+                    json!({"message": error.to_string()}),
                 )
             })?;
-        self.emit(
-            Kind::ArtifactPublished,
-            &event_scope,
-            json!({"operation_id": operation.operation_id, "artifact_id": artifact_id,
-                "kind": "png", "declared_bytes": artifact.manifest.declared_bytes,
-                "sha256": digest_hex}),
-        );
+            let node_count = tree_value
+                .get("nodes")
+                .and_then(Value::as_object)
+                .map_or(0, serde_json::Map::len);
+            let artifact = self.publish_observation_artifact(ArtifactPublication {
+                operation,
+                event_scope: &event_scope,
+                run_id: run.scope.run_id.clone(),
+                identity: &identity[..32],
+                suffix: "semantics",
+                bytes: tree.as_bytes(),
+                kind: ArtifactKind::Tree,
+                mime: "application/json",
+                provider: Some("gpui-debug-a11y"),
+                scope: "semantics",
+            })?;
+            Some((artifact, node_count, semantics.captured_at_ms))
+        } else {
+            None
+        };
         let scene_matches = current_window.as_ref().is_some_and(|current| {
-            current.scene_epoch == scene_epoch_before
+            semantics.is_none()
+                && current.scene_epoch == scene_epoch_before
                 && current.scene_source_revision == Some(run.scope.revision.source_revision)
                 && current.scene_asset_revision == Some(run.scope.revision.asset_revision)
         });
+        let mut artifacts = Vec::new();
+        if let Some((artifact, _, _)) = &screenshot_artifact {
+            artifacts.push(json!(artifact));
+        }
+        if let Some((artifact, _, _)) = &semantics_artifact {
+            artifacts.push(json!(artifact));
+        }
+        let (pixel_width, pixel_height) = screenshot_artifact
+            .as_ref()
+            .map(|(_, width, height)| (*width, *height))
+            .unwrap_or((0, 0));
+        let observation_provider = provider.unwrap_or("gpui-debug-a11y");
         let observation_id = format!("observation-{}", &identity[..32]);
-        Ok(json!({
+        let mut result = json!({
             "observation_id": observation_id,
             "run_id": run.scope.run_id,
             "build_id": run.scope.build_id,
@@ -800,28 +1007,44 @@ impl Session {
             "scene_epoch_before": scene_epoch_before,
             "scene_epoch_after": current_window.as_ref().map(|current| current.scene_epoch),
             "presented_frame_id": current_window.as_ref().and_then(|current| current.presented_frame_id.clone()),
-            "provider": provider,
-            "scope": "window",
+            "provider": observation_provider,
+            "scope": if provider.is_some() { "window" } else { "semantics" },
             "consistency": "best_effort",
-            "capture_started_at_ms": capture.started_at_ms,
-            "capture_finished_at_ms": capture.finished_at_ms,
-            "window_number": capture.window_number,
-            "window_match": capture.window_match,
-            "window_bounds": capture.bounds,
-            "pixel_width": pixel_width,
-            "pixel_height": pixel_height,
+            "capture_started_at_ms": capture.as_ref().map(|capture| capture.started_at_ms),
+            "capture_finished_at_ms": capture.as_ref().map(|capture| capture.finished_at_ms),
+            "window_number": capture.as_ref().map(|capture| capture.window_number),
+            "window_match": capture.as_ref().map(|capture| capture.window_match.clone()),
+            "window_bounds": capture.as_ref().map(|capture| capture.bounds),
+            "pixel_width": capture.as_ref().map(|_| pixel_width),
+            "pixel_height": capture.as_ref().map(|_| pixel_height),
             "logical_width": window.width,
             "logical_height": window.height,
             "scale_milli": window.scale_milli,
-            "orientation": capture_orientation(pixel_width, pixel_height),
+            "orientation": capture
+                .as_ref()
+                .map(|_| capture_orientation(pixel_width, pixel_height)),
             "includes_system_ui": false,
             "freshness": {
                 "source": if run.scope.revision.source_revision == request.target_revision.source_revision { "current" } else { "stale" },
                 "assets": if run.assets_confirmed && run.scope.revision.asset_revision == request.target_revision.asset_revision { "applied" } else { "unknown" },
                 "scene": if scene_matches { "matches" } else { "unknown" },
             },
-            "artifacts": [artifact],
-        }))
+            "artifacts": artifacts,
+        });
+        if let Some((artifact, node_count, captured_at_ms)) = semantics_artifact {
+            result["semantics"] = json!({
+                "artifact": artifact,
+                "artifact_id": result["artifacts"].as_array()
+                    .and_then(|artifacts| artifacts.last())
+                    .and_then(|artifact| artifact["artifact_id"].as_str()),
+                "node_count": node_count,
+                "captured_at_ms": captured_at_ms,
+                "scene_epoch": current_window.as_ref().map(|current| current.scene_epoch),
+                "provider": "gpui-debug-a11y",
+                "consistency": "best_effort",
+            });
+        }
+        Ok(result)
     }
 
     fn operation_is_running(&self, operation_id: &str) -> bool {

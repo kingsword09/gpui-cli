@@ -44,6 +44,39 @@ pub fn register_window(
     let _ = (window_id, title, width, height, scale_milli, foreground);
 }
 
+/// Registers a generated window together with its GPUI handle so the live
+/// runtime can perform semantics reads on the UI thread.
+pub fn register_window_with_handle(
+    window_id: &str,
+    title: &str,
+    width: u32,
+    height: u32,
+    scale_milli: u32,
+    foreground: bool,
+    handle: AnyWindowHandle,
+) {
+    #[cfg(debug_assertions)]
+    live::register_window_with_handle(
+        window_id,
+        title,
+        width,
+        height,
+        scale_milli,
+        foreground,
+        handle,
+    );
+    #[cfg(not(debug_assertions))]
+    let _ = (
+        window_id,
+        title,
+        width,
+        height,
+        scale_milli,
+        foreground,
+        handle,
+    );
+}
+
 /// Reports a generated window closing to the live supervisor in debug builds.
 pub fn close_window(window_id: &str, reason: Option<&str>) {
     #[cfg(debug_assertions)]
@@ -94,7 +127,8 @@ pub fn pump_live_assets(cx: &mut App) {
                     .await;
                 let asset_events = crate::live::take_asset_events();
                 let probes = crate::live::take_ui_probe_requests();
-                if asset_events.is_empty() && probes.is_empty() {
+                let semantics = crate::live::take_semantics_read_requests();
+                if asset_events.is_empty() && probes.is_empty() && semantics.is_empty() {
                     continue;
                 }
                 cx.update(|cx| {
@@ -164,6 +198,9 @@ pub fn pump_live_assets(cx: &mut App) {
                             responsive,
                             Some(latency_ms),
                         );
+                    }
+                    for request in semantics {
+                        crate::live::answer_semantics_read(cx, request);
                     }
                     if has_asset_changes {
                         cx.refresh_windows();

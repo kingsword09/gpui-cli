@@ -92,6 +92,17 @@ pub enum ClientMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         latency_ms: Option<u64>,
     },
+    SemanticsResult {
+        request_id: String,
+        window_id: String,
+        status: String,
+        a11y_active: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tree_json: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        captured_at_ms: u64,
+    },
     AssetsApplied {
         transfer_id: String,
         asset_revision: u64,
@@ -199,6 +210,11 @@ pub enum ServerMessage {
     ProbeUi {
         request_id: String,
         window_id: String,
+    },
+    SemanticsQuery {
+        request_id: String,
+        window_id: String,
+        max_bytes: u32,
     },
     ArtifactBegin {
         manifest: ArtifactManifest,
@@ -578,6 +594,29 @@ mod tests {
         assert_eq!(
             decode::<ClientMessage>(&encode(&scene).unwrap()).unwrap(),
             scene
+        );
+
+        let query = ServerMessage::SemanticsQuery {
+            request_id: "op-1".into(),
+            window_id: "main".into(),
+            max_bytes: 256 * 1024,
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&query).unwrap()).unwrap(),
+            query
+        );
+        let result = ClientMessage::SemanticsResult {
+            request_id: "op-1".into(),
+            window_id: "main".into(),
+            status: "ready".into(),
+            a11y_active: true,
+            tree_json: Some(r#"{"root":"a","nodes":{}}"#.into()),
+            reason: None,
+            captured_at_ms: 42,
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&result).unwrap()).unwrap(),
+            result
         );
     }
 }

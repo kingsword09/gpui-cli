@@ -4,7 +4,10 @@
 use super::events::{Kind, Scope, clip, now_ms};
 use super::protocol::{self, AssetManifestEntry, ClientMessage, PROTO_VERSION, ServerMessage};
 use super::session::{Session, random_token};
-use super::windows::{ProbeReply, SceneCompletion, WindowRegistration, WindowRegistry};
+use super::windows::{
+    ProbeReply, SceneCompletion, SemanticsReadReply, SemanticsRequest, WindowRegistration,
+    WindowRegistry,
+};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::collections::HashMap;
@@ -103,6 +106,65 @@ impl Shared {
             return false;
         }
         true
+    }
+
+    fn record_semantics_reply(&self, scope: &Scope, connection_id: u64, reply: SemanticsReadReply) {
+        let status = reply.status.clone();
+        let tree_bytes = reply.tree_json.as_ref().map_or(0, String::len);
+        let result = self
+            .windows
+            .record_semantics_result(scope, connection_id, reply.clone());
+        if result.accepted
+            && let Some(session) = &self.session
+            && let Some(accepted) = result.reply
+        {
+            session.accept_semantics_result(accepted);
+        }
+        self.emit(
+            Kind::SemanticsRead,
+            scope,
+            json!({
+                "request_id": clip(&reply.request_id, 128),
+                "window_id": clip(&reply.window_id, 128),
+                "status": clip(&status, 32),
+                "a11y_active": reply.a11y_active,
+                "tree_bytes": tree_bytes,
+                "reason": result.reason.or(reply.reason.as_deref()),
+                "accepted": result.accepted,
+                "captured_at_ms": reply.captured_at_ms,
+                "received_at_ms": now_ms(),
+                "connection_id": connection_id,
+            }),
+        );
+        self.changed.notify_all();
+    }
+
+    fn fail_semantics_request(&self, scope: &Scope, request: &SemanticsRequest, reason: &str) {
+        let result = self
+            .windows
+            .fail_semantics_request(scope, request, reason, now_ms());
+        if result.accepted
+            && let Some(session) = &self.session
+            && let Some(reply) = result.reply
+        {
+            session.accept_semantics_result(reply);
+        }
+        self.emit(
+            Kind::SemanticsRead,
+            scope,
+            json!({
+                "request_id": request.request_id,
+                "window_id": request.window_id,
+                "status": "unavailable",
+                "a11y_active": false,
+                "tree_bytes": 0,
+                "reason": reason,
+                "accepted": result.accepted,
+                "received_at_ms": now_ms(),
+                "connection_id": request.connection_id,
+            }),
+        );
+        self.changed.notify_all();
     }
 }
 
@@ -424,6 +486,9 @@ fn heartbeat_loop(shared: &Arc<Shared>) {
         }
         if let Some(scope) = shared.current_scope() {
             let tick = shared.windows.tick(scope.run_id.as_deref(), Instant::now());
+            for request in tick.semantics_timeouts {
+                shared.fail_semantics_request(&scope, &request, "semantics_timeout");
+            }
             for timeout in tick.timeouts {
                 shared.emit(
                     Kind::UiProbeResult,
@@ -448,6 +513,22 @@ fn heartbeat_loop(shared: &Arc<Shared>) {
                         window_id: probe.window_id,
                     },
                 );
+            }
+            for request in shared
+                .windows
+                .take_semantics_requests(scope.run_id.as_deref())
+            {
+                let sent = shared.send_to(
+                    request.connection_id,
+                    &ServerMessage::SemanticsQuery {
+                        request_id: request.request_id.clone(),
+                        window_id: request.window_id.clone(),
+                        max_bytes: u32::try_from(request.max_bytes).unwrap_or(u32::MAX),
+                    },
+                );
+                if !sent {
+                    shared.fail_semantics_request(&scope, &request, "app_channel_unavailable");
+                }
             }
         }
         thread::sleep(Duration::from_millis(100));
@@ -720,6 +801,33 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                             "window_id": clip(&window_id, 128), "responsive": responsive,
                             "latency_ms": latency_ms, "accepted": result.accepted,
                             "reason": result.reason, "received_at_ms": received_at_ms}),
+                    );
+                }
+                ClientMessage::SemanticsResult {
+                    request_id,
+                    window_id,
+                    status,
+                    a11y_active,
+                    tree_json,
+                    reason,
+                    captured_at_ms,
+                } => {
+                    let request_id = clip(&request_id, 128);
+                    let window_id = clip(&window_id, 128);
+                    let status = clip(&status, 32);
+                    let reason = reason.map(|value| clip(&value, 256));
+                    shared.record_semantics_reply(
+                        &scope,
+                        id,
+                        SemanticsReadReply {
+                            request_id,
+                            window_id,
+                            status,
+                            a11y_active,
+                            tree_json,
+                            reason,
+                            captured_at_ms,
+                        },
                     );
                 }
                 ClientMessage::SceneCompleted {
