@@ -259,6 +259,18 @@ pub enum ServerMessage {
         scene_epoch: u64,
         deadline_at_ms: u64,
     },
+    ScrollDispatch {
+        operation_id: String,
+        observation_id: String,
+        window_id: String,
+        logical_id: String,
+        x_milli: u32,
+        y_milli: u32,
+        delta_x_milli: i32,
+        delta_y_milli: i32,
+        scene_epoch: u64,
+        deadline_at_ms: u64,
+    },
     ArtifactBegin {
         manifest: ArtifactManifest,
     },
@@ -728,6 +740,23 @@ mod tests {
         assert_eq!(
             decode::<ClientMessage>(&encode(&action_result).unwrap()).unwrap(),
             action_result
+        );
+
+        let scroll = ServerMessage::ScrollDispatch {
+            operation_id: "op-scroll-1".into(),
+            observation_id: "observation-1".into(),
+            window_id: "main".into(),
+            logical_id: "list.viewport".into(),
+            x_milli: 125_500,
+            y_milli: 240_250,
+            delta_x_milli: 0,
+            delta_y_milli: -12_500,
+            scene_epoch: 8,
+            deadline_at_ms: 123_789,
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&scroll).unwrap()).unwrap(),
+            scroll
         );
     }
 }

@@ -714,7 +714,7 @@ fn semantics_read_roundtrip_is_run_and_window_bound_and_publishes_tree_artifact(
 }
 
 #[test]
-fn left_click_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation() {
+fn pointer_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
     let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
@@ -731,9 +731,11 @@ fn left_click_dispatch_is_owner_bound_and_finishes_only_after_target_confirmatio
             "semantics.read".into(),
             "semantics.logical_id".into(),
             "input.pointer.click".into(),
+            "input.pointer.scroll".into(),
         ],
     );
     wait_until(|| session.store.state().capabilities["input.pointer.click"]["available"] == true);
+    wait_until(|| session.store.state().capabilities["input.pointer.scroll"]["available"] == true);
 
     send(
         &mut socket,
@@ -798,7 +800,7 @@ fn left_click_dispatch_is_owner_bound_and_finishes_only_after_target_confirmatio
             status: "ready".into(),
             a11y_active: true,
             tree_json: Some(
-                r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window"},"children":["b"]},"b":{"logical_id":"counter.increment","aria":{"role":"Button","enabled":true},"bounds":{"x":10,"y":20,"width":10,"height":10},"children":[]}}}"#.into(),
+                r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window"},"children":["b","c"]},"b":{"logical_id":"counter.increment","aria":{"role":"Button","enabled":true},"bounds":{"x":10,"y":20,"width":10,"height":10},"children":[]},"c":{"logical_id":"list.viewport","aria":{"role":"List","enabled":true},"bounds":{"x":100,"y":100,"width":100,"height":200},"children":[]}}}"#.into(),
             ),
             reason: None,
             captured_at_ms: 42,
@@ -837,7 +839,7 @@ fn left_click_dispatch_is_owner_bound_and_finishes_only_after_target_confirmatio
         .submit_action(
             "test.action.left-click",
             super::actions::ActionRequest {
-                observation_id,
+                observation_id: observation_id.clone(),
                 window_id: "main".into(),
                 logical_id: "counter.increment".into(),
                 action: super::actions::Action::Click {
@@ -907,6 +909,82 @@ fn left_click_dispatch_is_owner_bound_and_finishes_only_after_target_confirmatio
     assert_eq!(result["dispatch"], "normal_event_path");
     assert_eq!(result["target_event_received"], true);
     assert_eq!(result["business_result"], "unverified");
+
+    let scroll_action = match session
+        .submit_action(
+            "test.action.scroll",
+            super::actions::ActionRequest {
+                observation_id,
+                window_id: "main".into(),
+                logical_id: "list.viewport".into(),
+                action: super::actions::Action::Scroll {
+                    delta_x: 0.0,
+                    delta_y: -12.5,
+                    duration_ms: 0,
+                },
+            },
+            10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot,
+        SubmitResult::Existing(_) => panic!("expected a new scroll action"),
+    };
+    let scroll_dispatch = loop {
+        let message =
+            protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+        match message {
+            ServerMessage::ScrollDispatch {
+                operation_id,
+                x_milli,
+                y_milli,
+                delta_x_milli,
+                delta_y_milli,
+                ..
+            } => break (operation_id, x_milli, y_milli, delta_x_milli, delta_y_milli),
+            ServerMessage::ProbeUi {
+                request_id,
+                window_id,
+            } => send(
+                &mut socket,
+                &ClientMessage::UiProbeResult {
+                    request_id,
+                    window_id,
+                    responsive: true,
+                    latency_ms: Some(1),
+                },
+            ),
+            other => panic!("expected scroll dispatch, got {other:?}"),
+        }
+    };
+    assert_eq!(scroll_dispatch.0, scroll_action.operation_id);
+    assert_eq!(
+        (
+            scroll_dispatch.1,
+            scroll_dispatch.2,
+            scroll_dispatch.3,
+            scroll_dispatch.4
+        ),
+        (150_000, 200_000, 0, -12_500)
+    );
+    send(
+        &mut socket,
+        &ClientMessage::ActionResult {
+            operation_id: scroll_dispatch.0,
+            window_id: "main".into(),
+            logical_id: "list.viewport".into(),
+            dispatched: true,
+            target_event_received: true,
+            completed_at_ms: super::events::now_ms(),
+            reason: None,
+        },
+    );
+    wait_until(|| {
+        session
+            .operations
+            .get(&scroll_action.operation_id, super::events::now_ms())
+            .is_ok_and(|operation| operation.state == super::operations::OperationState::Succeeded)
+    });
 }
 
 #[test]

@@ -74,11 +74,24 @@ pub struct PointerActionRequest {
     pub observation_id: String,
     pub window_id: String,
     pub logical_id: String,
-    pub button: String,
-    pub x_milli: u32,
-    pub y_milli: u32,
+    pub action: PointerActionKind,
     pub scene_epoch: u64,
     pub deadline_at_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum PointerActionKind {
+    Click {
+        button: String,
+        x_milli: u32,
+        y_milli: u32,
+    },
+    Scroll {
+        x_milli: u32,
+        y_milli: u32,
+        delta_x_milli: i32,
+        delta_y_milli: i32,
+    },
 }
 
 static POINTER_ACTIONS: Mutex<Vec<PointerActionRequest>> = Mutex::new(Vec::new());
@@ -1015,31 +1028,59 @@ pub fn dispatch_pointer_action(cx: &mut gpui::App, request: PointerActionRequest
             (request.operation_id.clone(), request.logical_id.clone()),
             hit.clone(),
         );
-    let x = request.x_milli as f32 / 1000.0;
-    let y = request.y_milli as f32 / 1000.0;
+    let (x_milli, y_milli) = match &request.action {
+        PointerActionKind::Click {
+            x_milli, y_milli, ..
+        }
+        | PointerActionKind::Scroll {
+            x_milli, y_milli, ..
+        } => (*x_milli, *y_milli),
+    };
+    let x = x_milli as f32 / 1000.0;
+    let y = y_milli as f32 / 1000.0;
     let dispatched = handle
         .update(cx, |_, window, cx| {
             let position = gpui::point(gpui::px(x), gpui::px(y));
-            let down = window.dispatch_event(
-                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    modifiers: gpui::Modifiers::default(),
-                    click_count: 1,
-                    first_mouse: false,
-                }),
-                cx,
-            );
-            let up = window.dispatch_event(
-                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    modifiers: gpui::Modifiers::default(),
-                    click_count: 1,
-                }),
-                cx,
-            );
-            (down, up)
+            match &request.action {
+                PointerActionKind::Click { .. } => {
+                    let down = window.dispatch_event(
+                        gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                            button: gpui::MouseButton::Left,
+                            position,
+                            modifiers: gpui::Modifiers::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        }),
+                        cx,
+                    );
+                    let up = window.dispatch_event(
+                        gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                            button: gpui::MouseButton::Left,
+                            position,
+                            modifiers: gpui::Modifiers::default(),
+                            click_count: 1,
+                        }),
+                        cx,
+                    );
+                    (down, up)
+                }
+                PointerActionKind::Scroll {
+                    delta_x_milli,
+                    delta_y_milli,
+                    ..
+                } => (window.dispatch_event(
+                    gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                        position,
+                        delta: gpui::ScrollDelta::Pixels(gpui::point(
+                            gpui::px(*delta_x_milli as f32 / 1000.0),
+                            gpui::px(*delta_y_milli as f32 / 1000.0),
+                        )),
+                        modifiers: gpui::Modifiers::default(),
+                        touch_phase: gpui::TouchPhase::Moved,
+                    }),
+                    cx,
+                ), gpui::DispatchEventResult::default()),
+            }
         })
         .is_ok();
     let target_event_received = hit.load(Ordering::SeqCst);
@@ -1384,7 +1425,7 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
     };
 
     let hello = format!(
-        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\",\"semantics.logical_id\",\"input.pointer.click\"{}{}]}}",
+        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\",\"semantics.logical_id\",\"input.pointer.click\",\"input.pointer.scroll\"{}{}]}}",
         json_escape(&config.token),
         json_escape(&config.project),
         std::process::id(),
@@ -1715,13 +1756,67 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                     observation_id,
                     window_id,
                     logical_id,
-                    button,
-                    x_milli: u32::try_from(x_milli).unwrap_or(u32::MAX),
-                    y_milli: u32::try_from(y_milli).unwrap_or(u32::MAX),
+                    action: PointerActionKind::Click {
+                        button,
+                        x_milli: u32::try_from(x_milli).unwrap_or(u32::MAX),
+                        y_milli: u32::try_from(y_milli).unwrap_or(u32::MAX),
+                    },
                     scene_epoch,
                     deadline_at_ms,
                 });
             }
+        }
+    } else if find_bytes(frame, b"\"scroll_dispatch\"") {
+        let (
+            Some(operation_id),
+            Some(observation_id),
+            Some(window_id),
+            Some(logical_id),
+            Some(x_milli),
+            Some(y_milli),
+            Some(delta_x_milli),
+            Some(delta_y_milli),
+            Some(scene_epoch),
+            Some(deadline_at_ms),
+        ) = (
+            string_field(frame, "operation_id"),
+            string_field(frame, "observation_id"),
+            string_field(frame, "window_id"),
+            string_field(frame, "logical_id"),
+            number_field(frame, "x_milli"),
+            number_field(frame, "y_milli"),
+            signed_number_field(frame, "delta_x_milli"),
+            signed_number_field(frame, "delta_y_milli"),
+            number_field(frame, "scene_epoch"),
+            number_field(frame, "deadline_at_ms"),
+        ) else {
+            return;
+        };
+        let mut actions = POINTER_ACTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if actions.len() >= POINTER_ACTION_QUEUE_BOUND {
+            respond_action_result(
+                &operation_id,
+                &window_id,
+                &logical_id,
+                false,
+                false,
+                Some("action_queue_full"),
+            );
+        } else {
+            actions.push(PointerActionRequest {
+                operation_id,
+                observation_id,
+                window_id,
+                logical_id,
+                action: PointerActionKind::Scroll {
+                    x_milli: u32::try_from(x_milli).unwrap_or(u32::MAX),
+                    y_milli: u32::try_from(y_milli).unwrap_or(u32::MAX),
+                    delta_x_milli: i32::try_from(delta_x_milli).unwrap_or(0),
+                    delta_y_milli: i32::try_from(delta_y_milli).unwrap_or(0),
+                },
+                scene_epoch,
+                deadline_at_ms,
+            });
         }
     } else if find_bytes(frame, b"\"scenario_reset\"") {
         if let (Some(request_id), Some(scenario_id)) = (
@@ -1951,6 +2046,20 @@ fn number_field(frame: &[u8], key: &str) -> Option<u64> {
         + frame[start..]
             .iter()
             .position(|byte| !byte.is_ascii_digit())
+            .unwrap_or(frame.len() - start);
+    std::str::from_utf8(&frame[start..end]).ok()?.parse().ok()
+}
+
+fn signed_number_field(frame: &[u8], key: &str) -> Option<i64> {
+    let needle = format!("\"{key}\":").into_bytes();
+    let start = frame
+        .windows(needle.len())
+        .position(|window| window == &needle[..])?
+        + needle.len();
+    let end = start
+        + frame[start..]
+            .iter()
+            .position(|byte| !byte.is_ascii_digit() && *byte != b'-')
             .unwrap_or(frame.len() - start);
     std::str::from_utf8(&frame[start..end]).ok()?.parse().ok()
 }

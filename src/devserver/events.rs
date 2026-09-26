@@ -534,10 +534,21 @@ impl State {
                         pointer_click_supported,
                         (!pointer_click_supported).then_some("runtime_unsupported"),
                     );
+                    let pointer_scroll_supported =
+                        data["capabilities"].as_array().is_some_and(|capabilities| {
+                            capabilities
+                                .iter()
+                                .any(|value| value == "input.pointer.scroll")
+                        });
+                    self.set_pointer_scroll_capability(
+                        pointer_scroll_supported,
+                        (!pointer_scroll_supported).then_some("runtime_unsupported"),
+                    );
                 } else if current_run && event.kind == Kind::AppDisconnected {
                     self.set_semantics_capability(false, Some("app_channel_disconnected"), false);
                     self.set_scenario_reset_capability(false, Some("app_channel_disconnected"));
                     self.set_pointer_click_capability(false, Some("app_channel_disconnected"));
+                    self.set_pointer_scroll_capability(false, Some("app_channel_disconnected"));
                 }
                 if event.kind == Kind::AppExited
                     && data["success"] == false
@@ -649,6 +660,26 @@ impl State {
             "reason": reason,
             "supported": if available { json!(["click.left"]) } else { json!([]) },
         });
+    }
+
+    fn set_pointer_scroll_capability(&mut self, available: bool, reason: Option<&str>) {
+        self.capabilities["input.pointer.scroll"] = json!({
+            "available": available,
+            "reason": reason,
+            "provider": "gpui-window-dispatch",
+            "constraints": {
+                "delta_precision": "milli_pixel",
+                "business_result": "unverified",
+            },
+        });
+        let mut supported = self.capabilities["actions"]["supported"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if available && !supported.iter().any(|value| value == "scroll") {
+            supported.push(json!("scroll"));
+        }
+        self.capabilities["actions"]["supported"] = Value::Array(supported);
     }
 }
 

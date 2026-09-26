@@ -364,6 +364,7 @@ pub struct MainView {
     login_username: String,
     login_password: String,
     login_error: Option<String>,
+    virtual_list_scroll_handle: UniformListScrollHandle,
 }
 
 /// Snapshot bytes from the previous process, when building with live support.
@@ -388,7 +389,7 @@ impl MainView {
             let _ = crate::declare_logical_id("login-password", "login.password");
             let _ = crate::declare_logical_id("login-submit", "login.submit");
             let _ = crate::declare_logical_id("login-error", "login.error");
-            let _ = crate::declare_logical_id("list-items", "list.viewport");
+            let _ = crate::declare_logical_id("list-viewport", "list.viewport");
         }
 
         // Live mode: restore the snapshot the previous process published.
@@ -403,12 +404,20 @@ impl MainView {
                 })
             })
             .unwrap_or(0);
+        let virtual_list_scroll_handle = UniformListScrollHandle::new();
+        let initial_scroll_y = crate::previews::virtual_list_initial_scroll_y().unwrap_or(0) as f32;
+        virtual_list_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(-initial_scroll_y)));
         Self {
             clicks,
             preview_generation: crate::previews::active_reset_generation(),
             login_username: crate::previews::login_initial_username().unwrap_or_default(),
             login_password: crate::previews::login_initial_password().unwrap_or_default(),
             login_error: None,
+            virtual_list_scroll_handle,
         }
     }
 
@@ -417,6 +426,12 @@ impl MainView {
         self.login_username = crate::previews::login_initial_username().unwrap_or_default();
         self.login_password = crate::previews::login_initial_password().unwrap_or_default();
         self.login_error = None;
+        let initial_scroll_y = crate::previews::virtual_list_initial_scroll_y().unwrap_or(0) as f32;
+        self.virtual_list_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(-initial_scroll_y)));
     }
 
     fn render_counter(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -592,9 +607,14 @@ impl MainView {
         let digits = crate::previews::virtual_list_stable_key_digits().unwrap_or(1);
         let label_prefix = crate::previews::virtual_list_label_prefix().unwrap_or_default();
         let row_height = crate::previews::virtual_list_row_height().unwrap_or(32) as f32;
-        let initial_scroll_y = crate::previews::virtual_list_initial_scroll_y().unwrap_or(0);
-        // The fixture offset is surfaced for deterministic inspection here;
-        // agent-driven scroll dispatch is part of S03.
+        let scroll_y = -self
+            .virtual_list_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .offset()
+            .y
+            .as_f32();
         let list = uniform_list(
             "list-items",
             count,
@@ -618,6 +638,7 @@ impl MainView {
                 items
             }),
         )
+        .track_scroll(&self.virtual_list_scroll_handle)
         .h_full();
 
         div()
@@ -627,13 +648,36 @@ impl MainView {
             .child(
                 div()
                     .text_lg()
-                    .child(format!("VirtualList ({count} items, scroll y={initial_scroll_y})")),
+                    .child(format!("VirtualList ({count} items, scroll y={scroll_y:.0})")),
             )
             .child(
                 div()
+                    .id("list-viewport")
+                    .accessibility_id("list.viewport")
+                    .relative()
                     .h(px(360.0))
                     .overflow_hidden()
-                    .child(list),
+                    .on_scroll_wheel(|_event, _window, _cx| {
+                        crate::confirm_action_target_hit("list.viewport");
+                    })
+                    .child(list)
+                    .child(
+                        canvas(
+                            |bounds, _, _| {
+                                crate::record_action_target_bounds(
+                                    "list.viewport",
+                                    bounds.origin.x.as_f32(),
+                                    bounds.origin.y.as_f32(),
+                                    bounds.size.width.as_f32(),
+                                    bounds.size.height.as_f32(),
+                                    true,
+                                );
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    ),
             )
             .into_any_element()
     }
