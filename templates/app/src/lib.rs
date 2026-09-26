@@ -169,10 +169,12 @@ pub fn pump_live_assets(cx: &mut App) {
                 let probes = crate::live::take_ui_probe_requests();
                 let semantics = crate::live::take_semantics_read_requests();
                 let resets = crate::live::take_preview_reset_requests();
+                let actions = crate::live::take_pointer_action_requests();
                 if asset_events.is_empty()
                     && probes.is_empty()
                     && semantics.is_empty()
                     && resets.is_empty()
+                    && actions.is_empty()
                 {
                     continue;
                 }
@@ -247,6 +249,9 @@ pub fn pump_live_assets(cx: &mut App) {
                     for request in semantics {
                         crate::live::answer_semantics_read(cx, request);
                     }
+                    for request in actions {
+                        crate::live::dispatch_pointer_action(cx, request);
+                    }
                     let mut has_preview_reset = false;
                     for request in resets {
                         match crate::previews::reset_generation_for(&request.scenario_id) {
@@ -320,12 +325,39 @@ pub fn clear_declared_logical_ids() {
     live::clear_declared_logical_ids();
 }
 
+pub fn begin_action_bounds_frame() {
+    #[cfg(debug_assertions)]
+    live::begin_action_bounds_frame();
+}
+
+pub fn record_action_target_bounds(
+    logical_id: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    enabled: bool,
+) {
+    #[cfg(debug_assertions)]
+    live::record_action_target_bounds(logical_id, x, y, width, height, enabled);
+    #[cfg(not(debug_assertions))]
+    let _ = (logical_id, x, y, width, height, enabled);
+}
+
+pub fn confirm_action_target_hit(logical_id: &str) {
+    #[cfg(debug_assertions)]
+    live::confirm_action_target_hit(logical_id);
+    #[cfg(not(debug_assertions))]
+    let _ = logical_id;
+}
+
 /// Root view of the application.
 ///
 /// The generated preview surfaces are intentionally small and deterministic.
 /// They provide the registry/runtime with real GPUI elements and stable
-/// semantic ids; input routing and asynchronous form execution are added by
-/// the later S03 slice.
+/// semantic ids; the development adapter wires the explicitly instrumented
+/// pointer-click targets through GPUI's normal event path. Keyboard input,
+/// scrolling, and asynchronous form execution remain separate capabilities.
 pub struct MainView {
     clicks: usize,
     preview_generation: Option<u64>,
@@ -398,6 +430,24 @@ impl MainView {
             div()
                 .id("increment")
                 .accessibility_id("counter.increment")
+                .relative()
+                .child(
+                    canvas(
+                        |bounds, _, _| {
+                        crate::record_action_target_bounds(
+                            "counter.increment",
+                            bounds.origin.x.as_f32(),
+                            bounds.origin.y.as_f32(),
+                            bounds.size.width.as_f32(),
+                            bounds.size.height.as_f32(),
+                            false,
+                        );
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
                 .px_4()
                 .py_2()
                 .rounded_md()
@@ -409,6 +459,10 @@ impl MainView {
             div()
                 .id("increment")
                 .accessibility_id("counter.increment")
+                .relative()
+                .on_mouse_up(MouseButton::Left, |_event, _window, _cx| {
+                    crate::confirm_action_target_hit("counter.increment");
+                })
                 .px_4()
                 .py_2()
                 .rounded_md()
@@ -422,6 +476,23 @@ impl MainView {
                     this.clicks = this.clicks.saturating_add(increment);
                     cx.notify();
                 }))
+                .child(
+                    canvas(
+                        |bounds, _, _| {
+                        crate::record_action_target_bounds(
+                            "counter.increment",
+                            bounds.origin.x.as_f32(),
+                            bounds.origin.y.as_f32(),
+                            bounds.size.width.as_f32(),
+                            bounds.size.height.as_f32(),
+                            true,
+                        );
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
                 .into_any_element()
         };
 
@@ -458,6 +529,10 @@ impl MainView {
         let submit = div()
             .id("login-submit")
             .accessibility_id("login.submit")
+            .relative()
+            .on_mouse_up(MouseButton::Left, |_event, _window, _cx| {
+                crate::confirm_action_target_hit("login.submit");
+            })
             .px_4()
             .py_2()
             .rounded_md()
@@ -471,7 +546,24 @@ impl MainView {
                 // request cancellation and async fencing belong to S03.
                 this.login_error = crate::previews::login_error_message();
                 cx.notify();
-            }));
+            }))
+            .child(
+                canvas(
+                    |bounds, _, _| {
+                    crate::record_action_target_bounds(
+                        "login.submit",
+                        bounds.origin.x.as_f32(),
+                        bounds.origin.y.as_f32(),
+                        bounds.size.width.as_f32(),
+                        bounds.size.height.as_f32(),
+                        true,
+                    );
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
 
         let mut form = div()
             .flex()
@@ -562,6 +654,8 @@ impl Render for MainView {
         }
         // Live mode: publish the latest state so `prepare_restart` can
         // snapshot it before the CLI relaunches the app.
+        #[cfg(debug_assertions)]
+        crate::begin_action_bounds_frame();
         #[cfg(debug_assertions)]
         crate::live::publish_state(&crate::live::snapshot_json_number("clicks", self.clicks));
 

@@ -1,6 +1,6 @@
 //! One live session, shared by build, process, app-channel and control workers.
 
-use super::actions::ActionRequest;
+use super::actions::{Action, ActionRequest};
 use super::artifacts::{ArtifactInfo, ArtifactLimits, ArtifactStore};
 use super::capture;
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const MAX_SCENARIO_RESET_QUEUE: usize = 16;
+const MAX_ACTION_QUEUE: usize = 16;
 
 pub struct Session {
     pub id: String,
@@ -39,6 +40,8 @@ pub struct Session {
     pub operations: Arc<OperationStore>,
     build_requests: Mutex<Option<BuildRequest>>,
     scenario_reset_requests: Mutex<VecDeque<ScenarioResetRequest>>,
+    action_dispatches: Mutex<VecDeque<ActionDispatchRequest>>,
+    action_deliveries: Mutex<HashMap<String, ActionDispatchRequest>>,
     observe_requests: Mutex<VecDeque<ObserveRequest>>,
     semantics_results: Mutex<HashMap<String, SemanticsReadReply>>,
     next_build: AtomicU64,
@@ -55,6 +58,32 @@ pub struct ScenarioResetRequest {
     pub request_id: String,
     pub scenario_id: String,
     pub scope: Scope,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActionDispatchRequest {
+    pub operation_id: String,
+    pub observation_id: String,
+    pub window_id: String,
+    pub logical_id: String,
+    pub button: String,
+    pub x_milli: u32,
+    pub y_milli: u32,
+    pub scene_epoch: u64,
+    pub deadline_at_ms: u64,
+    pub connection_id: u64,
+    pub scope: Scope,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActionResult {
+    pub operation_id: String,
+    pub window_id: String,
+    pub logical_id: String,
+    pub dispatched: bool,
+    pub target_event_received: bool,
+    pub completed_at_ms: u64,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -129,7 +158,10 @@ impl Session {
             windows: Vec::new(),
             capabilities: json!({"status": true, "diagnostics": true, "events": true,
             "run_identity": "launch_token", "ui_observation": true, "asset_confirmation": true,
-                "actions": false, "checks": false, "input_scope": "project_files",
+                "actions": {"available": false, "reason": "runtime_unavailable", "supported": []},
+                "input.pointer.click": {"available": false, "reason": "runtime_unavailable",
+                    "provider": "gpui-window-dispatch", "constraints": {"buttons": ["left"]}},
+                "checks": false, "input_scope": "project_files",
                 "native_mobile_logs": false, "timing_spans": true,
                 "capture.scene": {"available": false, "reason": "backend_unsupported",
                     "provider": null, "constraints": {}},
@@ -178,6 +210,8 @@ impl Session {
             operations: Arc::new(OperationStore::new(MAX_ACTIVE_OPERATIONS)),
             build_requests: Mutex::new(None),
             scenario_reset_requests: Mutex::new(VecDeque::new()),
+            action_dispatches: Mutex::new(VecDeque::new()),
+            action_deliveries: Mutex::new(HashMap::new()),
             observe_requests: Mutex::new(VecDeque::new()),
             semantics_results: Mutex::new(HashMap::new()),
             dir,
@@ -295,10 +329,9 @@ impl Session {
         Ok(result)
     }
 
-    /// Admits one observation-bound action into the operation/idempotency
-    /// state machine. The normal GPUI event-path adapter is intentionally not
-    /// connected in this slice, so the operation ends explicitly as
-    /// input_adapter_unavailable instead of invoking a business callback.
+    /// Admits one observation-bound action and queues supported left clicks
+    /// for the owning app connection. Completion is reported only after the
+    /// generated element receives GPUI's normal mouse-up event.
     pub fn submit_action(
         &self,
         request_id: &str,
@@ -348,6 +381,26 @@ impl Session {
         };
 
         let preflight = (|| {
+            let Action::Click { button } = &request.action else {
+                return Err(OperationError::with_details(
+                    "input_adapter_unavailable",
+                    "only click actions are connected to the GPUI event path",
+                    json!({"action": request.action.kind(), "capability": request.required_capability()}),
+                ));
+            };
+            if button != "left" {
+                return Err(OperationError::with_details(
+                    "unsupported_button",
+                    "the GPUI runtime currently supports left-button clicks only",
+                    json!({"button": button, "supported": ["left"]}),
+                ));
+            }
+            if state.capabilities["input.pointer.click"]["available"] != true {
+                return Err(OperationError::new(
+                    "input_adapter_unavailable",
+                    "the connected runtime does not advertise input.pointer.click",
+                ));
+            }
             let observation = self
                 .operations
                 .find_observation(&request.observation_id, events::now_ms())?;
@@ -440,6 +493,15 @@ impl Session {
                     }),
                 ));
             }
+            let connection_id = self
+                .windows
+                .owner_connection_id(run.scope.run_id.as_deref(), &request.window_id)
+                .ok_or_else(|| {
+                    OperationError::new(
+                        "target_unavailable",
+                        "the selected window has no active app-channel owner",
+                    )
+                })?;
             let query = super::query::execute(
                 self,
                 super::query::QueryRequest {
@@ -460,25 +522,48 @@ impl Session {
                 message: error.message,
                 details: error.details,
             })?;
-            Ok::<(), OperationError>(())
+            let (x_milli, y_milli) =
+                super::actions::click_center_milli(&query).map_err(|error| OperationError {
+                    code: error.code,
+                    message: error.message,
+                    details: error.details,
+                })?;
+            Ok::<_, OperationError>((x_milli, y_milli, observed_scene_epoch, connection_id))
         })();
-        if let Err(error) = preflight {
-            return self.fail_admitted_action(&snapshot, error);
+        let (x_milli, y_milli, scene_epoch, connection_id) = match preflight {
+            Ok(value) => value,
+            Err(error) => return self.fail_admitted_action(&snapshot, error),
+        };
+        let started = self.start_operation(&snapshot.operation_id)?;
+        if started.snapshot.state != OperationState::Running {
+            return Ok(SubmitResult::Created(started.snapshot));
         }
-
-        self.fail_admitted_action(
-            &snapshot,
-            OperationError::with_details(
-                "input_adapter_unavailable",
-                "normal GPUI input dispatch is not connected in this runtime slice",
-                json!({
-                    "action": snapshot.target["action"]["type"],
-                    "capability": request.required_capability(),
-                    "provider": "gpui-dev-runtime",
-                    "reason": "s03_admission_only",
-                }),
-            ),
-        )
+        let dispatch = ActionDispatchRequest {
+            operation_id: snapshot.operation_id.clone(),
+            observation_id: request.observation_id,
+            window_id: request.window_id,
+            logical_id: request.logical_id,
+            button: "left".into(),
+            x_milli,
+            y_milli,
+            scene_epoch,
+            deadline_at_ms: snapshot.deadline_at_ms,
+            connection_id,
+            scope: snapshot.scope.clone(),
+        };
+        let mut pending = self
+            .action_dispatches
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if pending.len() >= MAX_ACTION_QUEUE {
+            drop(pending);
+            return self.fail_admitted_action(
+                &snapshot,
+                OperationError::new("busy", "the UI action queue is full"),
+            );
+        }
+        pending.push_back(dispatch);
+        Ok(SubmitResult::Created(started.snapshot))
     }
 
     fn fail_admitted_action(
@@ -494,6 +579,281 @@ impl Session {
             Some(error),
         )?;
         Ok(SubmitResult::Created(finished.snapshot))
+    }
+
+    /// Drains, but does not replay, queued actions for the current live run.
+    /// Every target is re-fenced immediately before app-channel delivery.
+    pub fn take_action_dispatches(&self, current_scope: &Scope) -> Vec<ActionDispatchRequest> {
+        let requests = std::mem::take(
+            &mut *self
+                .action_dispatches
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        let mut ready = Vec::new();
+        for request in requests {
+            let operation = self.operations.get(&request.operation_id, events::now_ms());
+            let Ok(operation) = operation else {
+                continue;
+            };
+            if operation.state != OperationState::Running {
+                continue;
+            }
+            let reason = if request.scope.run_id != current_scope.run_id
+                || request.scope.revision != current_scope.revision
+                || request.scope.build_id != current_scope.build_id
+            {
+                Some((
+                    "stale_observation",
+                    "the app run or revision changed before action delivery",
+                ))
+            } else if events::now_ms() >= request.deadline_at_ms {
+                Some(("timed_out", "the action deadline elapsed before delivery"))
+            } else {
+                let window = self
+                    .windows
+                    .snapshots(current_scope.run_id.as_deref())
+                    .into_iter()
+                    .find(|window| window.window_id == request.window_id);
+                match window {
+                    Some(window)
+                        if window.lifecycle == "open"
+                            && window.scene_epoch == request.scene_epoch
+                            && self.windows.owner_connection_id(
+                                current_scope.run_id.as_deref(),
+                                &request.window_id,
+                            ) == Some(request.connection_id) =>
+                    {
+                        None
+                    }
+                    Some(_) => Some((
+                        "stale_observation",
+                        "the target window changed before action delivery",
+                    )),
+                    None => Some(("unknown_window", "the action window is no longer open")),
+                }
+            };
+            if let Some((code, message)) = reason {
+                let _ = self.finish_operation(
+                    &request.operation_id,
+                    OperationState::Failed,
+                    None,
+                    Some(OperationError::new(code, message)),
+                );
+            } else {
+                ready.push(request);
+            }
+        }
+        ready
+    }
+
+    /// Records that the bounded app-channel writer accepted an action frame.
+    /// From this point a missing reply is ambiguous and must not be retried.
+    pub fn mark_action_dispatched(&self, request: &ActionDispatchRequest) -> bool {
+        if !self
+            .operations
+            .get(&request.operation_id, events::now_ms())
+            .is_ok_and(|operation| operation.state == OperationState::Running)
+        {
+            return false;
+        }
+        self.action_deliveries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(request.operation_id.clone(), request.clone());
+        true
+    }
+
+    /// Terminates an action that was not accepted by the owning app writer;
+    /// this is a definite pre-dispatch failure, so replay is not attempted.
+    pub fn fail_action_delivery(&self, request: &ActionDispatchRequest) {
+        self.action_deliveries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&request.operation_id);
+        let _ = self.finish_operation(
+            &request.operation_id,
+            OperationState::Failed,
+            None,
+            Some(OperationError::new(
+                "app_channel_unavailable",
+                "the action could not be queued to its owning app connection",
+            )),
+        );
+    }
+
+    /// Fences every action owned by a disconnected app connection. Already
+    /// delivered actions become unknown because their side effect may have
+    /// happened; queued-but-undelivered actions fail without replay.
+    pub fn action_connection_disconnected(&self, connection_id: u64) {
+        let delivered = {
+            let mut deliveries = self
+                .action_deliveries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let operation_ids = deliveries
+                .iter()
+                .filter(|(_, request)| request.connection_id == connection_id)
+                .map(|(operation_id, _)| operation_id.clone())
+                .collect::<Vec<_>>();
+            operation_ids
+                .into_iter()
+                .filter_map(|operation_id| {
+                    deliveries
+                        .remove(&operation_id)
+                        .map(|request| (operation_id, request))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (operation_id, _) in delivered {
+            if let Ok(transition) = self.operations.finish_unknown(
+                &operation_id,
+                Some(json!({
+                    "dispatch": "normal_event_path",
+                    "target_event_received": false,
+                    "reason": "app_channel_disconnected",
+                    "business_result": "unverified",
+                })),
+                Some(OperationError::new(
+                    "action_outcome_unknown",
+                    "the app connection disconnected after action delivery",
+                )),
+                events::now_ms(),
+            ) && transition.changed
+            {
+                self.emit_operation(Kind::OperationFinished, &transition.snapshot);
+            }
+        }
+        let queued = {
+            let mut pending = self
+                .action_dispatches
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut removed = Vec::new();
+            pending.retain(|request| {
+                if request.connection_id == connection_id {
+                    removed.push(request.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            removed
+        };
+        for request in queued {
+            self.fail_action_delivery(&request);
+        }
+    }
+
+    /// Accepts one result only from the connection that owned the window at
+    /// dispatch. A target miss after dispatch is `unknown`, never a safe retry.
+    pub fn accept_action_result(
+        &self,
+        connection_id: u64,
+        scope: &Scope,
+        action_result: ActionResult,
+    ) -> bool {
+        let request = self
+            .action_deliveries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&action_result.operation_id)
+            .cloned();
+        let Some(request) = request else {
+            return false;
+        };
+        if request.connection_id != connection_id
+            || request.window_id != action_result.window_id
+            || request.logical_id != action_result.logical_id
+            || request.scope.run_id != scope.run_id
+            || request.scope.revision != scope.revision
+        {
+            return false;
+        }
+        self.action_deliveries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&action_result.operation_id);
+        let now_ms = events::now_ms();
+        let operation = match self.operations.peek(&action_result.operation_id) {
+            Ok(operation) if operation.state == OperationState::Running => operation,
+            _ => return false,
+        };
+        let clock_valid = action_result.completed_at_ms >= operation.created_at_ms
+            && action_result.completed_at_ms <= now_ms.saturating_add(5_000);
+        let (state, operation_result, error, finish_at_ms) = if !action_result.dispatched {
+            (
+                OperationState::Failed,
+                None,
+                Some(OperationError::new(
+                    action_result
+                        .reason
+                        .as_deref()
+                        .unwrap_or("action_not_dispatched"),
+                    "the GPUI window rejected the action before event dispatch",
+                )),
+                now_ms,
+            )
+        } else if action_result.target_event_received
+            && clock_valid
+            && action_result.completed_at_ms <= operation.deadline_at_ms
+        {
+            (
+                OperationState::Succeeded,
+                Some(json!({
+                    "dispatch": "normal_event_path",
+                    "target_event_received": true,
+                    "logical_id": action_result.logical_id,
+                    "completed_at_ms": action_result.completed_at_ms,
+                    "business_result": "unverified",
+                })),
+                None,
+                action_result.completed_at_ms,
+            )
+        } else {
+            (
+                OperationState::Unknown,
+                Some(json!({
+                    "dispatch": "normal_event_path",
+                    "target_event_received": action_result.target_event_received,
+                    "reason": action_result.reason.as_deref().unwrap_or(if clock_valid {
+                        "target_event_unconfirmed"
+                    } else {
+                        "runtime_clock_invalid"
+                    }),
+                    "business_result": "unverified",
+                })),
+                Some(OperationError::new(
+                    "action_outcome_unknown",
+                    "the action was dispatched but target delivery or completion could not be confirmed",
+                )),
+                now_ms,
+            )
+        };
+        let transition = if state == OperationState::Unknown {
+            self.operations.finish_unknown(
+                &action_result.operation_id,
+                operation_result,
+                error,
+                finish_at_ms,
+            )
+        } else {
+            self.operations.finish(
+                &action_result.operation_id,
+                state,
+                operation_result,
+                error,
+                finish_at_ms,
+            )
+        };
+        if let Ok(transition) = transition {
+            if transition.changed {
+                self.emit_operation(Kind::OperationFinished, &transition.snapshot);
+            }
+            true
+        } else {
+            false
+        }
     }
 
     pub fn take_observe_request(&self) -> Option<ObserveRequest> {
@@ -1318,12 +1678,42 @@ impl Session {
         operation_id: &str,
         wait_ms: u64,
     ) -> Result<OperationSnapshot, OperationError> {
+        self.expire_operations();
         let _ = self.operations.wait(operation_id, wait_ms)?;
         self.expire_operations();
         self.operations.get(operation_id, events::now_ms())
     }
 
     pub fn cancel_operation(&self, operation_id: &str) -> Result<Transition, OperationError> {
+        if self
+            .action_deliveries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(operation_id)
+            .is_some()
+        {
+            let transition = self.operations.finish_unknown(
+                operation_id,
+                Some(json!({
+                    "dispatch": "normal_event_path",
+                    "reason": "cancelled_after_dispatch",
+                    "business_result": "unverified",
+                })),
+                Some(OperationError::new(
+                    "action_outcome_unknown",
+                    "the action was already dispatched and may have reached the UI",
+                )),
+                events::now_ms(),
+            )?;
+            if transition.changed {
+                self.emit_operation(Kind::OperationFinished, &transition.snapshot);
+            }
+            return Ok(transition);
+        }
+        self.action_dispatches
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|request| request.operation_id != operation_id);
         self.expire_operations();
         let transition = self.operations.cancel(operation_id, events::now_ms())?;
         if transition.changed {
@@ -1333,7 +1723,47 @@ impl Session {
     }
 
     pub fn expire_operations(&self) -> Vec<OperationSnapshot> {
-        let expired = self.operations.expire_due(events::now_ms());
+        let now_ms = events::now_ms();
+        let expired_actions = {
+            let mut deliveries = self
+                .action_deliveries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let expired = deliveries
+                .iter()
+                .filter(|(_, request)| now_ms >= request.deadline_at_ms)
+                .map(|(operation_id, _)| operation_id.clone())
+                .collect::<Vec<_>>();
+            expired
+                .into_iter()
+                .filter_map(|operation_id| {
+                    deliveries
+                        .remove(&operation_id)
+                        .map(|request| (operation_id, request))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (operation_id, request) in expired_actions {
+            if let Ok(transition) = self.operations.finish_unknown(
+                &operation_id,
+                Some(json!({
+                    "dispatch": "normal_event_path",
+                    "target_event_received": false,
+                    "reason": "action_result_timeout",
+                    "business_result": "unverified",
+                })),
+                Some(OperationError::new(
+                    "action_outcome_unknown",
+                    "the action was dispatched but no result arrived before its deadline",
+                )),
+                now_ms,
+            ) && transition.changed
+            {
+                self.emit_operation(Kind::OperationFinished, &transition.snapshot);
+            }
+            let _ = request;
+        }
+        let expired = self.operations.expire_due(now_ms);
         for snapshot in &expired {
             self.emit_operation(Kind::OperationFinished, snapshot);
         }

@@ -51,6 +51,8 @@ pub enum Kind {
     OperationBound,
     #[serde(rename = "operation.finished")]
     OperationFinished,
+    #[serde(rename = "action.result")]
+    ActionResult,
     #[serde(rename = "build.started")]
     BuildStarted,
     #[serde(rename = "build.finished")]
@@ -522,9 +524,20 @@ impl State {
                         scenario_reset_supported,
                         (!scenario_reset_supported).then_some("runtime_unsupported"),
                     );
+                    let pointer_click_supported =
+                        data["capabilities"].as_array().is_some_and(|capabilities| {
+                            capabilities
+                                .iter()
+                                .any(|value| value == "input.pointer.click")
+                        });
+                    self.set_pointer_click_capability(
+                        pointer_click_supported,
+                        (!pointer_click_supported).then_some("runtime_unsupported"),
+                    );
                 } else if current_run && event.kind == Kind::AppDisconnected {
                     self.set_semantics_capability(false, Some("app_channel_disconnected"), false);
                     self.set_scenario_reset_capability(false, Some("app_channel_disconnected"));
+                    self.set_pointer_click_capability(false, Some("app_channel_disconnected"));
                 }
                 if event.kind == Kind::AppExited
                     && data["success"] == false
@@ -617,6 +630,24 @@ impl State {
             "reason": reason,
             "provider": "generated-preview-runtime",
             "constraints": {"requires_preview_scenario": true},
+        });
+    }
+
+    fn set_pointer_click_capability(&mut self, available: bool, reason: Option<&str>) {
+        self.capabilities["input.pointer.click"] = json!({
+            "available": available,
+            "reason": reason,
+            "provider": "gpui-window-dispatch",
+            "constraints": {
+                "buttons": ["left"],
+                "result": "target_mouse_up_received",
+                "business_result": "unverified",
+            },
+        });
+        self.capabilities["actions"] = json!({
+            "available": available,
+            "reason": reason,
+            "supported": if available { json!(["click.left"]) } else { json!([]) },
         });
     }
 }

@@ -121,6 +121,16 @@ pub enum ClientMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    ActionResult {
+        operation_id: String,
+        window_id: String,
+        logical_id: String,
+        dispatched: bool,
+        target_event_received: bool,
+        completed_at_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     AssetsApplied {
         transfer_id: String,
         asset_revision: u64,
@@ -237,6 +247,17 @@ pub enum ServerMessage {
     ScenarioReset {
         request_id: String,
         scenario_id: String,
+    },
+    ActionDispatch {
+        operation_id: String,
+        observation_id: String,
+        window_id: String,
+        logical_id: String,
+        button: String,
+        x_milli: u32,
+        y_milli: u32,
+        scene_epoch: u64,
+        deadline_at_ms: u64,
     },
     ArtifactBegin {
         manifest: ArtifactManifest,
@@ -677,6 +698,36 @@ mod tests {
         assert_eq!(
             decode::<ServerMessage>(&encode(&request).unwrap()).unwrap(),
             request
+        );
+
+        let action = ServerMessage::ActionDispatch {
+            operation_id: "op-action-1".into(),
+            observation_id: "observation-1".into(),
+            window_id: "main".into(),
+            logical_id: "counter.increment".into(),
+            button: "left".into(),
+            x_milli: 125_500,
+            y_milli: 240_250,
+            scene_epoch: 7,
+            deadline_at_ms: 123_456,
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&action).unwrap()).unwrap(),
+            action
+        );
+
+        let action_result = ClientMessage::ActionResult {
+            operation_id: "op-action-1".into(),
+            window_id: "main".into(),
+            logical_id: "counter.increment".into(),
+            dispatched: true,
+            target_event_received: true,
+            completed_at_ms: 123_400,
+            reason: None,
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&action_result).unwrap()).unwrap(),
+            action_result
         );
     }
 }

@@ -714,6 +714,202 @@ fn semantics_read_roundtrip_is_run_and_window_bound_and_publishes_tree_artifact(
 }
 
 #[test]
+fn left_click_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    session.emit(Kind::AppStarted, &run, json!({"pid": std::process::id()}));
+    session.emit(Kind::AppConnected, &run, json!({"pid": std::process::id()}));
+    build.finish(true, None);
+    let token = server.expect_run(run.clone()).unwrap();
+    let mut socket = connect_with_capabilities(
+        &server,
+        &token,
+        vec![
+            "semantics.read".into(),
+            "semantics.logical_id".into(),
+            "input.pointer.click".into(),
+        ],
+    );
+    wait_until(|| session.store.state().capabilities["input.pointer.click"]["available"] == true);
+
+    send(
+        &mut socket,
+        &ClientMessage::WindowRegistered {
+            window_id: "main".into(),
+            title: "Counter".into(),
+            width: 800,
+            height: 600,
+            scale_milli: 1000,
+            foreground: true,
+        },
+    );
+    wait_until(|| !session.windows.snapshots(run.run_id.as_deref()).is_empty());
+    let probe =
+        protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+    let (request_id, window_id) = match probe {
+        ServerMessage::ProbeUi {
+            request_id,
+            window_id,
+        } => (request_id, window_id),
+        other => panic!("expected heartbeat probe, got {other:?}"),
+    };
+    send(
+        &mut socket,
+        &ClientMessage::UiProbeResult {
+            request_id,
+            window_id,
+            responsive: true,
+            latency_ms: Some(1),
+        },
+    );
+    wait_until(|| {
+        session
+            .windows
+            .snapshots(run.run_id.as_deref())
+            .first()
+            .is_some_and(|window| window.ui == "responsive")
+    });
+
+    let observation = match session
+        .submit_observe(
+            "test.observe.action",
+            false,
+            Some("main".into()),
+            vec!["semantics".into()],
+            10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot.operation_id,
+        SubmitResult::Existing(_) => panic!("expected a new observation"),
+    };
+    session.advance_observe_requests();
+    let query =
+        protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+    assert!(matches!(query, ServerMessage::SemanticsQuery { .. }));
+    send(
+        &mut socket,
+        &ClientMessage::SemanticsResult {
+            request_id: observation.clone(),
+            window_id: "main".into(),
+            status: "ready".into(),
+            a11y_active: true,
+            tree_json: Some(
+                r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window"},"children":["b"]},"b":{"logical_id":"counter.increment","aria":{"role":"Button","enabled":true},"bounds":{"x":10,"y":20,"width":10,"height":10},"children":[]}}}"#.into(),
+            ),
+            reason: None,
+            captured_at_ms: 42,
+        },
+    );
+    wait_until(|| {
+        session
+            .store
+            .events(0, Duration::ZERO)
+            .events
+            .iter()
+            .any(|event| {
+                event.kind == Kind::SemanticsRead
+                    && event.data["request_id"] == observation
+                    && event.data["accepted"] == true
+            })
+    });
+    session.advance_observe_requests();
+    wait_until(|| {
+        session
+            .operations
+            .get(&observation, super::events::now_ms())
+            .is_ok_and(|operation| operation.state == super::operations::OperationState::Succeeded)
+    });
+    let observation_id = session
+        .operations
+        .get(&observation, super::events::now_ms())
+        .unwrap()
+        .result
+        .unwrap()["observation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let action = match session
+        .submit_action(
+            "test.action.left-click",
+            super::actions::ActionRequest {
+                observation_id,
+                window_id: "main".into(),
+                logical_id: "counter.increment".into(),
+                action: super::actions::Action::Click {
+                    button: "left".into(),
+                },
+            },
+            10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot,
+        SubmitResult::Existing(_) => panic!("expected a new action"),
+    };
+    assert_eq!(action.state, super::operations::OperationState::Running);
+
+    let dispatch = loop {
+        let message =
+            protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+        match message {
+            ServerMessage::ActionDispatch {
+                operation_id,
+                x_milli,
+                y_milli,
+                ..
+            } => break (operation_id, x_milli, y_milli),
+            ServerMessage::ProbeUi {
+                request_id,
+                window_id,
+            } => send(
+                &mut socket,
+                &ClientMessage::UiProbeResult {
+                    request_id,
+                    window_id,
+                    responsive: true,
+                    latency_ms: Some(1),
+                },
+            ),
+            other => panic!("expected action dispatch, got {other:?}"),
+        }
+    };
+    assert_eq!(dispatch.0, action.operation_id);
+    assert_eq!((dispatch.1, dispatch.2), (15_000, 25_000));
+    send(
+        &mut socket,
+        &ClientMessage::ActionResult {
+            operation_id: dispatch.0,
+            window_id: "main".into(),
+            logical_id: "counter.increment".into(),
+            dispatched: true,
+            target_event_received: true,
+            completed_at_ms: super::events::now_ms(),
+            reason: None,
+        },
+    );
+    wait_until(|| {
+        session
+            .operations
+            .get(&action.operation_id, super::events::now_ms())
+            .is_ok_and(|operation| operation.state == super::operations::OperationState::Succeeded)
+    });
+    let result = session
+        .operations
+        .get(&action.operation_id, super::events::now_ms())
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(result["dispatch"], "normal_event_path");
+    assert_eq!(result["target_event_received"], true);
+    assert_eq!(result["business_result"], "unverified");
+}
+
+#[test]
 fn control_diff_compares_two_published_observation_trees() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
