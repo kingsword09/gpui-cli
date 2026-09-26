@@ -1,3 +1,4 @@
+use crate::devserver::actions::Action;
 use crate::devserver::control::{self, ApiError, Command, Reply};
 use crate::devserver::events::{self, Event, Kind, Page, SCHEMA_VERSION};
 use anyhow::Result;
@@ -38,6 +39,26 @@ pub enum DevCommand {
         /// Scenario id to reset
         #[arg(long)]
         scenario: String,
+    },
+    /// Admit one observation-bound UI action
+    Act {
+        /// Successful observation used to preflight the target
+        #[arg(long)]
+        observation: String,
+        /// Registered window from that observation
+        #[arg(long)]
+        window: String,
+        /// Stable semantic id of the target
+        #[arg(long = "id")]
+        logical_id: String,
+        /// Stable caller request id used for idempotent retries
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Total action deadline, from 1ms through 120s
+        #[arg(long, default_value = "30s", value_parser = parse_operation_timeout)]
+        timeout: u64,
+        #[command(subcommand)]
+        action: ActionCommand,
     },
     /// Submit a version-bound UI observation
     Observe {
@@ -119,6 +140,51 @@ pub enum DevCommand {
     },
 }
 
+#[derive(Clone, Subcommand)]
+pub enum ActionCommand {
+    /// Admit a click action (requires a live pointer adapter)
+    Click {
+        #[arg(long, default_value = "left")]
+        button: String,
+    },
+    /// Admit text input (requires a live keyboard adapter)
+    TypeText {
+        text: String,
+        #[arg(long, default_value = "replace")]
+        mode: String,
+    },
+    /// Admit one key action (requires a live keyboard adapter)
+    Key { key: String },
+    /// Admit a scroll action (requires a live pointer adapter)
+    Scroll {
+        #[arg(long)]
+        delta_x: f32,
+        #[arg(long)]
+        delta_y: f32,
+        #[arg(long, default_value = "0", value_parser = parse_scroll_duration)]
+        duration: u64,
+    },
+}
+
+impl ActionCommand {
+    fn into_action(self) -> Action {
+        match self {
+            Self::Click { button } => Action::Click { button },
+            Self::TypeText { text, mode } => Action::TypeText { text, mode },
+            Self::Key { key } => Action::Key { key },
+            Self::Scroll {
+                delta_x,
+                delta_y,
+                duration,
+            } => Action::Scroll {
+                delta_x,
+                delta_y,
+                duration_ms: duration,
+            },
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum OperationCommand {
     /// Read one operation snapshot
@@ -173,6 +239,14 @@ pub fn parse_operation_timeout(value: &str) -> std::result::Result<u64, String> 
             Ok(timeout)
         }
     })
+}
+
+fn parse_scroll_duration(value: &str) -> std::result::Result<u64, String> {
+    parse_duration(
+        value,
+        crate::devserver::actions::MAX_ACTION_DURATION_MS,
+        "scroll duration must be between 0ms and 120s",
+    )
 }
 
 fn parse_duration(value: &str, maximum: u64, message: &str) -> std::result::Result<u64, String> {
@@ -274,6 +348,58 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             write_value(&result, false)?;
         } else {
             let value = result.result.unwrap_or_else(|| json!({}));
+            write_value(&value, true)?;
+        }
+        return Ok(());
+    }
+    if let DevCommand::Act {
+        observation,
+        window,
+        logical_id,
+        request_id,
+        timeout,
+        action,
+    } = &args.command
+    {
+        let request_id = request_id
+            .clone()
+            .unwrap_or_else(|| control::next_request_id("dev.action"));
+        let result = control::request(
+            &registration,
+            &request_id,
+            Command::Act {
+                observation_id: observation.clone(),
+                window_id: window.clone(),
+                logical_id: logical_id.clone(),
+                action: action.clone().into_action(),
+                deadline_ms: *timeout,
+            },
+        )
+        .map_err(|error| ApiError::new("connection_failed", error.to_string()))?;
+        if !result.ok {
+            return Err(result
+                .error
+                .map(Into::into)
+                .unwrap_or_else(|| ApiError::new("request_failed", "Action request failed")));
+        }
+        let value = result.result.unwrap_or_default();
+        if value["state"] == "failed" {
+            let error = &value["error"];
+            return Err(ApiError {
+                code: error["code"].as_str().unwrap_or("action_failed").into(),
+                message: error["message"]
+                    .as_str()
+                    .unwrap_or("The action did not complete")
+                    .into(),
+                details: Some(json!({"operation": value})),
+            });
+        }
+        if args.json {
+            write_value(
+                &Reply::success(&registration.session_id, request_id, value),
+                false,
+            )?;
+        } else {
             write_value(&value, true)?;
         }
         return Ok(());
@@ -383,6 +509,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             DevCommand::Windows => Command::Windows,
             DevCommand::Build => Command::Build,
             DevCommand::Reset { .. } => unreachable!("reset commands return above"),
+            DevCommand::Act { .. } => unreachable!("action commands return above"),
             DevCommand::Observe { .. } => unreachable!("observe commands return above"),
             DevCommand::Query { .. } => unreachable!("query commands return above"),
             DevCommand::Diff { .. } => unreachable!("diff commands return above"),
@@ -884,6 +1011,9 @@ mod tests {
         assert_eq!(parse_operation_timeout("120s").unwrap(), 120_000);
         assert!(parse_operation_timeout("0").is_err());
         assert!(parse_operation_timeout("121s").is_err());
+        assert_eq!(parse_scroll_duration("0").unwrap(), 0);
+        assert_eq!(parse_scroll_duration("120s").unwrap(), 120_000);
+        assert!(parse_scroll_duration("121s").is_err());
     }
 
     #[test]

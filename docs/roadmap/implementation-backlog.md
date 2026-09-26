@@ -35,7 +35,7 @@
 | O06 | G2 | core | M | O05, O03 | O-11, A-03 | in_progress |
 | S01 | G2 | core | M | F02 | S-01, S-09 | planned |
 | S02 | G2 | core | L | S01, O04 | S-02, S-09 | in_progress |
-| S03 | G2 | core | L | O06, O04 | S-03, S-04, S-05, S-06, S-08 | planned |
+| S03 | G2 | core | L | O06, O04 | S-03, S-04, S-05, S-06, S-08 | in_progress |
 | M03 | G2 | core | M | T01, F02 | M-04, M-05, M-06 | planned |
 | M04 | G2 | core | L | T01, F01 | M-07, M-08 | planned |
 | S04 | G2 | core | L | S01, S02, S03, M04 | S-02, S-03, S-07, S-08, S-09, R-05 | planned |
@@ -303,12 +303,24 @@ ready/reset 事件和独立 data dir；LoginForm 的真实文本输入、Virtual
 
 代码落点：runtime input/hit-test adapter、拟议 `src/devserver/actions.rs`、`src/commands/dev.rs`；窗口动作 owner 与 O01 注册表关联。
 
+当前已交付 S03 的 admission 子切片：`ActionRequest` 对 observation、window、logical_id
+和 click/type_text/key/scroll payload 做严格有界校验；`gpui dev act` 复用 operation
+幂等记录，绑定当前 run/window 并从指定 observation 解析唯一 logical_id，预检 enabled 与
+bounds。真实 GPUI 事件路径尚未接入时，动作会以明确的 `input_adapter_unavailable` 终态
+结束，不会直接调用业务 handler；enabled/bounds 缺失、节点 disabled、selector 缺失/歧义
+均在投递前明确失败。
+
+当前 GPUI debug semantics adapter 尚未导出 enabled/bounds，因此现在的真实 `gpui dev act`
+请求会在 preflight 返回明确的 field-unavailable 失败；只有语义字段和正常输入 adapter
+都就绪后，才可投递动作。
+
 1. 对 observation/run/window/revision 预检，解析唯一节点并校验可见、enabled、遮挡和焦点。
 2. 通过 GPUI 正常事件路径实现 click/type/key/scroll；坐标路径显式记录像素→逻辑坐标转换。
 3. 实现持久接受记录、1000 项/10min 结果缓存和 10000 项 run 级墓碑；先记录再投递，缓存过期不能重新点击。
 4. 窗口队列串行；已投递动作的取消/断线/崩溃按 unknown 处理。人工输入污染要能区分来源。
 
-PR 拆分：请求/幂等状态机 → pointer/hit test → keyboard/scroll → 真窗口故障测试。验收 S-03/S-04/S-05/S-06/S-08。
+PR 拆分：请求/幂等状态机（当前）→ pointer/hit test → keyboard/scroll → 真窗口故障测试。
+验收 S-03/S-04/S-05/S-06/S-08。
 
 回退：缺真实路由的动作 capability=false；禁止直接调用业务回调来使测试通过。
 

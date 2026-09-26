@@ -1,12 +1,13 @@
 //! One live session, shared by build, process, app-channel and control workers.
 
+use super::actions::ActionRequest;
 use super::artifacts::{ArtifactInfo, ArtifactLimits, ArtifactStore};
 use super::capture;
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
 use super::inputs::{AssetDelta, Inputs};
 use super::operations::{
-    MAX_ACTIVE_OPERATIONS, OperationError, OperationSnapshot, OperationState, OperationStore,
-    SubmitResult, Transition,
+    MAX_ACTIVE_OPERATIONS, MAX_DEADLINE_MS, OperationError, OperationSnapshot, OperationState,
+    OperationStore, SubmitResult, Transition,
 };
 use super::protocol::AssetManifestEntry;
 use super::timing::{SpanGuard, Timing};
@@ -292,6 +293,207 @@ impl Session {
                 });
         }
         Ok(result)
+    }
+
+    /// Admits one observation-bound action into the operation/idempotency
+    /// state machine. The normal GPUI event-path adapter is intentionally not
+    /// connected in this slice, so the operation ends explicitly as
+    /// input_adapter_unavailable instead of invoking a business callback.
+    pub fn submit_action(
+        &self,
+        request_id: &str,
+        request: ActionRequest,
+        deadline_ms: u64,
+    ) -> Result<SubmitResult, OperationError> {
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(OperationError::new(
+                "session_ended",
+                "the live session is stopping",
+            ));
+        }
+        request.validate().map_err(|error| OperationError {
+            code: error.code,
+            message: error.message,
+            details: error.details,
+        })?;
+        if deadline_ms == 0 || deadline_ms > MAX_DEADLINE_MS {
+            return Err(OperationError::with_details(
+                "invalid_deadline",
+                "action deadline must be between 1ms and 120s",
+                json!({"max_ms": MAX_DEADLINE_MS}),
+            ));
+        }
+
+        let state = self.store.state();
+        let Some(run) = state.running.as_ref() else {
+            return Err(OperationError::new(
+                "target_unavailable",
+                "there is no running app for the action",
+            ));
+        };
+        let now_ms = events::now_ms();
+        let deadline_at_ms = now_ms
+            .checked_add(deadline_ms)
+            .ok_or_else(|| OperationError::new("invalid_deadline", "action deadline overflowed"))?;
+        let target = request.target();
+        let result = self.submit_operation(
+            request_id,
+            "action",
+            run.scope.clone(),
+            target,
+            deadline_at_ms,
+        )?;
+        let SubmitResult::Created(snapshot) = result else {
+            return Ok(result);
+        };
+
+        let preflight = (|| {
+            let observation = self
+                .operations
+                .find_observation(&request.observation_id, events::now_ms())?;
+            if observation.state != OperationState::Succeeded {
+                return Err(OperationError::with_details(
+                    "observation_unavailable",
+                    "actions require a successful observation",
+                    json!({
+                        "observation_id": request.observation_id,
+                        "state": observation.state,
+                    }),
+                ));
+            }
+            if observation.scope.run_id != run.scope.run_id {
+                return Err(OperationError::with_details(
+                    "stale_observation",
+                    "the observation belongs to a different run",
+                    json!({
+                        "observation_run_id": observation.scope.run_id,
+                        "current_run_id": run.scope.run_id,
+                    }),
+                ));
+            }
+            if observation.scope.revision != run.scope.revision
+                || state.desired != run.scope.revision
+            {
+                return Err(OperationError::with_details(
+                    "stale_observation",
+                    "the observation revision does not match the current desired and running revisions",
+                    json!({
+                        "observation_revision": observation.scope.revision,
+                        "running_revision": run.scope.revision,
+                        "desired_revision": state.desired,
+                    }),
+                ));
+            }
+            if observation
+                .result
+                .as_ref()
+                .and_then(|result| result["window_id"].as_str())
+                != Some(request.window_id.as_str())
+            {
+                return Err(OperationError::with_details(
+                    "stale_observation",
+                    "the selected window does not match the observation scope",
+                    json!({
+                        "observation_window_id": observation
+                            .result
+                            .as_ref()
+                            .and_then(|result| result["window_id"].as_str()),
+                        "requested_window_id": request.window_id,
+                    }),
+                ));
+            }
+            let windows = self.windows.snapshots(run.scope.run_id.as_deref());
+            let Some(window) = windows
+                .iter()
+                .find(|window| window.window_id == request.window_id)
+            else {
+                return Err(OperationError::with_details(
+                    "unknown_window",
+                    "the action window is not registered in the observation run",
+                    json!({"window_id": request.window_id}),
+                ));
+            };
+            if window.lifecycle != "open" {
+                return Err(OperationError::with_details(
+                    "window_closed",
+                    "the action window is not open",
+                    json!({"window_id": request.window_id, "lifecycle": window.lifecycle}),
+                ));
+            }
+            let observed_scene_epoch = observation
+                .result
+                .as_ref()
+                .and_then(|result| result["semantics"]["scene_epoch"].as_u64())
+                .ok_or_else(|| {
+                    OperationError::new(
+                        "stale_observation",
+                        "the observation has no scene epoch for the selected window",
+                    )
+                })?;
+            if window.scene_epoch != observed_scene_epoch {
+                return Err(OperationError::with_details(
+                    "stale_observation",
+                    "the selected window scene changed after the observation",
+                    json!({
+                        "observation_scene_epoch": observed_scene_epoch,
+                        "current_scene_epoch": window.scene_epoch,
+                    }),
+                ));
+            }
+            let query = super::query::execute(
+                self,
+                super::query::QueryRequest {
+                    observation_id: request.observation_id.clone(),
+                    logical_id: Some(request.logical_id.clone()),
+                    fields: vec!["node_ref".into(), "enabled".into(), "bounds".into()],
+                    limit: 2,
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| OperationError {
+                code: error.code,
+                message: error.message,
+                details: error.details,
+            })?;
+            super::actions::validate_target_query(&query).map_err(|error| OperationError {
+                code: error.code,
+                message: error.message,
+                details: error.details,
+            })?;
+            Ok::<(), OperationError>(())
+        })();
+        if let Err(error) = preflight {
+            return self.fail_admitted_action(&snapshot, error);
+        }
+
+        self.fail_admitted_action(
+            &snapshot,
+            OperationError::with_details(
+                "input_adapter_unavailable",
+                "normal GPUI input dispatch is not connected in this runtime slice",
+                json!({
+                    "action": snapshot.target["action"]["type"],
+                    "capability": request.required_capability(),
+                    "provider": "gpui-dev-runtime",
+                    "reason": "s03_admission_only",
+                }),
+            ),
+        )
+    }
+
+    fn fail_admitted_action(
+        &self,
+        snapshot: &OperationSnapshot,
+        error: OperationError,
+    ) -> Result<SubmitResult, OperationError> {
+        self.start_operation(&snapshot.operation_id)?;
+        let finished = self.finish_operation(
+            &snapshot.operation_id,
+            OperationState::Failed,
+            None,
+            Some(error),
+        )?;
+        Ok(SubmitResult::Created(finished.snapshot))
     }
 
     pub fn take_observe_request(&self) -> Option<ObserveRequest> {
