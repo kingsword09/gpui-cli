@@ -1,7 +1,7 @@
 # S02：registry manifest 契约（2026-09-25）
 
-状态：registry 静态读取与 desktop Counter preview runtime 首个子切片已实现；完整多组件
-reset/check 仍在进行中。
+状态：registry 静态读取、desktop 多组件 preview runtime 的基础渲染与 reset 已实现；
+输入路由、真正的滚动执行和 check executor 仍在进行中。
 
 ## 实现范围
 
@@ -11,11 +11,11 @@ reset/check 仍在进行中。
   必需字段和重复组件名。
 - 场景需要 `scenario.reset` 时，registry 存在但组件未声明 supports_reset 会失败；ready_id
   不在组件声明中也会失败。
-- 示例 manifest 覆盖 Counter、LoginForm、VirtualList；生成模板 runtime 只注册真实存在的
-  Counter surface，custom fixture schema 只在 registry 缺少具体 schema 时报告
-  fixture_schema_unavailable。
+- 示例 manifest 与生成模板 runtime 均覆盖 Counter、LoginForm、VirtualList；custom fixture
+  schema 只在 registry 缺少具体 schema 时报告 fixture_schema_unavailable。
 - 生成模板增加显式 `PreviewRegistry`，应用启动时生成 `.gpui/registry-manifest.json`；默认只注册
-  真实生成的 Counter surface，避免把未实现的 Form/List 伪装成可运行组件。
+  真实生成的三个 preview surface。LoginForm 的用户名/密码/提交/错误节点和 VirtualList 的
+  viewport/稳定 key 行由 fixture 驱动构造。
 - `gpui preview Counter --scenario counter-basic --target desktop` 在构建后创建
   `.gpui/previews/<run>/data`，不读取 `.gpui/sessions/`，runtime 校验 fixture 并发送
   `scenario_ready`，事件带 fixture hash、实际环境、data dir 和 `reset_generation=1`。
@@ -26,6 +26,9 @@ reset/check 仍在进行中。
   runtime 的 reset 请求返回 `unavailable`，不会把普通交互状态误当成场景状态。
 - runtime 的 `reset_generation()`/`reset_generation_for()` 会在同一进程内递增 generation 并重新
   写入 runtime 状态；应用负责在调用该 hook 后重新创建自己的组件和取消旧异步任务。
+- LoginForm 提交按钮会使用 fixture response 显示确定性的错误节点；当前没有真实
+  `type_text`/键盘输入状态，VirtualList 只渲染 GPUI `uniform_list` 并报告 fixture 的初始偏移，
+  真实输入和滚动动作属于 S03。
 
 ## 验证
 
@@ -36,5 +39,5 @@ reset/check 仍在进行中。
 
 ## 未覆盖
 
-LoginForm/VirtualList 的真实注册与渲染、iOS/Android preview、旧异步任务的真实隔离证据、
-check executor 和移动端环境 adapter 尚未覆盖。
+LoginForm 的真实文本输入、VirtualList 的 agent 滚动动作、iOS/Android preview、旧异步任务的
+真实隔离证据、check executor 和移动端环境 adapter 尚未覆盖。

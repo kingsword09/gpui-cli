@@ -280,20 +280,23 @@ assertion 参数，并输出规范化 scenario_hash。缺少 `.gpui/registry-man
 
 代码落点：`src/commands/preview.rs`、runtime scenario adapter、`templates/app/src/previews.rs`。
 
-当前已交付 registry manifest schema-v1 的静态读取契约，并开始实现 desktop preview runtime：
-生成模板通过显式 `PreviewRegistry` 在启动时写出 `.gpui/registry-manifest.json`；`gpui preview`
+当前已交付 registry manifest schema-v1 的静态读取契约和 desktop preview runtime：生成模板
+通过显式 `PreviewRegistry` 在启动时写出 `.gpui/registry-manifest.json`；`gpui preview`
 会校验场景、创建独立 preview data dir、以无 snapshot 的新进程启动并等待 runtime 发出
-`scenario_ready`。`gpui dev reset --scenario <id>` 已通过有界控制队列送到 runtime UI 线程，
-fixture 重新读取并发出新的 `scenario_ready`/`scenario_reset_result`；每次新进程从 generation 1 开始。
+`scenario_ready`。生成 runtime 已按 fixture 选择并渲染 Counter、LoginForm、VirtualList 三种
+surface，分别提供稳定语义节点；`gpui dev reset --scenario <id>` 已通过有界控制队列送到
+runtime UI 线程，fixture 重新读取并发出新的 `scenario_ready`/`scenario_reset_result`；每次
+新进程从 generation 1 开始。
 
 1. 用显式 registry 声明组件、fixture schema、create/reset 和环境适配，不反射构造任意 Render 类型。
 2. 编译输出 registry manifest；preview 选择组件并使用独立数据目录，首次构建后直接进入组件。
-3. 实现 scenario_ready/reset_generation；当前 desktop Counter 已接入，新进程重新创建 fixture，
-   控制 reset 在 UI 线程递增 generation，不自动导入 Live 交互 state。
+3. 实现 scenario_ready/reset_generation；desktop 三种 fixture surface 已接入，控制 reset 在
+   UI 线程递增 generation，不自动导入 Live 交互 state。
 4. 接入 theme/locale/clock/random adapter，回报实际环境和 uncontrolled_inputs；进程内 reset 作为可选优化单独证明。
 
-验收 S-02/S-09。当前切片覆盖 desktop Counter 的启动、fixture 初值、manifest、ready/reset 事件和
-独立 data dir；LoginForm/VirtualList、真实旧异步任务取消、移动端 preview 和 check 执行仍未完成。
+验收 S-02/S-09。当前切片覆盖 desktop 三种 surface 的启动、fixture 初值/节点、manifest、
+ready/reset 事件和独立 data dir；LoginForm 的真实文本输入、VirtualList 的 agent 滚动动作、
+真实旧异步任务取消、移动端 preview 和 check 执行仍未完成。
 回退：进程内 reset 失败时采用新进程，不保留未知状态继续 check。
 
 ### S03 · 正常输入路由与幂等
