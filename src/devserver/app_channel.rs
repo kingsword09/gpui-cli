@@ -108,6 +108,27 @@ impl Shared {
         true
     }
 
+    fn broadcast_current(&self, message: &ServerMessage) -> bool {
+        let Ok(payload) = protocol::encode(message) else {
+            return false;
+        };
+        if payload.len() > protocol::MAX_FRAME_LEN as usize {
+            self.write_failed.store(true, Ordering::SeqCst);
+            return false;
+        }
+        let run = self.current_run();
+        let clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sent = false;
+        for client in clients.values().filter(|client| client.scope.run_id == run) {
+            if client.sender.try_send(payload.clone()).is_ok() {
+                sent = true;
+            } else {
+                self.write_failed.store(true, Ordering::SeqCst);
+            }
+        }
+        sent
+    }
+
     fn record_semantics_reply(&self, scope: &Scope, connection_id: u64, reply: SemanticsReadReply) {
         let status = reply.status.clone();
         let tree_bytes = reply.tree_json.as_ref().map_or(0, String::len);
@@ -485,6 +506,28 @@ fn heartbeat_loop(shared: &Arc<Shared>) {
             last_artifact_gc = Instant::now();
         }
         if let Some(scope) = shared.current_scope() {
+            if let Some(session) = &shared.session {
+                for request in session.take_scenario_reset_requests() {
+                    let same_run = request.scope.run_id == scope.run_id;
+                    let delivered = same_run
+                        && shared.broadcast_current(&ServerMessage::ScenarioReset {
+                            request_id: request.request_id.clone(),
+                            scenario_id: request.scenario_id.clone(),
+                        });
+                    shared.emit(
+                        Kind::ScenarioResetRequested,
+                        &scope,
+                        json!({
+                            "request_id": request.request_id,
+                            "scenario_id": request.scenario_id,
+                            "accepted": delivered,
+                            "delivered": delivered,
+                            "reason": if !same_run { Some("stale_run") } else if !delivered { Some("app_channel_unavailable") } else { None::<&str> },
+                            "received_at_ms": now_ms(),
+                        }),
+                    );
+                }
+            }
             let tick = shared.windows.tick(scope.run_id.as_deref(), Instant::now());
             for request in tick.semantics_timeouts {
                 shared.fail_semantics_request(&scope, &request, "semantics_timeout");
@@ -859,6 +902,30 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                             "reset_generation": reset_generation,
                             "data_dir": data_dir,
                             "uncontrolled_inputs": uncontrolled_inputs,
+                            "connection_id": id,
+                            "received_at_ms": now_ms(),
+                        }),
+                    );
+                }
+                ClientMessage::ScenarioResetResult {
+                    request_id,
+                    scenario_id,
+                    accepted,
+                    reset_generation,
+                    reason,
+                } => {
+                    let request_id = clip(&request_id, 128);
+                    let scenario_id = clip(&scenario_id, 128);
+                    let reason = reason.map(|value| clip(&value, 256));
+                    shared.emit(
+                        Kind::ScenarioResetResult,
+                        &scope,
+                        json!({
+                            "request_id": request_id,
+                            "scenario_id": scenario_id,
+                            "accepted": accepted,
+                            "reset_generation": reset_generation,
+                            "reason": reason,
                             "connection_id": id,
                             "received_at_ms": now_ms(),
                         }),

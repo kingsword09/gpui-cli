@@ -33,6 +33,12 @@ pub enum DevCommand {
     Windows,
     /// Request a fresh build through the live supervisor
     Build,
+    /// Reset the active preview scenario through the runtime UI thread
+    Reset {
+        /// Scenario id to reset
+        #[arg(long)]
+        scenario: String,
+    },
     /// Submit a version-bound UI observation
     Observe {
         /// Ensure the actively watched inputs are rebuilt before observing
@@ -249,6 +255,29 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         }
         return Ok(());
     }
+    if let DevCommand::Reset { scenario } = &args.command {
+        let result = control::request(
+            &registration,
+            &control::next_request_id("dev.reset"),
+            Command::ScenarioReset {
+                scenario_id: scenario.clone(),
+            },
+        )
+        .map_err(|error| ApiError::new("connection_failed", error.to_string()))?;
+        if !result.ok {
+            return Err(result
+                .error
+                .map(Into::into)
+                .unwrap_or_else(|| ApiError::new("request_failed", "Reset request failed")));
+        }
+        if args.json {
+            write_value(&result, false)?;
+        } else {
+            let value = result.result.unwrap_or_else(|| json!({}));
+            write_value(&value, true)?;
+        }
+        return Ok(());
+    }
     if let DevCommand::Observe {
         sync,
         window,
@@ -353,6 +382,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
             DevCommand::Diagnostics => Command::Diagnostics,
             DevCommand::Windows => Command::Windows,
             DevCommand::Build => Command::Build,
+            DevCommand::Reset { .. } => unreachable!("reset commands return above"),
             DevCommand::Observe { .. } => unreachable!("observe commands return above"),
             DevCommand::Query { .. } => unreachable!("query commands return above"),
             DevCommand::Diff { .. } => unreachable!("diff commands return above"),

@@ -19,13 +19,19 @@ reset/check 仍在进行中。
 - `gpui preview Counter --scenario counter-basic --target desktop` 在构建后创建
   `.gpui/previews/<run>/data`，不读取 `.gpui/sessions/`，runtime 校验 fixture 并发送
   `scenario_ready`，事件带 fixture hash、实际环境、data dir 和 `reset_generation=1`。
-- runtime 的 `reset_generation()` 会在同一进程内递增 generation 并重新写入 runtime 状态；应用
-  负责在调用该 hook 前重新创建自己的组件和取消旧异步任务。
+- `gpui dev reset --scenario counter-basic` 经 control server 和有界 app-channel 队列送入 UI
+  线程；runtime 重新读取 fixture、递增 generation，发送 `scenario_reset_result` 和新的
+  `scenario_ready`。旧请求不能跨 run 投递。
+- `scenario.reset` 只有 preview runtime 在 hello 中声明时才进入可用 capability；普通 Live
+  runtime 的 reset 请求返回 `unavailable`，不会把普通交互状态误当成场景状态。
+- runtime 的 `reset_generation()`/`reset_generation_for()` 会在同一进程内递增 generation 并重新
+  写入 runtime 状态；应用负责在调用该 hook 后重新创建自己的组件和取消旧异步任务。
 
 ## 验证
 
 - 场景单元测试验证合法 manifest 的 reset/ready 匹配。
 - 缺少 manifest 仍只报告 registry_unavailable，不把未知组件当作已检查。
+- app-channel reset 请求、run fencing、generation result 和 runtime queue wire shape 有 bounded 测试。
 - workspace tests、clippy、fmt、生成 desktop 模板 debug/`gpui-dev`/locked 检查和设计文档检查通过。
 
 ## 未覆盖

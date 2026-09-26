@@ -276,10 +276,33 @@ pub fn initialize() {
 /// owns the actual component state; it must call this hook before rebuilding
 /// its view so stale async work cannot cross the new generation.
 pub fn reset_generation() -> Result<u64, String> {
+    reset_generation_inner(None)
+}
+
+/// Resets only the scenario named by the supervisor request. A stale or
+/// misrouted request cannot reset a different preview in the same process.
+pub fn reset_generation_for(scenario_id: &str) -> Result<u64, String> {
+    reset_generation_inner(Some(scenario_id))
+}
+
+/// Returns the active preview generation so a generated view can discard its
+/// local interaction state when the supervisor completes a reset.
+pub fn active_reset_generation() -> Option<u64> {
+    state()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .map(|preview| preview.reset_generation)
+}
+
+fn reset_generation_inner(expected_scenario_id: Option<&str>) -> Result<u64, String> {
     let mut guard = state().lock().unwrap_or_else(|error| error.into_inner());
     let current = guard
         .as_mut()
         .ok_or_else(|| "no preview scenario is active".to_string())?;
+    if expected_scenario_id.is_some_and(|scenario_id| scenario_id != current.scenario_id) {
+        return Err("scenario_id does not match the active preview".into());
+    }
     let fixture_text = fs::read_to_string(&current.fixture_path).map_err(|error| {
         format!(
             "reading preview fixture {}: {error}",

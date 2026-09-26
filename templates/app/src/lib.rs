@@ -168,7 +168,12 @@ pub fn pump_live_assets(cx: &mut App) {
                 let asset_events = crate::live::take_asset_events();
                 let probes = crate::live::take_ui_probe_requests();
                 let semantics = crate::live::take_semantics_read_requests();
-                if asset_events.is_empty() && probes.is_empty() && semantics.is_empty() {
+                let resets = crate::live::take_preview_reset_requests();
+                if asset_events.is_empty()
+                    && probes.is_empty()
+                    && semantics.is_empty()
+                    && resets.is_empty()
+                {
                     continue;
                 }
                 cx.update(|cx| {
@@ -242,7 +247,29 @@ pub fn pump_live_assets(cx: &mut App) {
                     for request in semantics {
                         crate::live::answer_semantics_read(cx, request);
                     }
-                    if has_asset_changes {
+                    let mut has_preview_reset = false;
+                    for request in resets {
+                        match crate::previews::reset_generation_for(&request.scenario_id) {
+                            Ok(generation) => {
+                                has_preview_reset = true;
+                                crate::live::respond_scenario_reset(
+                                    &request.request_id,
+                                    &request.scenario_id,
+                                    true,
+                                    generation,
+                                    None,
+                                );
+                            }
+                            Err(error) => crate::live::respond_scenario_reset(
+                                &request.request_id,
+                                &request.scenario_id,
+                                false,
+                                0,
+                                Some(&error),
+                            ),
+                        }
+                    }
+                    if has_asset_changes || has_preview_reset {
                         cx.refresh_windows();
                     }
                 });
@@ -300,6 +327,7 @@ pub fn clear_declared_logical_ids() {
 /// dropping back to zero. Replace it with whatever state your app persists.
 pub struct MainView {
     clicks: usize,
+    preview_generation: Option<u64>,
 }
 
 /// Snapshot bytes from the previous process, when building with live support.
@@ -331,7 +359,10 @@ impl MainView {
                 })
             })
             .unwrap_or(0);
-        Self { clicks }
+        Self {
+            clicks,
+            preview_generation: crate::previews::active_reset_generation(),
+        }
     }
 }
 
@@ -343,6 +374,11 @@ impl Default for MainView {
 
 impl Render for MainView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let current_generation = crate::previews::active_reset_generation();
+        if current_generation != self.preview_generation {
+            self.clicks = crate::previews::counter_initial_value().unwrap_or(0);
+            self.preview_generation = current_generation;
+        }
         // Live mode: publish the latest state so `prepare_restart` can
         // snapshot it before the CLI relaunches the app.
         #[cfg(debug_assertions)]

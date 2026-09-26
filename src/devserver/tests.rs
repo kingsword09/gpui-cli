@@ -481,6 +481,80 @@ fn scenario_ready_is_published_with_fixture_environment_and_generation() {
 }
 
 #[test]
+fn scenario_reset_is_delivered_to_the_current_run_and_records_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let server = Arc::new(DevServer::start_observed(session.clone()).unwrap());
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    session.emit(Kind::AppStarted, &run, json!({"pid": 7}));
+    session.emit(Kind::AppConnected, &run, json!({"pid": 7}));
+    build.finish(true, None);
+    let token = server.expect_run(run.clone()).unwrap();
+    let mut socket = connect_with_capabilities(
+        &server,
+        &token,
+        vec!["semantics.read".into(), "scenario.reset".into()],
+    );
+
+    session
+        .request_scenario_reset("reset-1", "counter-basic")
+        .unwrap();
+    let request: ServerMessage =
+        protocol::decode(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+    assert_eq!(
+        request,
+        ServerMessage::ScenarioReset {
+            request_id: "reset-1".into(),
+            scenario_id: "counter-basic".into(),
+        }
+    );
+
+    send(
+        &mut socket,
+        &ClientMessage::ScenarioResetResult {
+            request_id: "reset-1".into(),
+            scenario_id: "counter-basic".into(),
+            accepted: true,
+            reset_generation: 2,
+            reason: None,
+        },
+    );
+    wait_until(|| {
+        session
+            .store
+            .events(0, Duration::ZERO)
+            .events
+            .iter()
+            .any(|event| {
+                event.kind == Kind::ScenarioResetResult
+                    && event.data["request_id"] == "reset-1"
+                    && event.data["reset_generation"] == 2
+                    && event.scope.run_id == run.run_id
+            })
+    });
+}
+
+#[test]
+fn scenario_reset_requires_runtime_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let build = session.begin_build().unwrap();
+    let run = session.begin_run(&build);
+    session.emit(Kind::AppStarted, &run, json!({"pid": 7}));
+    session.emit(
+        Kind::AppConnected,
+        &run,
+        json!({"pid": 7, "capabilities": ["semantics.read"]}),
+    );
+    build.finish(true, None);
+    let error = session
+        .request_scenario_reset("reset-1", "counter-basic")
+        .unwrap_err();
+    assert_eq!(error.code, "unavailable");
+}
+
+#[test]
 fn semantics_read_roundtrip_is_run_and_window_bound_and_publishes_tree_artifact() {
     let dir = tempfile::tempdir().unwrap();
     let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
