@@ -57,6 +57,9 @@ pub enum DevCommand {
         /// Total action deadline, from 1ms through 120s
         #[arg(long, default_value = "30s", value_parser = parse_operation_timeout)]
         timeout: u64,
+        /// Return after admission instead of waiting for target event delivery
+        #[arg(long = "async")]
+        asynchronous: bool,
         #[command(subcommand)]
         action: ActionCommand,
     },
@@ -142,7 +145,7 @@ pub enum DevCommand {
 
 #[derive(Clone, Subcommand)]
 pub enum ActionCommand {
-    /// Admit a click action (requires a live pointer adapter)
+    /// Click through the runtime's normal pointer event path
     Click {
         #[arg(long, default_value = "left")]
         button: String,
@@ -358,6 +361,7 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
         logical_id,
         request_id,
         timeout,
+        asynchronous,
         action,
     } = &args.command
     {
@@ -382,7 +386,15 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
                 .map(Into::into)
                 .unwrap_or_else(|| ApiError::new("request_failed", "Action request failed")));
         }
-        let value = result.result.unwrap_or_default();
+        let submitted = result.result.unwrap_or_default();
+        let operation_id = submitted["operation_id"].as_str().ok_or_else(|| {
+            ApiError::new("invalid_response", "Action submission has no operation_id")
+        })?;
+        let value = if *asynchronous || is_terminal_operation(&submitted["state"]) {
+            submitted
+        } else {
+            wait_for_action(&registration, operation_id, *timeout)?
+        };
         if value["state"] == "failed" {
             let error = &value["error"];
             return Err(ApiError {
@@ -390,6 +402,20 @@ fn execute(args: &DevArgs) -> std::result::Result<(), ApiError> {
                 message: error["message"]
                     .as_str()
                     .unwrap_or("The action did not complete")
+                    .into(),
+                details: Some(json!({"operation": value})),
+            });
+        }
+        if value["state"] == "unknown" || value["state"] == "timed_out" {
+            let error = &value["error"];
+            return Err(ApiError {
+                code: error["code"]
+                    .as_str()
+                    .unwrap_or("action_outcome_unknown")
+                    .into(),
+                message: error["message"]
+                    .as_str()
+                    .unwrap_or("the action outcome is not confirmed")
                     .into(),
                 details: Some(json!({"operation": value})),
             });
@@ -767,6 +793,47 @@ fn operation_request(
             .unwrap_or_else(|| ApiError::new("request_failed", "Operation request failed")));
     }
     Ok(reply.result.unwrap_or_default())
+}
+
+fn is_terminal_operation(state: &serde_json::Value) -> bool {
+    matches!(
+        state.as_str(),
+        Some("succeeded" | "failed" | "cancelled" | "timed_out" | "superseded" | "unknown")
+    )
+}
+
+fn wait_for_action(
+    registration: &control::Registration,
+    operation_id: &str,
+    timeout_ms: u64,
+) -> std::result::Result<serde_json::Value, ApiError> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let remaining_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+            .min(control::MAX_WAIT_MS);
+        let current = operation_request(
+            registration,
+            Command::OperationGet {
+                operation_id: operation_id.to_owned(),
+                wait_ms: remaining_ms,
+            },
+        )?;
+        if is_terminal_operation(&current["state"]) {
+            return Ok(current);
+        }
+        if Instant::now() >= deadline {
+            return Err(ApiError {
+                code: "action_pending".into(),
+                message: "the action has not reached a terminal state; retrieve it by operation_id"
+                    .into(),
+                details: Some(json!({"operation_id": operation_id, "operation": current})),
+            });
+        }
+    }
 }
 
 fn execute_artifact(

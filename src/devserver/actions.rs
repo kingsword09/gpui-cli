@@ -1,9 +1,4 @@
 //! Strict, observation-bound input action contracts.
-//!
-//! This first S03 slice only admits and fingerprints actions. The normal GPUI
-//! event-path adapter is deliberately not claimed here; an admitted action
-//! terminates as unavailable until a runtime advertises the corresponding
-//! input provider.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -243,6 +238,63 @@ pub fn validate_target_query(result: &Value) -> Result<(), ActionError> {
     Ok(())
 }
 
+/// Returns a bounded click point at the center of the uniquely resolved
+/// semantic node. Coordinates use thousandths of a GPUI pixel so the wire
+/// protocol can remain integer-only.
+pub fn click_center_milli(result: &Value) -> Result<(u32, u32), ActionError> {
+    let node = result["nodes"]
+        .as_array()
+        .and_then(|nodes| (nodes.len() == 1).then(|| &nodes[0]))
+        .ok_or_else(|| {
+            ActionError::new(
+                "invalid_semantics_result",
+                "click target query did not return exactly one node",
+            )
+        })?;
+    let bounds = node["bounds"].as_object().ok_or_else(|| {
+        ActionError::new(
+            "element_bounds_unavailable",
+            "the observation does not expose target bounds for hit testing",
+        )
+    })?;
+    let number = |key: &str| bounds.get(key).and_then(Value::as_f64);
+    let (Some(x), Some(y), Some(width), Some(height)) =
+        (number("x"), number("y"), number("width"), number("height"))
+    else {
+        return Err(ActionError::new(
+            "invalid_element_bounds",
+            "target bounds must contain numeric x, y, width, and height",
+        ));
+    };
+    let center_x = x + width / 2.0;
+    let center_y = y + height / 2.0;
+    let to_milli = |value: f64| {
+        let scaled = (value * 1000.0).round();
+        (scaled.is_finite() && (0.0..=u32::MAX as f64).contains(&scaled)).then_some(scaled as u32)
+    };
+    if !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || x < 0.0
+        || y < 0.0
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return Err(ActionError::new(
+            "invalid_element_bounds",
+            "target bounds must be finite, non-negative, and non-empty",
+        ));
+    }
+    let (Some(x_milli), Some(y_milli)) = (to_milli(center_x), to_milli(center_y)) else {
+        return Err(ActionError::new(
+            "invalid_element_bounds",
+            "target bounds exceed the supported coordinate range",
+        ));
+    };
+    Ok((x_milli, y_milli))
+}
+
 fn default_button() -> String {
     "left".into()
 }
@@ -448,6 +500,20 @@ mod tests {
                 "unsupported_fields": []
             }))
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn click_point_uses_bounded_center_coordinates() {
+        let query = json!({"nodes": [{"bounds": {"x": 12.25, "y": 4.0,
+            "width": 20.0, "height": 11.5}}]});
+        assert_eq!(click_center_milli(&query).unwrap(), (22_250, 9_750));
+
+        let invalid = json!({"nodes": [{"bounds": {"x": 0, "y": 0,
+            "width": 0, "height": 10}}]});
+        assert_eq!(
+            click_center_milli(&invalid).unwrap_err().code,
+            "invalid_element_bounds"
         );
     }
 }

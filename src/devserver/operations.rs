@@ -304,6 +304,23 @@ impl OperationStore {
             })
     }
 
+    /// Reads a snapshot without applying deadline expiry. Runtime adapters use
+    /// this only to resolve an already-dispatched operation: the supervisor
+    /// must be able to distinguish a definite result from a missing reply
+    /// before the generic deadline path turns every operation into timed_out.
+    pub fn peek(&self, operation_id: &str) -> Result<OperationSnapshot, OperationError> {
+        validate_operation_id(operation_id)?;
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .records
+            .get(operation_id)
+            .map(|record| record.snapshot.clone())
+            .ok_or_else(|| {
+                OperationError::new("operation_expired", "operation is unknown or expired")
+            })
+    }
+
     pub fn find_observation(
         &self,
         observation_id: &str,
@@ -496,6 +513,44 @@ impl OperationStore {
         } else {
             mark_terminal(record, state, result, error, now_ms);
         }
+        let snapshot = record.snapshot.clone();
+        inner.terminal_order.push_back(operation_id.to_owned());
+        refresh_bytes(&mut inner);
+        self.changed.notify_all();
+        Ok(Transition {
+            snapshot,
+            changed: true,
+        })
+    }
+
+    /// Finishes an already-dispatched operation as ambiguous, including after
+    /// its deadline. Unlike `finish`, this deliberately bypasses automatic
+    /// timed-out conversion because a side effect may already have happened.
+    pub fn finish_unknown(
+        &self,
+        operation_id: &str,
+        result: Option<Value>,
+        error: Option<OperationError>,
+        now_ms: u64,
+    ) -> Result<Transition, OperationError> {
+        validate_operation_id(operation_id)?;
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let record = inner.records.get_mut(operation_id).ok_or_else(|| {
+            OperationError::new("operation_expired", "operation is unknown or expired")
+        })?;
+        if record.snapshot.state.is_terminal() {
+            return Ok(Transition {
+                snapshot: record.snapshot.clone(),
+                changed: false,
+            });
+        }
+        if record.snapshot.state != OperationState::Running {
+            return Err(OperationError::new(
+                "invalid_transition",
+                "an operation must be running before it can finish as unknown",
+            ));
+        }
+        mark_terminal(record, OperationState::Unknown, result, error, now_ms);
         let snapshot = record.snapshot.clone();
         inner.terminal_order.push_back(operation_id.to_owned());
         refresh_bytes(&mut inner);
@@ -806,6 +861,30 @@ mod tests {
             .unwrap();
         assert!(!late.changed);
         assert_eq!(late.snapshot.state, OperationState::Cancelled);
+    }
+
+    #[test]
+    fn dispatched_operation_can_finish_unknown_after_deadline() {
+        let store = OperationStore::new(4);
+        let queued = submit(&store, "req-1", 100);
+        store.start(&queued.operation_id, 200).unwrap();
+        let unknown = store
+            .finish_unknown(
+                &queued.operation_id,
+                Some(serde_json::json!({"dispatch": "normal_event_path"})),
+                Some(OperationError::new(
+                    "action_outcome_unknown",
+                    "no target confirmation",
+                )),
+                10_000,
+            )
+            .unwrap();
+        assert!(unknown.changed);
+        assert_eq!(unknown.snapshot.state, OperationState::Unknown);
+        assert_eq!(
+            unknown.snapshot.error.unwrap().code,
+            "action_outcome_unknown"
+        );
     }
 
     #[test]

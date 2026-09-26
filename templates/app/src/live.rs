@@ -17,6 +17,8 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 use serde_json::Value;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const PROTO_VERSION: u32 = 2;
 const RUNTIME_VERSION: &str = "agent-native-dev-runtime-v1";
@@ -50,6 +52,39 @@ static PENDING_STATE: Mutex<Option<String>> = Mutex::new(None);
 /// opt-in: `.id()` and the debug tree's `element_id` are never promoted on
 /// their own.
 static DECLARED_LOGICAL_IDS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+#[derive(Clone, Copy, Debug)]
+struct ActionTargetBounds {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    enabled: bool,
+}
+
+/// Bounds and enabled state are exported only for explicitly instrumented
+/// generated controls; the accessibility tree alone does not provide these.
+static ACTION_TARGET_BOUNDS: Mutex<BTreeMap<String, ActionTargetBounds>> =
+    Mutex::new(BTreeMap::new());
+
+/// One accepted pointer command waiting for execution on the GPUI UI thread.
+#[derive(Clone, Debug)]
+pub struct PointerActionRequest {
+    pub operation_id: String,
+    pub observation_id: String,
+    pub window_id: String,
+    pub logical_id: String,
+    pub button: String,
+    pub x_milli: u32,
+    pub y_milli: u32,
+    pub scene_epoch: u64,
+    pub deadline_at_ms: u64,
+}
+
+static POINTER_ACTIONS: Mutex<Vec<PointerActionRequest>> = Mutex::new(Vec::new());
+static PENDING_ACTION_HITS: Mutex<BTreeMap<(String, String), Arc<AtomicBool>>> =
+    Mutex::new(BTreeMap::new());
+const POINTER_ACTION_QUEUE_BOUND: usize = 16;
 
 /// Sender half of the current connection; `None` while disconnected.
 static OUTBOUND: Mutex<Option<mpsc::SyncSender<String>>> = Mutex::new(None);
@@ -304,8 +339,76 @@ pub fn clear_declared_logical_ids() {
         .clear();
 }
 
+/// Starts a new render-frame snapshot for instrumented action targets.
+pub fn begin_action_bounds_frame() {
+    ACTION_TARGET_BOUNDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// Records the actual prepaint bounds for one explicitly instrumented target.
+pub fn record_action_target_bounds(
+    logical_id: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    enabled: bool,
+) {
+    if ![x, y, width, height].into_iter().all(f32::is_finite)
+        || x < 0.0
+        || y < 0.0
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return;
+    }
+    ACTION_TARGET_BOUNDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            logical_id.to_owned(),
+            ActionTargetBounds {
+                x,
+                y,
+                width,
+                height,
+                enabled,
+            },
+        );
+}
+
+/// Drains pointer commands received by the network thread for UI-thread
+/// execution.
+pub fn take_pointer_action_requests() -> Vec<PointerActionRequest> {
+    std::mem::take(
+        &mut *POINTER_ACTIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    )
+}
+
+/// Called by the generated element's bubbled mouse-up observer. This is the
+/// success signal for the transport; it does not assert the business outcome.
+pub fn confirm_action_target_hit(logical_id: &str) {
+    let hit = PENDING_ACTION_HITS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|((_, target_id), _)| target_id == logical_id)
+        .map(|(_, hit)| hit.clone());
+    if let Some(hit) = hit {
+        hit.store(true, Ordering::SeqCst);
+    }
+}
+
 fn enrich_semantics_tree(tree: &str) -> Result<String, &'static str> {
     let declarations = DECLARED_LOGICAL_IDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let action_bounds = ACTION_TARGET_BOUNDS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
@@ -329,18 +432,36 @@ fn enrich_semantics_tree(tree: &str) -> Result<String, &'static str> {
             if existing != logical_id {
                 return Err("logical_id_conflict_in_tree");
             }
-            continue;
+        } else {
+            if matched
+                .insert(logical_id.clone(), node_ref.clone())
+                .is_some()
+            {
+                return Err("logical_id_duplicate_in_tree");
+            }
+            node.as_object_mut().expect("node is an object").insert(
+                "logical_id".into(),
+                Value::String(logical_id.clone()),
+            );
         }
-        if matched
-            .insert(logical_id.clone(), node_ref.clone())
-            .is_some()
-        {
-            return Err("logical_id_duplicate_in_tree");
+        if let Some(bounds) = action_bounds.get(logical_id) {
+            let object = node.as_object_mut().expect("node is an object");
+            object.insert(
+                "bounds".into(),
+                serde_json::json!({
+                    "x": bounds.x,
+                    "y": bounds.y,
+                    "width": bounds.width,
+                    "height": bounds.height,
+                }),
+            );
+            let aria = object
+                .entry("aria")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .ok_or("semantics_aria_invalid")?;
+            aria.insert("enabled".into(), serde_json::json!(bounds.enabled));
         }
-        node.as_object_mut().expect("node is an object").insert(
-            "logical_id".into(),
-            Value::String(logical_id.clone()),
-        );
     }
     serde_json::to_string(&value).map_err(|_| "semantics_serialization_failed")
 }
@@ -845,6 +966,103 @@ pub fn respond_ui_probe(
     ));
 }
 
+/// Reports the result of one pointer dispatch. `target_event_received` is
+/// raised only by the target element's bubbled mouse-up listener.
+pub fn respond_action_result(
+    operation_id: &str,
+    window_id: &str,
+    logical_id: &str,
+    dispatched: bool,
+    target_event_received: bool,
+    reason: Option<&str>,
+) {
+    let reason = reason
+        .map(|value| format!(",\"reason\":\"{}\"", json_escape(value)))
+        .unwrap_or_default();
+    queue_control(format!(
+        "{{\"type\":\"action_result\",\"operation_id\":\"{}\",\"window_id\":\"{}\",\"logical_id\":\"{}\",\"dispatched\":{dispatched},\"target_event_received\":{target_event_received},\"completed_at_ms\":{}{reason}}}",
+        json_escape(operation_id),
+        json_escape(window_id),
+        json_escape(logical_id),
+        now_ms(),
+    ));
+}
+
+/// Executes one action on the foreground GPUI context. The network thread
+/// only queues the parsed request; it never touches a Window.
+pub fn dispatch_pointer_action(cx: &mut gpui::App, request: PointerActionRequest) {
+    let handle = REGISTERED_WINDOW_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&request.window_id)
+        .copied();
+    let Some(handle) = handle else {
+        respond_action_result(
+            &request.operation_id,
+            &request.window_id,
+            &request.logical_id,
+            false,
+            false,
+            Some("window_handle_unavailable"),
+        );
+        return;
+    };
+    let hit = Arc::new(AtomicBool::new(false));
+    PENDING_ACTION_HITS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            (request.operation_id.clone(), request.logical_id.clone()),
+            hit.clone(),
+        );
+    let x = request.x_milli as f32 / 1000.0;
+    let y = request.y_milli as f32 / 1000.0;
+    let dispatched = handle
+        .update(cx, |_, window, cx| {
+            let position = gpui::point(gpui::px(x), gpui::px(y));
+            let down = window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    modifiers: gpui::Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            let up = window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    modifiers: gpui::Modifiers::default(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+            (down, up)
+        })
+        .is_ok();
+    let target_event_received = hit.load(Ordering::SeqCst);
+    PENDING_ACTION_HITS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(request.operation_id.clone(), request.logical_id.clone()));
+    respond_action_result(
+        &request.operation_id,
+        &request.window_id,
+        &request.logical_id,
+        dispatched,
+        target_event_received,
+        if dispatched && target_event_received {
+            None
+        } else if !dispatched {
+            Some("window_dispatch_failed")
+        } else {
+            Some("target_event_not_received")
+        },
+    );
+}
+
 /// Reports one bounded semantics read. A tree is sent as an escaped JSON
 /// string so the app-channel envelope remains unambiguous and bounded.
 pub fn respond_semantics_read(
@@ -1166,7 +1384,7 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
     };
 
     let hello = format!(
-        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\",\"semantics.logical_id\"{}{}]}}",
+        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\",\"semantics.logical_id\",\"input.pointer.click\"{}{}]}}",
         json_escape(&config.token),
         json_escape(&config.project),
         std::process::id(),
@@ -1445,6 +1663,64 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                 // A bounded queue is preferable to silently growing work on
                 // the UI thread. The supervisor deadline reports the missed
                 // request as unavailable if this queue is full.
+            }
+        }
+    } else if find_bytes(frame, b"\"action_dispatch\"") {
+        let (
+            Some(operation_id),
+            Some(observation_id),
+            Some(window_id),
+            Some(logical_id),
+            Some(button),
+            Some(x_milli),
+            Some(y_milli),
+            Some(scene_epoch),
+            Some(deadline_at_ms),
+        ) = (
+            string_field(frame, "operation_id"),
+            string_field(frame, "observation_id"),
+            string_field(frame, "window_id"),
+            string_field(frame, "logical_id"),
+            string_field(frame, "button"),
+            number_field(frame, "x_milli"),
+            number_field(frame, "y_milli"),
+            number_field(frame, "scene_epoch"),
+            number_field(frame, "deadline_at_ms"),
+        ) else {
+            return;
+        };
+        if button != "left" {
+            respond_action_result(
+                &operation_id,
+                &window_id,
+                &logical_id,
+                false,
+                false,
+                Some("unsupported_button"),
+            );
+        } else {
+            let mut actions = POINTER_ACTIONS.lock().unwrap_or_else(|e| e.into_inner());
+            if actions.len() >= POINTER_ACTION_QUEUE_BOUND {
+                respond_action_result(
+                    &operation_id,
+                    &window_id,
+                    &logical_id,
+                    false,
+                    false,
+                    Some("action_queue_full"),
+                );
+            } else {
+                actions.push(PointerActionRequest {
+                    operation_id,
+                    observation_id,
+                    window_id,
+                    logical_id,
+                    button,
+                    x_milli: u32::try_from(x_milli).unwrap_or(u32::MAX),
+                    y_milli: u32::try_from(y_milli).unwrap_or(u32::MAX),
+                    scene_epoch,
+                    deadline_at_ms,
+                });
             }
         }
     } else if find_bytes(frame, b"\"scenario_reset\"") {

@@ -149,6 +149,23 @@ pub struct HeartbeatTick {
 }
 
 impl WindowRegistry {
+    /// Returns the active app-channel owner for one open window in the given
+    /// run. Input delivery must stay on this connection; broadcasting an
+    /// action could execute it more than once.
+    pub fn owner_connection_id(&self, run_id: Option<&str>, window_id: &str) -> Option<u64> {
+        let key = WindowKey {
+            run_id: run_id.map(str::to_owned),
+            window_id: window_id.to_owned(),
+        };
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .windows
+            .get(&key)
+            .filter(|window| window.snapshot.lifecycle == "open")
+            .map(|window| window.connection_id)
+    }
+
     pub fn register(&self, scope: &Scope, connection_id: u64, registration: WindowRegistration) {
         let key = WindowKey {
             run_id: scope.run_id.clone(),

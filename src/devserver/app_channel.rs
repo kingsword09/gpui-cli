@@ -3,7 +3,7 @@
 
 use super::events::{Kind, Scope, clip, now_ms};
 use super::protocol::{self, AssetManifestEntry, ClientMessage, PROTO_VERSION, ServerMessage};
-use super::session::{Session, random_token};
+use super::session::{ActionResult, Session, random_token};
 use super::windows::{
     ProbeReply, SceneCompletion, SemanticsReadReply, SemanticsRequest, WindowRegistration,
     WindowRegistry,
@@ -507,6 +507,28 @@ fn heartbeat_loop(shared: &Arc<Shared>) {
         }
         if let Some(scope) = shared.current_scope() {
             if let Some(session) = &shared.session {
+                for request in session.take_action_dispatches(&scope) {
+                    if !session.mark_action_dispatched(&request) {
+                        continue;
+                    }
+                    let sent = shared.send_to(
+                        request.connection_id,
+                        &ServerMessage::ActionDispatch {
+                            operation_id: request.operation_id.clone(),
+                            observation_id: request.observation_id.clone(),
+                            window_id: request.window_id.clone(),
+                            logical_id: request.logical_id.clone(),
+                            button: request.button.clone(),
+                            x_milli: request.x_milli,
+                            y_milli: request.y_milli,
+                            scene_epoch: request.scene_epoch,
+                            deadline_at_ms: request.deadline_at_ms,
+                        },
+                    );
+                    if !sent {
+                        session.fail_action_delivery(&request);
+                    }
+                }
                 for request in session.take_scenario_reset_requests() {
                     let same_run = request.scope.run_id == scope.run_id;
                     let delivered = same_run
@@ -926,6 +948,51 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
                             "accepted": accepted,
                             "reset_generation": reset_generation,
                             "reason": reason,
+                            "connection_id": id,
+                            "received_at_ms": now_ms(),
+                        }),
+                    );
+                }
+                ClientMessage::ActionResult {
+                    operation_id,
+                    window_id,
+                    logical_id,
+                    dispatched,
+                    target_event_received,
+                    completed_at_ms,
+                    reason,
+                } => {
+                    let operation_id = clip(&operation_id, 128);
+                    let window_id = clip(&window_id, 128);
+                    let logical_id = clip(&logical_id, 256);
+                    let reason = reason.map(|value| clip(&value, 128));
+                    let accepted = shared.session.as_ref().is_some_and(|session| {
+                        session.accept_action_result(
+                            id,
+                            &scope,
+                            ActionResult {
+                                operation_id: operation_id.clone(),
+                                window_id: window_id.clone(),
+                                logical_id: logical_id.clone(),
+                                dispatched,
+                                target_event_received,
+                                completed_at_ms,
+                                reason: reason.clone(),
+                            },
+                        )
+                    });
+                    shared.emit(
+                        Kind::ActionResult,
+                        &scope,
+                        json!({
+                            "operation_id": operation_id,
+                            "window_id": window_id,
+                            "logical_id": logical_id,
+                            "dispatched": dispatched,
+                            "target_event_received": target_event_received,
+                            "completed_at_ms": completed_at_ms,
+                            "reason": reason,
+                            "accepted": accepted,
                             "connection_id": id,
                             "received_at_ms": now_ms(),
                         }),
@@ -1366,6 +1433,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Arc<Shared>) {
     let disconnected = !clients.values().any(|c| c.scope.run_id == scope.run_id);
     drop(clients);
     shared.windows.disconnect(&scope, id);
+    if let Some(session) = &shared.session {
+        session.action_connection_disconnected(id);
+    }
     if disconnected {
         shared.emit(Kind::AppDisconnected, &scope, json!({"connection_id": id}));
     }
