@@ -103,6 +103,10 @@ pub enum Kind {
     SemanticsRead,
     #[serde(rename = "scenario.ready")]
     ScenarioReady,
+    #[serde(rename = "scenario.reset_requested")]
+    ScenarioResetRequested,
+    #[serde(rename = "scenario.reset_result")]
+    ScenarioResetResult,
     #[serde(rename = "scene.completed")]
     SceneCompleted,
     #[serde(rename = "artifact.declared")]
@@ -319,6 +323,7 @@ impl State {
             Kind::AppStarting => {
                 self.windows.clear();
                 self.set_semantics_capability(false, Some("runtime_query_required"), false);
+                self.set_scenario_reset_capability(false, Some("runtime_query_required"));
                 self.running = Some(RunState {
                     scope: event.scope.clone(),
                     pid: None,
@@ -509,8 +514,17 @@ impl State {
                         (!supported).then_some("runtime_unsupported"),
                         supported && logical_id_supported,
                     );
+                    let scenario_reset_supported =
+                        data["capabilities"].as_array().is_some_and(|capabilities| {
+                            capabilities.iter().any(|value| value == "scenario.reset")
+                        });
+                    self.set_scenario_reset_capability(
+                        scenario_reset_supported,
+                        (!scenario_reset_supported).then_some("runtime_unsupported"),
+                    );
                 } else if current_run && event.kind == Kind::AppDisconnected {
                     self.set_semantics_capability(false, Some("app_channel_disconnected"), false);
+                    self.set_scenario_reset_capability(false, Some("app_channel_disconnected"));
                 }
                 if event.kind == Kind::AppExited
                     && data["success"] == false
@@ -594,6 +608,15 @@ impl State {
                 "requires_explicit_declaration": true,
                 "max_id_bytes": 256,
             },
+        });
+    }
+
+    fn set_scenario_reset_capability(&mut self, available: bool, reason: Option<&str>) {
+        self.capabilities["scenario.reset"] = json!({
+            "available": available,
+            "reason": reason,
+            "provider": "generated-preview-runtime",
+            "constraints": {"requires_preview_scenario": true},
         });
     }
 }

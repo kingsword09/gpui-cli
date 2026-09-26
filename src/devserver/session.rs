@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+const MAX_SCENARIO_RESET_QUEUE: usize = 16;
+
 pub struct Session {
     pub id: String,
     pub root: PathBuf,
@@ -35,6 +37,7 @@ pub struct Session {
     pub artifacts: Arc<ArtifactStore>,
     pub operations: Arc<OperationStore>,
     build_requests: Mutex<Option<BuildRequest>>,
+    scenario_reset_requests: Mutex<VecDeque<ScenarioResetRequest>>,
     observe_requests: Mutex<VecDeque<ObserveRequest>>,
     semantics_results: Mutex<HashMap<String, SemanticsReadReply>>,
     next_build: AtomicU64,
@@ -44,6 +47,13 @@ pub struct Session {
 #[derive(Clone, Debug)]
 pub struct BuildRequest {
     pub request_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScenarioResetRequest {
+    pub request_id: String,
+    pub scenario_id: String,
+    pub scope: Scope,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +145,9 @@ impl Session {
                 "semantics.logical_id": {"available": false, "reason": "runtime_query_required",
                     "provider": "gpui-debug-a11y-declared", "constraints": {
                         "requires_explicit_declaration": true, "max_id_bytes": 256}},
+                "scenario.reset": {"available": false, "reason": "runtime_query_required",
+                    "provider": "generated-preview-runtime", "constraints": {
+                        "requires_preview_scenario": true}},
                 "artifact_store": {"available": true, "provider": "session_file_store",
                     "constraints": {"chunk_bytes": gpui_dev_protocol::ARTIFACT_CHUNK_BYTES,
                         "session_bytes": ArtifactLimits::default().session_quota_bytes,
@@ -163,6 +176,7 @@ impl Session {
             artifacts,
             operations: Arc::new(OperationStore::new(MAX_ACTIVE_OPERATIONS)),
             build_requests: Mutex::new(None),
+            scenario_reset_requests: Mutex::new(VecDeque::new()),
             observe_requests: Mutex::new(VecDeque::new()),
             semantics_results: Mutex::new(HashMap::new()),
             dir,
@@ -1172,6 +1186,82 @@ impl Session {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
+    }
+
+    /// Queues a reset for the currently connected preview runtime. The app
+    /// channel delivers it to the UI thread; this method never mutates UI
+    /// state from the control worker.
+    pub fn request_scenario_reset(
+        &self,
+        request_id: &str,
+        scenario_id: &str,
+    ) -> Result<ScenarioResetRequest, OperationError> {
+        if scenario_id.is_empty()
+            || scenario_id.len() > 128
+            || !scenario_id.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+            })
+        {
+            return Err(OperationError::new(
+                "invalid_scenario_id",
+                "scenario_id must contain lowercase letters, digits, dots, and hyphens",
+            ));
+        }
+        let state = self.store.state();
+        if state.capabilities["scenario.reset"]["available"] != true {
+            return Err(OperationError::new(
+                "unavailable",
+                "the connected runtime does not advertise scenario.reset",
+            ));
+        }
+        let Some(run) = state.running else {
+            return Err(OperationError::new(
+                "target_unavailable",
+                "there is no running preview app",
+            ));
+        };
+        if run.process != "running" || run.channel != "connected" || run.scope.run_id.is_none() {
+            return Err(OperationError::new(
+                "target_unavailable",
+                "the preview runtime is not connected",
+            ));
+        }
+        let mut pending = self
+            .scenario_reset_requests
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if pending.len() >= MAX_SCENARIO_RESET_QUEUE {
+            return Err(OperationError::new(
+                "busy",
+                "the preview reset queue is full",
+            ));
+        }
+        let request = ScenarioResetRequest {
+            request_id: request_id.to_owned(),
+            scenario_id: scenario_id.to_owned(),
+            scope: run.scope.clone(),
+        };
+        pending.push_back(request.clone());
+        drop(pending);
+        self.emit(
+            Kind::ScenarioResetRequested,
+            &request.scope,
+            json!({
+                "request_id": request.request_id,
+                "scenario_id": request.scenario_id,
+                "accepted": true,
+                "queued": true,
+            }),
+        );
+        Ok(request)
+    }
+
+    pub fn take_scenario_reset_requests(&self) -> Vec<ScenarioResetRequest> {
+        let mut pending = self
+            .scenario_reset_requests
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        pending.drain(..).collect()
     }
 
     pub fn emit(&self, kind: Kind, scope: &Scope, data: Value) {

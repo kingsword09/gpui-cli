@@ -40,6 +40,9 @@ pub enum Command {
     Diagnostics,
     Windows,
     Build,
+    ScenarioReset {
+        scenario_id: String,
+    },
     Observe {
         sync: bool,
         window_id: Option<String>,
@@ -364,6 +367,19 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
         }
         Command::Build => serde_json::to_value(session.request_build(&request_id))
             .expect("serializable build request result"),
+        Command::ScenarioReset { scenario_id } => {
+            let request = match session.request_scenario_reset(&request_id, &scenario_id) {
+                Ok(request) => request,
+                Err(error) => return operation_error_reply(session, &request_id, error),
+            };
+            json!({
+                "accepted": true,
+                "queued": true,
+                "request_id": request.request_id,
+                "scenario_id": request.scenario_id,
+                "run_id": request.scope.run_id,
+            })
+        }
         Command::Observe {
             sync,
             window_id,

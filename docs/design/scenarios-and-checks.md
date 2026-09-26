@@ -108,6 +108,11 @@ register_preview(PreviewDescriptor {
 4. `ready_id` 存在时，等待其可查询状态满足条件；随后建立初始 observation。
 5. 每次 retry 重新创建或 reset，必须增加 reset_generation；不能在失败后的半成品状态接着执行。
 
+运行中的 preview 可通过 `gpui dev reset --scenario <id>` 请求 reset。请求先进入 supervisor
+的有界队列，再经 app channel 送到 GPUI UI 线程；runtime 重新读取 fixture 并发送
+`scenario_reset_result` 与新的 `scenario_ready`。旧 run 的 reset 请求必须被 run fence 拒绝，
+应用仍负责在 hook 后取消旧异步任务并重建自己的组件状态。
+
 MVP 默认使用新进程获得最强隔离。进程内 reset 是可选优化，只有证明取消旧异步任务、订阅、计时器和资源引用后才能声明支持。
 
 现有 Live state snapshot 默认不用于 check/perf。用户需要以某份状态开始测试时，将筛选后的状态写成显式 fixture，而不是自动导入 `.gpui/sessions/` 最新文件。

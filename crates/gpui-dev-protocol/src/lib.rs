@@ -113,6 +113,14 @@ pub enum ClientMessage {
         #[serde(default)]
         uncontrolled_inputs: Vec<String>,
     },
+    ScenarioResetResult {
+        request_id: String,
+        scenario_id: String,
+        accepted: bool,
+        reset_generation: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     AssetsApplied {
         transfer_id: String,
         asset_revision: u64,
@@ -225,6 +233,10 @@ pub enum ServerMessage {
         request_id: String,
         window_id: String,
         max_bytes: u32,
+    },
+    ScenarioReset {
+        request_id: String,
+        scenario_id: String,
     },
     ArtifactBegin {
         manifest: ArtifactManifest,
@@ -644,6 +656,27 @@ mod tests {
         assert_eq!(
             decode::<ClientMessage>(&encode(&ready).unwrap()).unwrap(),
             ready
+        );
+
+        let reset = ClientMessage::ScenarioResetResult {
+            request_id: "reset-1".into(),
+            scenario_id: "counter-basic".into(),
+            accepted: true,
+            reset_generation: 2,
+            reason: None,
+        };
+        assert_eq!(
+            decode::<ClientMessage>(&encode(&reset).unwrap()).unwrap(),
+            reset
+        );
+
+        let request = ServerMessage::ScenarioReset {
+            request_id: "reset-1".into(),
+            scenario_id: "counter-basic".into(),
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&request).unwrap()).unwrap(),
+            request
         );
     }
 }

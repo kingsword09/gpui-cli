@@ -113,8 +113,17 @@ pub struct SemanticsReadRequest {
     pub max_bytes: usize,
 }
 
+/// Preview reset requests are accepted by the network thread but executed by
+/// the foreground GPUI context, just like semantics reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewResetRequest {
+    pub request_id: String,
+    pub scenario_id: String,
+}
+
 static UI_PROBES: Mutex<Vec<UiProbeRequest>> = Mutex::new(Vec::new());
 static SEMANTICS_READS: Mutex<Vec<SemanticsReadRequest>> = Mutex::new(Vec::new());
+static PREVIEW_RESETS: Mutex<Vec<PreviewResetRequest>> = Mutex::new(Vec::new());
 static PENDING_CONTROL: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static REGISTERED_WINDOWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static REGISTERED_WINDOW_HANDLES: Mutex<BTreeMap<String, gpui::AnyWindowHandle>> =
@@ -814,6 +823,11 @@ pub fn take_semantics_read_requests() -> Vec<SemanticsReadRequest> {
     std::mem::take(&mut SEMANTICS_READS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// Drains bounded preview reset requests for execution on the UI thread.
+pub fn take_preview_reset_requests() -> Vec<PreviewResetRequest> {
+    std::mem::take(&mut PREVIEW_RESETS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// Sends the result of a UI-thread probe back to the supervisor.
 pub fn respond_ui_probe(
     request_id: &str,
@@ -941,6 +955,26 @@ pub fn answer_semantics_read(cx: &mut gpui::App, request: SemanticsReadRequest) 
             captured_at_ms,
         ),
     }
+}
+
+/// Reports whether a preview reset was accepted and which generation was
+/// created. A successful reset also emits the normal `scenario_ready` event
+/// from the preview registry.
+pub fn respond_scenario_reset(
+    request_id: &str,
+    scenario_id: &str,
+    accepted: bool,
+    reset_generation: u64,
+    reason: Option<&str>,
+) {
+    let reason = reason
+        .map(|value| format!(",\"reason\":\"{}\"", json_escape(value)))
+        .unwrap_or_default();
+    queue_control(format!(
+        "{{\"type\":\"scenario_reset_result\",\"request_id\":\"{}\",\"scenario_id\":\"{}\",\"accepted\":{accepted},\"reset_generation\":{reset_generation}{reason}}}",
+        json_escape(request_id),
+        json_escape(scenario_id),
+    ));
 }
 
 /// Announces that the preview runtime created a fresh scenario state. The
@@ -1132,13 +1166,18 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
     };
 
     let hello = format!(
-        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\",\"semantics.logical_id\"{}]}}",
+        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\",\"semantics.logical_id\"{}{}]}}",
         json_escape(&config.token),
         json_escape(&config.project),
         std::process::id(),
         ASSET_SOURCE_INSTALLED.load(std::sync::atomic::Ordering::SeqCst),
         if ASSET_SOURCE_INSTALLED.load(std::sync::atomic::Ordering::SeqCst) {
             ",\"asset_reload\",\"asset_manifest\""
+        } else {
+            ""
+        },
+        if std::env::var_os("GPUI_PREVIEW_SCENARIO_ID").is_some() {
+            ",\"scenario.reset\""
         } else {
             ""
         },
@@ -1406,6 +1445,30 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                 // A bounded queue is preferable to silently growing work on
                 // the UI thread. The supervisor deadline reports the missed
                 // request as unavailable if this queue is full.
+            }
+        }
+    } else if find_bytes(frame, b"\"scenario_reset\"") {
+        if let (Some(request_id), Some(scenario_id)) = (
+            string_field(frame, "request_id"),
+            string_field(frame, "scenario_id"),
+        ) {
+            let mut requests = PREVIEW_RESETS.lock().unwrap_or_else(|e| e.into_inner());
+            if requests.len() < PENDING_CONTROL_BOUND {
+                requests.push(PreviewResetRequest {
+                    request_id,
+                    scenario_id,
+                });
+            } else if let (Some(request_id), Some(scenario_id)) = (
+                string_field(frame, "request_id"),
+                string_field(frame, "scenario_id"),
+            ) {
+                respond_scenario_reset(
+                    &request_id,
+                    &scenario_id,
+                    false,
+                    0,
+                    Some("reset_queue_full"),
+                );
             }
         }
     } else if find_bytes(frame, b"\"prepare_restart\"") {
@@ -2214,6 +2277,43 @@ mod tests {
         assert_eq!(requests[0].request_id, "op-1");
         assert_eq!(requests[0].window_id, "w-main");
         assert_eq!(requests[0].max_bytes, MAX_SEMANTICS_TREE_BYTES);
+    }
+
+    #[test]
+    fn preview_reset_dispatch_queues_a_bounded_ui_thread_request() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        PREVIEW_RESETS.lock().unwrap().clear();
+        dispatch(
+            br#"{"type":"scenario_reset","request_id":"reset-1","scenario_id":"counter-basic"}"#,
+            &LiveConfig {
+                addr: String::new(),
+                token: String::new(),
+                project: String::new(),
+                session: None,
+                state_file: None,
+            },
+        );
+        let requests = take_preview_reset_requests();
+        assert_eq!(
+            requests,
+            vec![PreviewResetRequest {
+                request_id: "reset-1".into(),
+                scenario_id: "counter-basic".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn preview_reset_result_has_a_bounded_wire_shape() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::sync_channel(8);
+        *OUTBOUND.lock().unwrap() = Some(tx);
+        respond_scenario_reset("reset-1", "counter-basic", true, 2, None);
+        *OUTBOUND.lock().unwrap() = None;
+        let payload = rx.recv().unwrap();
+        assert!(payload.contains("\"type\":\"scenario_reset_result\""));
+        assert!(payload.contains("\"accepted\":true"));
+        assert!(payload.contains("\"reset_generation\":2"));
     }
 
     #[test]
