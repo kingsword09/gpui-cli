@@ -3,7 +3,7 @@
 
 use super::events::{Kind, Scope, clip, now_ms};
 use super::protocol::{self, AssetManifestEntry, ClientMessage, PROTO_VERSION, ServerMessage};
-use super::session::{ActionResult, Session, random_token};
+use super::session::{ActionDispatchKind, ActionResult, Session, random_token};
 use super::windows::{
     ProbeReply, SceneCompletion, SemanticsReadReply, SemanticsRequest, WindowRegistration,
     WindowRegistry,
@@ -511,20 +511,41 @@ fn heartbeat_loop(shared: &Arc<Shared>) {
                     if !session.mark_action_dispatched(&request) {
                         continue;
                     }
-                    let sent = shared.send_to(
-                        request.connection_id,
-                        &ServerMessage::ActionDispatch {
+                    let message = match &request.action {
+                        ActionDispatchKind::Click {
+                            button,
+                            x_milli,
+                            y_milli,
+                        } => ServerMessage::ActionDispatch {
                             operation_id: request.operation_id.clone(),
                             observation_id: request.observation_id.clone(),
                             window_id: request.window_id.clone(),
                             logical_id: request.logical_id.clone(),
-                            button: request.button.clone(),
-                            x_milli: request.x_milli,
-                            y_milli: request.y_milli,
+                            button: button.clone(),
+                            x_milli: *x_milli,
+                            y_milli: *y_milli,
                             scene_epoch: request.scene_epoch,
                             deadline_at_ms: request.deadline_at_ms,
                         },
-                    );
+                        ActionDispatchKind::Scroll {
+                            x_milli,
+                            y_milli,
+                            delta_x_milli,
+                            delta_y_milli,
+                        } => ServerMessage::ScrollDispatch {
+                            operation_id: request.operation_id.clone(),
+                            observation_id: request.observation_id.clone(),
+                            window_id: request.window_id.clone(),
+                            logical_id: request.logical_id.clone(),
+                            x_milli: *x_milli,
+                            y_milli: *y_milli,
+                            delta_x_milli: *delta_x_milli,
+                            delta_y_milli: *delta_y_milli,
+                            scene_epoch: request.scene_epoch,
+                            deadline_at_ms: request.deadline_at_ms,
+                        },
+                    };
+                    let sent = shared.send_to(request.connection_id, &message);
                     if !sent {
                         session.fail_action_delivery(&request);
                     }

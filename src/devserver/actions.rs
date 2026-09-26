@@ -295,6 +295,30 @@ pub fn click_center_milli(result: &Value) -> Result<(u32, u32), ActionError> {
     Ok((x_milli, y_milli))
 }
 
+/// Quantizes a validated scroll delta to the integer wire representation used
+/// by the generated runtime. Rejecting sub-milli-pixel values keeps the
+/// dispatched action faithful to the recorded operation.
+pub fn scroll_delta_milli(delta_x: f32, delta_y: f32) -> Result<(i32, i32), ActionError> {
+    let quantize = |value: f32| {
+        let scaled = (value as f64 * 1000.0).round();
+        (scaled.is_finite() && (i32::MIN as f64..=i32::MAX as f64).contains(&scaled))
+            .then_some(scaled as i32)
+    };
+    let (Some(delta_x_milli), Some(delta_y_milli)) = (quantize(delta_x), quantize(delta_y)) else {
+        return Err(ActionError::new(
+            "invalid_scroll_delta",
+            "scroll delta exceeds the supported wire coordinate range",
+        ));
+    };
+    if delta_x_milli == 0 && delta_y_milli == 0 {
+        return Err(ActionError::new(
+            "invalid_scroll_delta",
+            "scroll delta is smaller than the supported milli-pixel precision",
+        ));
+    }
+    Ok((delta_x_milli, delta_y_milli))
+}
+
 fn default_button() -> String {
     "left".into()
 }
@@ -514,6 +538,15 @@ mod tests {
         assert_eq!(
             click_center_milli(&invalid).unwrap_err().code,
             "invalid_element_bounds"
+        );
+    }
+
+    #[test]
+    fn scroll_delta_is_quantized_without_silent_zeroing() {
+        assert_eq!(scroll_delta_milli(1.25, -12.5).unwrap(), (1_250, -12_500));
+        assert_eq!(
+            scroll_delta_milli(0.0001, 0.0002).unwrap_err().code,
+            "invalid_scroll_delta"
         );
     }
 }

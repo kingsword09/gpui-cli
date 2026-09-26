@@ -66,13 +66,26 @@ pub struct ActionDispatchRequest {
     pub observation_id: String,
     pub window_id: String,
     pub logical_id: String,
-    pub button: String,
-    pub x_milli: u32,
-    pub y_milli: u32,
+    pub action: ActionDispatchKind,
     pub scene_epoch: u64,
     pub deadline_at_ms: u64,
     pub connection_id: u64,
     pub scope: Scope,
+}
+
+#[derive(Clone, Debug)]
+pub enum ActionDispatchKind {
+    Click {
+        button: String,
+        x_milli: u32,
+        y_milli: u32,
+    },
+    Scroll {
+        x_milli: u32,
+        y_milli: u32,
+        delta_x_milli: i32,
+        delta_y_milli: i32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +174,8 @@ impl Session {
                 "actions": {"available": false, "reason": "runtime_unavailable", "supported": []},
                 "input.pointer.click": {"available": false, "reason": "runtime_unavailable",
                     "provider": "gpui-window-dispatch", "constraints": {"buttons": ["left"]}},
+                "input.pointer.scroll": {"available": false, "reason": "runtime_unavailable",
+                    "provider": "gpui-window-dispatch", "constraints": {"delta_precision": "milli_pixel"}},
                 "checks": false, "input_scope": "project_files",
                 "native_mobile_logs": false, "timing_spans": true,
                 "capture.scene": {"available": false, "reason": "backend_unsupported",
@@ -381,24 +396,38 @@ impl Session {
         };
 
         let preflight = (|| {
-            let Action::Click { button } = &request.action else {
-                return Err(OperationError::with_details(
-                    "input_adapter_unavailable",
-                    "only click actions are connected to the GPUI event path",
-                    json!({"action": request.action.kind(), "capability": request.required_capability()}),
-                ));
+            let capability = match &request.action {
+                Action::Click { button } => {
+                    if button != "left" {
+                        return Err(OperationError::with_details(
+                            "unsupported_button",
+                            "the GPUI runtime currently supports left-button clicks only",
+                            json!({"button": button, "supported": ["left"]}),
+                        ));
+                    }
+                    "input.pointer.click"
+                }
+                Action::Scroll { duration_ms, .. } => {
+                    if *duration_ms != 0 {
+                        return Err(OperationError::new(
+                            "unsupported_duration",
+                            "scroll dispatch currently supports instantaneous wheel events only",
+                        ));
+                    }
+                    "input.pointer.scroll"
+                }
+                _ => {
+                    return Err(OperationError::with_details(
+                        "input_adapter_unavailable",
+                        "only pointer click and scroll actions are connected to the GPUI event path",
+                        json!({"action": request.action.kind(), "capability": request.required_capability()}),
+                    ));
+                }
             };
-            if button != "left" {
-                return Err(OperationError::with_details(
-                    "unsupported_button",
-                    "the GPUI runtime currently supports left-button clicks only",
-                    json!({"button": button, "supported": ["left"]}),
-                ));
-            }
-            if state.capabilities["input.pointer.click"]["available"] != true {
+            if state.capabilities[capability]["available"] != true {
                 return Err(OperationError::new(
                     "input_adapter_unavailable",
-                    "the connected runtime does not advertise input.pointer.click",
+                    format!("the connected runtime does not advertise {capability}"),
                 ));
             }
             let observation = self
@@ -528,9 +557,35 @@ impl Session {
                     message: error.message,
                     details: error.details,
                 })?;
-            Ok::<_, OperationError>((x_milli, y_milli, observed_scene_epoch, connection_id))
+            let action = match &request.action {
+                Action::Click { .. } => ActionDispatchKind::Click {
+                    button: "left".into(),
+                    x_milli,
+                    y_milli,
+                },
+                Action::Scroll {
+                    delta_x, delta_y, ..
+                } => {
+                    let (delta_x_milli, delta_y_milli) = super::actions::scroll_delta_milli(
+                        *delta_x, *delta_y,
+                    )
+                    .map_err(|error| OperationError {
+                        code: error.code,
+                        message: error.message,
+                        details: error.details,
+                    })?;
+                    ActionDispatchKind::Scroll {
+                        x_milli,
+                        y_milli,
+                        delta_x_milli,
+                        delta_y_milli,
+                    }
+                }
+                _ => unreachable!("unsupported action was rejected above"),
+            };
+            Ok::<_, OperationError>((action, observed_scene_epoch, connection_id))
         })();
-        let (x_milli, y_milli, scene_epoch, connection_id) = match preflight {
+        let (action, scene_epoch, connection_id) = match preflight {
             Ok(value) => value,
             Err(error) => return self.fail_admitted_action(&snapshot, error),
         };
@@ -543,9 +598,7 @@ impl Session {
             observation_id: request.observation_id,
             window_id: request.window_id,
             logical_id: request.logical_id,
-            button: "left".into(),
-            x_milli,
-            y_milli,
+            action,
             scene_epoch,
             deadline_at_ms: snapshot.deadline_at_ms,
             connection_id,
