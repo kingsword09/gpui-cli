@@ -496,6 +496,7 @@ fn scenario_reset_is_delivered_to_the_current_run_and_records_result() {
         &token,
         vec!["semantics.read".into(), "scenario.reset".into()],
     );
+    wait_until(|| session.store.state().capabilities["scenario.reset"]["available"] == true);
 
     session
         .request_scenario_reset("reset-1", "counter-basic")
