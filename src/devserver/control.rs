@@ -1,5 +1,6 @@
-//! Authenticated read-only control connections, separate from app connections.
+//! Authenticated project-control connections, separate from app connections.
 
+use super::actions::Action;
 use super::artifacts::{ArtifactError, ArtifactErrorCode};
 use super::events::{atomic_json, now_ms};
 use super::operations::OperationError;
@@ -42,6 +43,13 @@ pub enum Command {
     Build,
     ScenarioReset {
         scenario_id: String,
+    },
+    Act {
+        observation_id: String,
+        window_id: String,
+        logical_id: String,
+        action: Action,
+        deadline_ms: u64,
     },
     Observe {
         sync: bool,
@@ -380,6 +388,32 @@ fn handle(stream: &mut TcpStream, registration: &Registration, session: &Session
                 "run_id": request.scope.run_id,
             })
         }
+        Command::Act {
+            observation_id,
+            window_id,
+            logical_id,
+            action,
+            deadline_ms,
+        } => {
+            let result = match session.submit_action(
+                &request_id,
+                super::actions::ActionRequest {
+                    observation_id,
+                    window_id,
+                    logical_id,
+                    action,
+                },
+                deadline_ms,
+            ) {
+                Ok(result) => result,
+                Err(error) => return operation_error_reply(session, &request_id, error),
+            };
+            let snapshot = match result {
+                super::operations::SubmitResult::Created(snapshot)
+                | super::operations::SubmitResult::Existing(snapshot) => snapshot,
+            };
+            serde_json::to_value(snapshot).expect("serializable action operation snapshot")
+        }
         Command::Observe {
             sync,
             window_id,
@@ -581,6 +615,7 @@ pub fn request(registration: &Registration, request_id: &str, command: Command) 
     let timeout = match &command {
         Command::Events { timeout_ms, .. } => *timeout_ms,
         Command::OperationGet { wait_ms, .. } => *wait_ms,
+        Command::Act { deadline_ms, .. } => *deadline_ms,
         _ => 0,
     };
     stream.set_read_timeout(Some(Duration::from_millis(timeout + 3000)))?;
