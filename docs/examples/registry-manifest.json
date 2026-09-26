@@ -16,7 +16,7 @@
       "fixture_schema": "LoginForm",
       "supports_reset": true,
       "ready_ids": ["login.password"],
-      "logical_ids": ["login.password", "login.submit", "login.error"],
+      "logical_ids": ["login.username", "login.password", "login.submit", "login.error"],
       "environments": ["desktop"]
     },
     {

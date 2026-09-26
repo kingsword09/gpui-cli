@@ -322,12 +322,16 @@ pub fn clear_declared_logical_ids() {
 
 /// Root view of the application.
 ///
-/// The click counter exists to demonstrate the live-mode state snapshot: with
-/// `gpui run --live`, rebuilding keeps this number across restarts instead of
-/// dropping back to zero. Replace it with whatever state your app persists.
+/// The generated preview surfaces are intentionally small and deterministic.
+/// They provide the registry/runtime with real GPUI elements and stable
+/// semantic ids; input routing and asynchronous form execution are added by
+/// the later S03 slice.
 pub struct MainView {
     clicks: usize,
     preview_generation: Option<u64>,
+    login_username: String,
+    login_password: String,
+    login_error: Option<String>,
 }
 
 /// Snapshot bytes from the previous process, when building with live support.
@@ -345,7 +349,15 @@ impl MainView {
         // The debug adapter only exports declarations made through this API;
         // `.id("increment")` remains a GPUI element identity, not a logical id.
         #[cfg(debug_assertions)]
-        let _ = crate::declare_logical_id("increment", "counter.increment");
+        {
+            let _ = crate::declare_logical_id("counter-value", "counter.value");
+            let _ = crate::declare_logical_id("increment", "counter.increment");
+            let _ = crate::declare_logical_id("login-username", "login.username");
+            let _ = crate::declare_logical_id("login-password", "login.password");
+            let _ = crate::declare_logical_id("login-submit", "login.submit");
+            let _ = crate::declare_logical_id("login-error", "login.error");
+            let _ = crate::declare_logical_id("list-items", "list.viewport");
+        }
 
         // Live mode: restore the snapshot the previous process published.
         // Unparseable data means a cold start — never a boot failure.
@@ -362,7 +374,176 @@ impl MainView {
         Self {
             clicks,
             preview_generation: crate::previews::active_reset_generation(),
+            login_username: crate::previews::login_initial_username().unwrap_or_default(),
+            login_password: crate::previews::login_initial_password().unwrap_or_default(),
+            login_error: None,
         }
+    }
+
+    fn reset_preview_state(&mut self) {
+        self.clicks = crate::previews::counter_initial_value().unwrap_or(0);
+        self.login_username = crate::previews::login_initial_username().unwrap_or_default();
+        self.login_password = crate::previews::login_initial_password().unwrap_or_default();
+        self.login_error = None;
+    }
+
+    fn render_counter(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let disabled = crate::previews::counter_disabled().unwrap_or(false);
+        let value = div()
+            .id("counter-value")
+            .accessibility_id("counter.value")
+            .text_lg()
+            .child(format!("Clicked {} times", self.clicks));
+        let button = if disabled {
+            div()
+                .id("increment")
+                .accessibility_id("counter.increment")
+                .px_4()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(0x94a3b8))
+                .text_color(rgb(0xffffff))
+                .child("Disabled")
+                .into_any_element()
+        } else {
+            div()
+                .id("increment")
+                .accessibility_id("counter.increment")
+                .px_4()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(0x2563eb))
+                .text_color(rgb(0xffffff))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(0x1d4ed8)))
+                .child("Click me")
+                .on_click(cx.listener(|this, _event, _window, cx| {
+                    let increment = crate::previews::counter_increment_by().unwrap_or(1);
+                    this.clicks = this.clicks.saturating_add(increment);
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_4()
+            .child(value)
+            .child(button)
+            .into_any_element()
+    }
+
+    fn render_login(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let password_display = if self.login_password.is_empty() {
+            "(empty)".to_string()
+        } else {
+            "•".repeat(self.login_password.chars().count())
+        };
+        let username = div()
+            .id("login-username")
+            .accessibility_id("login.username")
+            .px_3()
+            .py_2()
+            .bg(rgb(0xf1f5f9))
+            .child(format!("Username: {}", self.login_username));
+        let password = div()
+            .id("login-password")
+            .accessibility_id("login.password")
+            .px_3()
+            .py_2()
+            .bg(rgb(0xf1f5f9))
+            .child(format!("Password: {password_display}"));
+        let submit = div()
+            .id("login-submit")
+            .accessibility_id("login.submit")
+            .px_4()
+            .py_2()
+            .rounded_md()
+            .bg(rgb(0x2563eb))
+            .text_color(rgb(0xffffff))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(0x1d4ed8)))
+            .child("Sign in")
+            .on_click(cx.listener(|this, _event, _window, cx| {
+                // The fixture response is deterministic. Real text input,
+                // request cancellation and async fencing belong to S03.
+                this.login_error = crate::previews::login_error_message();
+                cx.notify();
+            }));
+
+        let mut form = div()
+            .flex()
+            .flex_col()
+            .w(px(360.0))
+            .gap_3()
+            .child(div().text_lg().child("LoginForm"))
+            .child(username)
+            .child(password)
+            .child(submit);
+        if let Some(message) = &self.login_error {
+            form = form.child(
+                div()
+                    .id("login-error")
+                    .accessibility_id("login.error")
+                    .text_color(rgb(0xb91c1c))
+                    .child(message.clone()),
+            );
+        }
+        form.into_any_element()
+    }
+
+    fn render_virtual_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let count = crate::previews::virtual_list_item_count().unwrap_or(0);
+        let prefix = crate::previews::virtual_list_stable_key_prefix().unwrap_or_default();
+        let digits = crate::previews::virtual_list_stable_key_digits().unwrap_or(1);
+        let label_prefix = crate::previews::virtual_list_label_prefix().unwrap_or_default();
+        let row_height = crate::previews::virtual_list_row_height().unwrap_or(32) as f32;
+        let initial_scroll_y = crate::previews::virtual_list_initial_scroll_y().unwrap_or(0);
+        // The fixture offset is surfaced for deterministic inspection here;
+        // agent-driven scroll dispatch is part of S03.
+        let list = uniform_list(
+            "list-items",
+            count,
+            cx.processor(move |_this, range, _window, _cx| {
+                let mut items = Vec::new();
+                for index in range {
+                    let key = format!("{prefix}{index:0width$}", width = digits);
+                    let element_id = format!("list-item-{index}");
+                    let logical_id = format!("list.item.{key}");
+                    let _ = crate::declare_logical_id(&element_id, &logical_id);
+                    items.push(
+                        div()
+                            .id(element_id)
+                            .accessibility_id(logical_id)
+                            .h(px(row_height))
+                            .px_3()
+                            .justify_center()
+                            .child(format!("{label_prefix}{index}")),
+                    );
+                }
+                items
+            }),
+        )
+        .h_full();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_lg()
+                    .child(format!("VirtualList ({count} items, scroll y={initial_scroll_y})")),
+            )
+            .child(
+                div()
+                    .h(px(360.0))
+                    .overflow_hidden()
+                    .child(list),
+            )
+            .into_any_element()
     }
 }
 
@@ -376,13 +557,19 @@ impl Render for MainView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current_generation = crate::previews::active_reset_generation();
         if current_generation != self.preview_generation {
-            self.clicks = crate::previews::counter_initial_value().unwrap_or(0);
+            self.reset_preview_state();
             self.preview_generation = current_generation;
         }
         // Live mode: publish the latest state so `prepare_restart` can
         // snapshot it before the CLI relaunches the app.
         #[cfg(debug_assertions)]
         crate::live::publish_state(&crate::live::snapshot_json_number("clicks", self.clicks));
+
+        let content = match crate::previews::active_component().as_deref() {
+            Some("LoginForm") => self.render_login(cx),
+            Some("VirtualList") => self.render_virtual_list(cx),
+            _ => self.render_counter(cx),
+        };
 
         div()
             .flex()
@@ -402,24 +589,7 @@ impl Render for MainView {
                     .text_sm()
                     .child("Cross-platform Desktop & Mobile app powered by GPUI"),
             )
-            .child(div().text_lg().child(format!("Clicked {} times", self.clicks)))
-            .child(
-                div()
-                    .id("increment")
-                    .accessibility_id("counter.increment")
-                    .px_4()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgb(0x2563eb))
-                    .text_color(rgb(0xffffff))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0x1d4ed8)))
-                    .child("Click me")
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.clicks += 1;
-                        cx.notify();
-                    })),
-            )
+            .child(content)
     }
 }
 
