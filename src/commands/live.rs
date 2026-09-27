@@ -136,6 +136,14 @@ impl Channel {
                 self.scope.run_id.clone().unwrap_or_default(),
             ),
             (
+                "GPUI_LIVE_SOURCE_REVISION".to_string(),
+                self.scope.revision.source_revision.to_string(),
+            ),
+            (
+                "GPUI_LIVE_ASSET_REVISION".to_string(),
+                self.scope.revision.asset_revision.to_string(),
+            ),
+            (
                 "GPUI_LIVE_ASSETS".to_string(),
                 self.assets_dir.to_string_lossy().into_owned(),
             ),
@@ -201,12 +209,14 @@ impl Channel {
     fn device_config(&self) -> String {
         let session = self.session.as_deref().unwrap_or_default();
         format!(
-            "project={}\naddr={}\ntoken={}\nsession={session}\nbuild_id={}\nrun_id={}\n",
+            "project={}\naddr={}\ntoken={}\nsession={session}\nbuild_id={}\nrun_id={}\nsource_revision={}\nasset_revision={}\n",
             self.project,
             self.addr(),
             self.token,
             self.scope.build_id.as_deref().unwrap_or_default(),
             self.scope.run_id.as_deref().unwrap_or_default(),
+            self.scope.revision.source_revision,
+            self.scope.revision.asset_revision,
         )
     }
 }

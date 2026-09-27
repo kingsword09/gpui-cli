@@ -33,3 +33,8 @@ scene completed 只证明 GPUI adapter 已完成可用于后续读回的 scene�
 需要把这个事件接入 observe 的 settle/捕获步骤，再由 O05 增加 scene readback 和
 语义快照关联。
 
+真实生成模板的 scene completion 验收见
+[O04 真实 macOS scene completion](O04-scene-completion-live-2026-09-27.md)：当前已
+采用 `on_next_frame` 作为 scene-completed hook，并保留 `presented_frame_id=null`；
+这只推进 scene/revision 绑定，不改变本记录对 GPU present、完整语义树和设备故障的
+结论。
