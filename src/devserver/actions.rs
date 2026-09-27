@@ -244,6 +244,30 @@ pub fn validate_target_query(result: &Value) -> Result<(), ActionError> {
     Ok(())
 }
 
+/// Ensures a scroll action resolves to a target explicitly declared as a
+/// scrollable container by the runtime adapter. Bounds alone are not enough:
+/// a visible node may still be a label or an overlay that cannot consume a
+/// wheel event.
+pub fn validate_scroll_target_query(result: &Value) -> Result<(), ActionError> {
+    validate_target_query(result)?;
+    let node = result["nodes"]
+        .as_array()
+        .and_then(|nodes| (nodes.len() == 1).then(|| &nodes[0]))
+        .ok_or_else(|| {
+            ActionError::new(
+                "invalid_semantics_result",
+                "scroll target query did not return exactly one node",
+            )
+        })?;
+    if node["scrollable"] != true {
+        return Err(ActionError::new(
+            "element_not_scrollable",
+            "the selected semantic node is not declared as a scroll target",
+        ));
+    }
+    Ok(())
+}
+
 /// Returns a bounded click point at the center of the uniquely resolved
 /// semantic node. Coordinates use thousandths of a GPUI pixel so the wire
 /// protocol can remain integer-only.
@@ -547,6 +571,23 @@ mod tests {
             }))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn scroll_target_preflight_requires_explicit_scrollable_declaration() {
+        let query = json!({
+            "nodes": [{
+                "enabled": true,
+                "bounds": {"x": 0, "y": 0, "width": 10, "height": 10}
+            }]
+        });
+        assert_eq!(
+            validate_scroll_target_query(&query).unwrap_err().code,
+            "element_not_scrollable"
+        );
+        let mut declared = query;
+        declared["nodes"][0]["scrollable"] = json!(true);
+        validate_scroll_target_query(&declared).unwrap();
     }
 
     #[test]

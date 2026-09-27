@@ -806,7 +806,7 @@ fn pointer_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation()
             status: "ready".into(),
             a11y_active: true,
             tree_json: Some(
-                r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window"},"children":["b","c","d","e"]},"b":{"logical_id":"counter.increment","aria":{"role":"Button","enabled":true},"bounds":{"x":10,"y":20,"width":10,"height":10},"children":[]},"c":{"logical_id":"list.viewport","aria":{"role":"List","enabled":true},"bounds":{"x":100,"y":100,"width":100,"height":200},"children":[]},"d":{"logical_id":"login.username","aria":{"role":"TextField","enabled":true},"bounds":{"x":20,"y":40,"width":160,"height":24},"children":[]},"e":{"logical_id":"login.password","aria":{"role":"TextField","enabled":true},"bounds":{"x":20,"y":70,"width":160,"height":24},"children":[]}}}"#.into(),
+            r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window"},"children":["b","c","d","e"]},"b":{"logical_id":"counter.increment","aria":{"role":"Button","enabled":true},"bounds":{"x":10,"y":20,"width":10,"height":10},"children":[]},"c":{"logical_id":"list.viewport","aria":{"role":"List","enabled":true},"bounds":{"x":100,"y":100,"width":100,"height":200},"scrollable":true,"children":[]},"d":{"logical_id":"login.username","aria":{"role":"TextField","enabled":true},"bounds":{"x":20,"y":40,"width":160,"height":24},"children":[]},"e":{"logical_id":"login.password","aria":{"role":"TextField","enabled":true},"bounds":{"x":20,"y":70,"width":160,"height":24},"children":[]}}}"#.into(),
             ),
             reason: None,
             captured_at_ms: 42,
