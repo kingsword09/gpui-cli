@@ -417,8 +417,11 @@ M04 仍未完成：live builder、snapshot build orchestration、同 key 在途�
 
 T06 的 desktop 首个缓存切片以 BuildKey 级 OS 文件锁串行请求，manifest 完整校验后跳过
 Rust 编译；记录见
-[T06 desktop manifest cache hit](../experiments/T06-desktop-cache-hit-2026-09-28.md)。当前只
-覆盖 desktop 本地构建，iOS/Android cache hit、真实在途任务共享和缓存清理仍未接入。
+[T06 desktop manifest cache hit](../experiments/T06-desktop-cache-hit-2026-09-28.md)。
+后续 iOS simulator 切片在相同锁与完整 app-bundle manifest 校验下跳过 Cargo/Xcode 构建；
+真机因签名输入尚未纳入 BuildKey 而继续重建，记录见
+[T06 iOS simulator manifest cache hit](../experiments/T06-ios-simulator-cache-hit-2026-09-28.md)。
+Android cache hit、真实在途任务共享和缓存清理仍未接入。
 
 ### S04 · 断言和 gpui check 执行器
 

@@ -392,13 +392,54 @@ fn publish_ios_build_manifest(
     Ok(manifest)
 }
 
-/// Builds the Rust staticlib, generates the Xcode project, then builds the app.
+fn lookup_verified_ios_app(
+    layout: &BuildOutputLayout,
+    key: &crate::runner::build_key::BuildKey,
+    app_path: &Path,
+) -> BuildCacheLookup {
+    let expected_root = match app_path.strip_prefix(&layout.root) {
+        Ok(path) => path.to_string_lossy().replace('\\', "/"),
+        Err(_) => {
+            return BuildCacheLookup::Miss(
+                "expected iOS app bundle is outside the BuildKey output root".into(),
+            );
+        }
+    };
+
+    match lookup_verified(layout, key) {
+        BuildCacheLookup::Hit(manifest)
+            if manifest.roots.iter().any(|root| root == &expected_root) =>
+        {
+            BuildCacheLookup::Hit(manifest)
+        }
+        BuildCacheLookup::Hit(_) => BuildCacheLookup::Miss(
+            "verified artifact manifest does not declare the expected iOS app bundle".into(),
+        ),
+        BuildCacheLookup::Miss(reason) => BuildCacheLookup::Miss(reason),
+    }
+}
+
+fn lookup_ios_app_for_target(
+    layout: &BuildOutputLayout,
+    key: &crate::runner::build_key::BuildKey,
+    app_path: &Path,
+    physical_device: bool,
+) -> BuildCacheLookup {
+    if physical_device {
+        BuildCacheLookup::Miss(
+            "physical-device cache reuse is disabled until signing inputs are represented in the BuildKey".into(),
+        )
+    } else {
+        lookup_verified_ios_app(layout, key, app_path)
+    }
+}
+
+/// Builds the Rust staticlib and app, or reuses a verified simulator bundle.
 /// Returns the path of the produced `.app` bundle.
 pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Result<PathBuf> {
     if !project.ios_dir().exists() {
         bail!("This project has no iOS target. Add one with `gpui init --add`.");
     }
-    ensure_tool("xcodegen", "Install it with `brew install xcodegen`.")?;
 
     let device = target.is_device();
     let rust_target = if device {
@@ -406,10 +447,33 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
     } else {
         "aarch64-apple-ios-sim"
     };
-    ensure_rust_target(rust_target)?;
     let plan = ios_build_plan(&project.root, release, rust_target)?;
+    let _output_lock = BuildOutputLock::acquire(&plan.layout)?;
     let layout = &plan.layout;
     let snapshot_root = &plan.snapshot.root;
+    let scheme = project.xcode_target();
+    let derived_dir = layout
+        .ios_derived_data_dir
+        .as_deref()
+        .context("iOS output layout did not provide a DerivedData path")?;
+    let app_path = xcode_app_path(derived_dir, &scheme, device, release);
+
+    match lookup_ios_app_for_target(layout, &plan.key, &app_path, device) {
+        BuildCacheLookup::Hit(manifest) => {
+            println!(
+                "  {} iOS BuildKey cache hit: {} verified artifact(s)",
+                "✓".green(),
+                manifest.files.len()
+            );
+            return Ok(app_path);
+        }
+        BuildCacheLookup::Miss(reason) => {
+            println!("  {} iOS cache miss: {reason}", "→".blue());
+        }
+    }
+
+    ensure_tool("xcodegen", "Install it with `brew install xcodegen`.")?;
+    ensure_rust_target(rust_target)?;
 
     // 1. Rust staticlib (Xcode's build phase also does this, but doing it here
     //    surfaces Rust errors with Rust-quality messages).
@@ -440,13 +504,8 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
     )?;
 
     // 3. xcodebuild
-    let scheme = project.xcode_target();
     let xcode_project = ios_dir.join(format!("{scheme}.xcodeproj"));
     let config = if release { "Release" } else { "Debug" };
-    let derived_dir = layout
-        .ios_derived_data_dir
-        .as_deref()
-        .context("iOS output layout did not provide a DerivedData path")?;
 
     // Resolve to a concrete UDID: matching a simulator by name is ambiguous
     // once several runtimes are installed, and xcodebuild then refuses to pick.
@@ -477,7 +536,6 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         .arg("build");
     run_step(&format!("xcodebuild ({config})"), &mut xcodebuild)?;
 
-    let app_path = xcode_app_path(derived_dir, &scheme, device, release);
     if !app_path.is_dir() {
         bail!(
             "Xcode reported success but no app bundle directory was found at '{}'.",
@@ -1156,6 +1214,14 @@ mod tests {
                 .iter()
                 .any(|file| file.path.ends_with("Info.plist"))
         );
+        assert!(matches!(
+            lookup_verified_ios_app(&layout, &key, &app_path),
+            BuildCacheLookup::Hit(_)
+        ));
+        assert!(matches!(
+            lookup_ios_app_for_target(&layout, &key, &app_path, true),
+            BuildCacheLookup::Miss(reason) if reason.contains("signing inputs")
+        ));
 
         fs::write(app_path.join("unexpected-resource"), b"extra output").unwrap();
         assert!(
@@ -1167,6 +1233,22 @@ mod tests {
             )
             .is_err()
         );
+        assert!(matches!(
+            lookup_verified_ios_app(&layout, &key, &app_path),
+            BuildCacheLookup::Miss(_)
+        ));
+
+        let decoy = layout.root.join("decoy-output");
+        fs::write(&decoy, b"not an iOS app").unwrap();
+        let decoy_root = decoy.strip_prefix(&layout.root).unwrap().to_owned();
+        BuildArtifactManifest::capture(&layout, &[decoy_root])
+            .unwrap()
+            .write_atomic(&layout.artifact_manifest_path())
+            .unwrap();
+        assert!(matches!(
+            lookup_verified_ios_app(&layout, &key, &app_path),
+            BuildCacheLookup::Miss(reason) if reason.contains("expected iOS app bundle")
+        ));
     }
 
     #[test]
