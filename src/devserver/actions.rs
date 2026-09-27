@@ -235,13 +235,92 @@ pub fn validate_target_query(result: &Value) -> Result<(), ActionError> {
             "the selected semantic node is disabled",
         ));
     }
+    if node["obscured"] == true {
+        return Err(ActionError::new(
+            "element_obscured",
+            "the selected semantic node is explicitly reported as obscured",
+        ));
+    }
     if unsupported.contains("bounds") || node.get("bounds").and_then(Value::as_object).is_none() {
         return Err(ActionError::new(
             "element_bounds_unavailable",
             "the observation does not expose target bounds for hit testing",
         ));
     }
+    validate_clip_visibility(node)?;
     Ok(())
+}
+
+fn validate_clip_visibility(node: &Value) -> Result<(), ActionError> {
+    let Some(clip) = node.get("clip_bounds") else {
+        return Ok(());
+    };
+    if clip.is_null() {
+        return Ok(());
+    }
+    let bounds = read_rect(&node["bounds"]).ok_or_else(|| {
+        ActionError::new(
+            "element_visibility_unavailable",
+            "target visibility cannot be derived from invalid bounds",
+        )
+    })?;
+    let clip = read_rect(clip).ok_or_else(|| {
+        ActionError::new(
+            "element_visibility_unavailable",
+            "target visibility requires a valid clip_bounds rectangle",
+        )
+    })?;
+    let intersection_width = (bounds.right.min(clip.right) - bounds.left.max(clip.left)).max(0.0);
+    let intersection_height = (bounds.bottom.min(clip.bottom) - bounds.top.max(clip.top)).max(0.0);
+    let center_x = (bounds.left + bounds.right) / 2.0;
+    let center_y = (bounds.top + bounds.bottom) / 2.0;
+    if intersection_width <= 0.0
+        || intersection_height <= 0.0
+        || center_x < clip.left
+        || center_x > clip.right
+        || center_y < clip.top
+        || center_y > clip.bottom
+    {
+        return Err(ActionError::new(
+            "element_not_visible",
+            "the target bounds are outside the visible clip region",
+        ));
+    }
+    Ok(())
+}
+
+struct Rect {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+fn read_rect(value: &Value) -> Option<Rect> {
+    let object = value.as_object()?;
+    let number = |key: &str| object.get(key).and_then(Value::as_f64);
+    let (left, top, width, height) = (
+        number("x")?,
+        number("y")?,
+        number("width")?,
+        number("height")?,
+    );
+    if ![left, top, width, height].into_iter().all(f64::is_finite)
+        || left < 0.0
+        || top < 0.0
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return None;
+    }
+    let right = left + width;
+    let bottom = top + height;
+    (right.is_finite() && bottom.is_finite()).then_some(Rect {
+        left,
+        top,
+        right,
+        bottom,
+    })
 }
 
 /// Ensures a scroll action resolves to a target explicitly declared as a
@@ -588,6 +667,43 @@ mod tests {
         let mut declared = query;
         declared["nodes"][0]["scrollable"] = json!(true);
         validate_scroll_target_query(&declared).unwrap();
+    }
+
+    #[test]
+    fn target_preflight_rejects_explicit_obscuration_and_invisible_clip() {
+        let base = json!({
+            "nodes": [{
+                "enabled": true,
+                "bounds": {"x": 20, "y": 20, "width": 20, "height": 20}
+            }],
+            "unsupported_fields": []
+        });
+        let mut obscured = base.clone();
+        obscured["nodes"][0]["obscured"] = json!(true);
+        assert_eq!(
+            validate_target_query(&obscured).unwrap_err().code,
+            "element_obscured"
+        );
+
+        let mut clipped = base.clone();
+        clipped["nodes"][0]["clip_bounds"] = json!({
+            "x": 0,
+            "y": 0,
+            "width": 10,
+            "height": 10
+        });
+        assert_eq!(
+            validate_target_query(&clipped).unwrap_err().code,
+            "element_not_visible"
+        );
+
+        clipped["nodes"][0]["clip_bounds"] = json!({
+            "x": 20,
+            "y": 20,
+            "width": 20,
+            "height": 20
+        });
+        validate_target_query(&clipped).unwrap();
     }
 
     #[test]

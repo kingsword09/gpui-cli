@@ -34,6 +34,7 @@ const ALLOWED_FIELDS: &[&str] = &[
     "bounds",
     "clip_bounds",
     "scrollable",
+    "obscured",
     "children",
     "parent",
     "source_location",
@@ -690,6 +691,10 @@ fn semantic_fields(
             "scrollable".into(),
             node.get("scrollable").cloned().unwrap_or(Value::Null),
         ),
+        (
+            "obscured".into(),
+            node.get("obscured").cloned().unwrap_or(Value::Null),
+        ),
         ("children".into(), children),
         (
             "source_location".into(),
@@ -756,6 +761,7 @@ fn project_node(node_ref: &str, node: &Value, parent: Option<&str>, fields: &[St
             "bounds" => node.get("bounds").cloned().unwrap_or(Value::Null),
             "clip_bounds" => node.get("clip_bounds").cloned().unwrap_or(Value::Null),
             "scrollable" => node.get("scrollable").cloned().unwrap_or(Value::Null),
+            "obscured" => node.get("obscured").cloned().unwrap_or(Value::Null),
             "children" => node.get("children").cloned().unwrap_or_else(|| json!([])),
             "parent" => parent.map_or(Value::Null, |value| json!(value)),
             "source_location" => node.get("source_location").cloned().unwrap_or(Value::Null),
@@ -776,7 +782,7 @@ fn field_supported(
             "node_ref" | "role" | "name" | "children" => true,
             "logical_id" => logical_id(node).is_some(),
             "value" | "enabled" | "focused" => aria_value(node, field) != Value::Null,
-            "bounds" | "clip_bounds" | "scrollable" | "source_location" | "parent" => {
+            "bounds" | "clip_bounds" | "scrollable" | "obscured" | "source_location" | "parent" => {
                 field == "parent" || node.get(field).is_some()
             }
             _ => false,
