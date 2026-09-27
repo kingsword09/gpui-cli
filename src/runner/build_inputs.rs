@@ -61,6 +61,12 @@ pub struct DesktopBuildPlan {
     pub snapshot: FrozenBuildRoot,
 }
 
+pub struct IosBuildPlan {
+    pub key: BuildKey,
+    pub layout: BuildOutputLayout,
+    pub snapshot: FrozenBuildRoot,
+}
+
 /// Collects the current project's explicit desktop build dimensions and
 /// returns the key-isolated output layout used by `gpui build/run desktop`.
 pub fn desktop_output_layout(root: &Path, release: bool) -> Result<BuildOutputLayout> {
@@ -117,6 +123,33 @@ pub fn ios_output_layout(
         .with_context(|| format!("resolving iOS build root: {}", root.display()))?;
     let key = ios_build_key(&root, release, rust_target)?;
     BuildOutputLayout::for_key(&root.join(".gpui/builds"), &key, BuildPlatform::Ios)
+}
+
+/// Freezes the iOS workspace before deriving its BuildKey and output layout.
+/// Cargo and the generated Xcode project can therefore consume one immutable
+/// input set for the duration of the non-live build command.
+pub fn ios_build_plan(root: &Path, release: bool, rust_target: &str) -> Result<IosBuildPlan> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving iOS build root for freeze: {}", root.display()))?;
+    let snapshot = FrozenBuildRoot::create(&root)?;
+    let (_, toolchain_fingerprint) = rustc_identity()?;
+    let native = NativeInputs::scan(&snapshot.root)?;
+    let key = build_key_from_inputs(
+        &snapshot.manifest,
+        snapshot.input_hash.clone(),
+        &native,
+        rust_target.to_string(),
+        release,
+        toolchain_fingerprint,
+        None,
+    )?;
+    let layout = BuildOutputLayout::for_key(&root.join(".gpui/builds"), &key, BuildPlatform::Ios)?;
+    layout.prepare()?;
+    Ok(IosBuildPlan {
+        key,
+        layout,
+        snapshot,
+    })
 }
 
 pub fn ios_build_key(root: &Path, release: bool, rust_target: &str) -> Result<BuildKey> {
@@ -317,6 +350,51 @@ mod tests {
                 .ios_derived_data_dir
                 .as_ref()
                 .is_some_and(|path| path.ends_with("derived-data"))
+        );
+    }
+
+    #[test]
+    fn ios_build_plan_uses_a_frozen_workspace_root_and_hash() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/src")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        let status = Command::new("cargo")
+            .current_dir(root.path())
+            .args(["generate-lockfile"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let plan = ios_build_plan(root.path(), false, "aarch64-apple-ios-sim").unwrap();
+
+        assert_ne!(plan.snapshot.root, fs::canonicalize(root.path()).unwrap());
+        assert!(plan.snapshot.root.join("Cargo.toml").is_file());
+        assert_eq!(
+            plan.key.material().source_manifest_hash,
+            plan.snapshot.input_hash
+        );
+        assert!(
+            plan.layout.cargo_target_dir.starts_with(
+                fs::canonicalize(root.path())
+                    .unwrap()
+                    .join(".gpui")
+                    .join("builds")
+                    .join("ios")
+            )
         );
     }
 

@@ -397,8 +397,11 @@ Xcode DerivedData 放入 `.gpui/builds/ios/<key>`；见
 和 Gradle app build 放入 `.gpui/builds/android/<key>`；见
 [M04 Android BuildKey](../experiments/M04-android-build-key-2026-09-27.md)。Android
 live builder、snapshot build orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
-尚未接入。desktop/iOS/Android 命令也尚未以 `FrozenInputs` 副本作为 Cargo 工作根，因此
-M04 仍未完成。
+尚未接入。非 live 命令也已接入各自的临时 `FrozenInputs` 工作根；desktop 的切片见
+[M04 desktop frozen build root](../experiments/M04-desktop-frozen-build-root-2026-09-27.md)，
+iOS 的切片见
+[M04 iOS frozen build root](../experiments/M04-ios-frozen-build-root-2026-09-27.md)。Android
+非 live 命令仍待接入冻结工作根，因此 M04 仍未完成。
 
 ### S04 · 断言和 gpui check 执行器
 
