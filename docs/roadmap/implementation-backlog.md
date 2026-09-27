@@ -403,8 +403,11 @@ iOS 的切片见
 [M04 iOS frozen build root](../experiments/M04-ios-frozen-build-root-2026-09-27.md)。Android
 非 live 命令的切片见
 [M04 Android frozen build root](../experiments/M04-android-frozen-build-root-2026-09-27.md)。
-M04 仍未完成：live builder、snapshot build orchestration、同 key 在途任务合并和
-`build.rs`/Gradle/NDK 隐藏输入尚未接入。
+`src/runner/build_manifest.rs` 已提供绑定 platform/BuildKey、逐文件 size/hash 校验和
+原子发布的 artifact manifest 基础；记录见
+[M04 build artifact manifest](../experiments/M04-build-artifact-manifest-2026-09-27.md)。
+M04 仍未完成：命令级 manifest 发布、live builder、snapshot build orchestration、同 key
+在途任务合并和 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。
 
 ### S04 · 断言和 gpui check 执行器
 
