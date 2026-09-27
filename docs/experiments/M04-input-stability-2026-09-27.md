@@ -22,8 +22,8 @@
   不纳入外部范围。
 - 外部 package 按 canonical root 排序并去重，保留 manifest path 和 package id 证据；
   发现到包含 workspace root 的外部祖先或 symlinked package root 时拒绝。
-- 本切片只产出有序的 Cargo scope，尚未把外部 root 合并进 `Inputs`/`FrozenInputs`，
-  也尚未重写快照中的 path dependency。
+- Cargo scope 的外部 root 已由后续冻结切片合并进 `FrozenInputs` 并完成基本 Cargo path
+  relocation；native/scenario manifest 和 build.rs 隐藏输入仍未覆盖。
 
 ## 验证
 
@@ -38,7 +38,6 @@
 
 ## 未覆盖
 
-完整 M04 仍需要把外部 path dependency 纳入冻结副本并完成 path relocation、场景/native
-manifest 输入、toolchain/profile/feature/ABI/native/env BuildKey、同 key 构建目录隔离和
-构造期隐藏输入限制。这些能力完成前，严格 check/matrix 不得把 `tracked_scan` 提升为
+完整 M04 仍需要场景/native manifest 输入、构造期隐藏输入限制和实际构建命令接入；严格
+check/matrix 在这些能力完成前仍不得把普通 `tracked_scan` 无条件提升为完整
 `frozen_snapshot`。
