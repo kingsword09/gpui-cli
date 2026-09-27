@@ -383,7 +383,9 @@ sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化�
 覆盖 native/scenario manifest 和 build.rs 隐藏输入；
 `src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要的独立证据切片，但尚未接入
 构建缓存或执行器。`src/runner/output_layout.rs` 已补齐按 `(platform, BuildKey)` 隔离
-Cargo/native/Android JNI/iOS DerivedData 路径的独立证据切片，但尚未接入现有构建命令。
+Cargo/native/Android JNI/iOS DerivedData 路径的独立证据切片，但尚未接入现有构建命令；
+`NativeInputs::scan` 已补齐 gpui/iOS/Android native manifest、资源和脚本的受控范围，
+但尚未接入 BuildKey 或实际 native 构建。
 
 ### S04 · 断言和 gpui check 执行器
 
