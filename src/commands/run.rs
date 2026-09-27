@@ -6,6 +6,8 @@ use std::process::Command;
 
 use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
 use crate::runner::build_inputs::{android_build_plan, desktop_build_plan, ios_build_plan};
+use crate::runner::build_manifest::BuildArtifactManifest;
+use crate::runner::output_layout::BuildOutputLayout;
 use crate::template::Platform;
 
 /// Resolved project layout, read from the current working directory.
@@ -539,6 +541,38 @@ pub(crate) fn check_android_libraries_at(
     Ok(())
 }
 
+fn publish_android_build_manifest(
+    layout: &BuildOutputLayout,
+    apk: &Path,
+) -> Result<BuildArtifactManifest> {
+    let jni_libs_dir = layout
+        .android_jni_dir
+        .as_deref()
+        .context("Android output layout did not provide a JNI staging path")?;
+    let apk_output_dir = apk
+        .parent()
+        .context("Gradle APK output has no parent directory")?;
+    let jni_relative = jni_libs_dir.strip_prefix(&layout.root).with_context(|| {
+        format!(
+            "Android JNI staging path is outside the BuildKey output root: {}",
+            jni_libs_dir.display()
+        )
+    })?;
+    let apk_relative = apk_output_dir.strip_prefix(&layout.root).with_context(|| {
+        format!(
+            "Gradle APK output is outside the BuildKey output root: {}",
+            apk_output_dir.display()
+        )
+    })?;
+    let manifest =
+        BuildArtifactManifest::capture(layout, &[jni_relative.to_owned(), apk_relative.to_owned()])
+            .context("capturing Android BuildKey artifacts")?;
+    manifest
+        .write_atomic(&layout.artifact_manifest_path())
+        .context("publishing Android BuildKey artifact manifest")?;
+    Ok(manifest)
+}
+
 /// Compiles the Rust `cdylib` into `jniLibs`, then assembles the APK.
 pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     if !project.android_gradle_dir().exists() {
@@ -595,6 +629,12 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     )?;
 
     let apk = apk_path_at(project, release, Some(gradle_build_dir))?;
+    publish_android_build_manifest(layout, &apk)?;
+    println!(
+        "  {} artifact manifest: {}",
+        "✓".green(),
+        layout.artifact_manifest_path().display()
+    );
     println!("  {} {}", "✓".green(), apk.display());
     Ok(apk)
 }
@@ -815,6 +855,81 @@ mod tests {
             } else {
                 "gradlew"
             })
+        );
+    }
+
+    #[test]
+    fn android_build_publishes_a_verified_manifest_for_jni_and_apk_outputs() {
+        use crate::runner::build_key::{BuildKey, BuildKeyMaterial};
+        use crate::runner::output_layout::BuildPlatform;
+
+        let base = tempfile::tempdir().unwrap();
+        let key = BuildKey::new(BuildKeyMaterial {
+            source_manifest_hash: "source".into(),
+            cargo_lock_hash: "lock".into(),
+            target_triple: "aarch64-linux-android".into(),
+            profile: "dev".into(),
+            features: Vec::new(),
+            abi: Some("arm64-v8a".into()),
+            native_config_hash: "native".into(),
+            toolchain_fingerprint: "toolchain".into(),
+            relevant_env_hash: "env".into(),
+            preview_registry_hash: "registry".into(),
+        })
+        .unwrap();
+        let layout = BuildOutputLayout::for_key(base.path(), &key, BuildPlatform::Android).unwrap();
+        layout.prepare().unwrap();
+        let jni_libs_dir = layout.android_jni_dir.as_ref().unwrap();
+        fs::create_dir_all(jni_libs_dir.join("arm64-v8a")).unwrap();
+        fs::write(
+            jni_libs_dir.join("arm64-v8a/libprobe_app.so"),
+            b"jni library",
+        )
+        .unwrap();
+        let gradle_build_dir = layout.android_gradle_build_dir.as_ref().unwrap();
+        let apk_output_dir = gradle_build_dir.join("outputs/apk/debug");
+        fs::create_dir_all(&apk_output_dir).unwrap();
+        fs::write(apk_output_dir.join("app-debug.apk"), b"apk bytes").unwrap();
+        fs::write(
+            apk_output_dir.join("output-metadata.json"),
+            br#"{"elements":[{"outputFile":"app-debug.apk"}]}"#,
+        )
+        .unwrap();
+
+        let apk = apk_output_dir.join("app-debug.apk");
+        let manifest = publish_android_build_manifest(&layout, &apk).unwrap();
+        let loaded = BuildArtifactManifest::read_verified(
+            &layout.artifact_manifest_path(),
+            &layout.root,
+            BuildPlatform::Android,
+            &key,
+        )
+        .unwrap();
+
+        assert_eq!(manifest, loaded);
+        assert_eq!(manifest.files.len(), 3);
+        assert!(
+            manifest
+                .files
+                .iter()
+                .any(|file| file.path.ends_with("app-debug.apk"))
+        );
+        assert!(
+            manifest
+                .files
+                .iter()
+                .any(|file| file.path.ends_with("libprobe_app.so"))
+        );
+
+        fs::write(apk_output_dir.join("unexpected.apk"), b"extra output").unwrap();
+        assert!(
+            BuildArtifactManifest::read_verified(
+                &layout.artifact_manifest_path(),
+                &layout.root,
+                BuildPlatform::Android,
+                &key,
+            )
+            .is_err()
         );
     }
 }
