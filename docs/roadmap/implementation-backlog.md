@@ -37,7 +37,7 @@
 | S02 | G2 | core | L | S01, O04 | S-02, S-09 | in_progress |
 | S03 | G2 | core | L | O06, O04 | S-03, S-04, S-05, S-06, S-08 | in_progress |
 | M03 | G2 | core | M | T01, F02 | M-04, M-05, M-06 | planned |
-| M04 | G2 | core | L | T01, F01 | M-07, M-08 | planned |
+| M04 | G2 | core | L | T01, F01 | M-07, M-08 | in_progress |
 | S04 | G2 | core | L | S01, S02, S03, M04 | S-02, S-03, S-07, S-08, S-09, R-05 | planned |
 | A01 | G2 | core | M | O04, O03 | A-01, A-02, A-03 | planned |
 | A02 | G2 | core | M | A01, S04, M03 | A-01, A-04 | planned |
@@ -382,10 +382,15 @@ sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化�
 [M04 input stability](../experiments/M04-input-stability-2026-09-27.md)。外部 root 尚未
 覆盖 native/scenario manifest 和 build.rs 隐藏输入；
 `src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要的独立证据切片，但尚未接入
-构建缓存或执行器。`src/runner/output_layout.rs` 已补齐按 `(platform, BuildKey)` 隔离
-Cargo/native/Android JNI/iOS DerivedData 路径的独立证据切片，但尚未接入现有构建命令；
-`NativeInputs::scan` 已补齐 gpui/iOS/Android native manifest、资源和脚本的受控范围，
-但尚未接入 BuildKey 或实际 native 构建。
+构建缓存或执行器。当前 desktop `build`/`run` 已通过
+`src/runner/build_inputs.rs` 组合稳定源码 manifest、Cargo.lock、NativeInputs、
+`rustc -vV` 和显式环境 allowlist，使用真实 BuildKey 生成
+`.gpui/builds/desktop/<key>/cargo-target` 并设置 `CARGO_TARGET_DIR`；见
+[M04 desktop BuildKey](../experiments/M04-desktop-build-key-2026-09-27.md)。
+`src/runner/output_layout.rs` 仍只为 Android JNI/iOS DerivedData 提供隔离布局契约，
+移动端构建命令、snapshot build orchestration、同 key 在途任务合并和 `build.rs` 隐藏
+输入尚未接入。desktop 命令也尚未以 `FrozenInputs` 副本作为 Cargo 工作根，因此 M04
+仍未完成。
 
 ### S04 · 断言和 gpui check 执行器
 

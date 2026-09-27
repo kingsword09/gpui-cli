@@ -82,6 +82,31 @@ impl BuildKeyMaterial {
     }
 }
 
+/// Hashes an explicit environment allowlist. The caller owns the allowlist;
+/// this helper never scans the process environment or decides which values
+/// are safe to include.
+pub fn hash_relevant_environment<I>(entries: I) -> Result<String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut entries: Vec<_> = entries
+        .into_iter()
+        .map(|(name, value)| {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                bail!("relevant environment name must not be empty");
+            }
+            Ok((name, value))
+        })
+        .collect::<Result<_>>()?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        bail!("relevant environment names must be unique");
+    }
+    let encoded = serde_json::to_vec(&entries).context("serializing relevant environment")?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
 fn required(name: &str, value: String) -> Result<String> {
     let value = value.trim().to_string();
     if value.is_empty() {
@@ -205,5 +230,31 @@ mod tests {
         invalid.abi = Some(" ".into());
         let error = BuildKey::new(invalid).unwrap_err();
         assert!(error.to_string().contains("abi"));
+    }
+
+    #[test]
+    fn relevant_environment_hash_is_ordered_and_allowlist_scoped() {
+        let first = hash_relevant_environment([
+            ("RUSTFLAGS".into(), "-C opt-level=2".into()),
+            ("CC".into(), "clang".into()),
+        ])
+        .unwrap();
+        let second = hash_relevant_environment([
+            ("CC".into(), "clang".into()),
+            ("RUSTFLAGS".into(), "-C opt-level=2".into()),
+        ])
+        .unwrap();
+        assert_eq!(first, second);
+        assert_ne!(
+            first,
+            hash_relevant_environment([("CC".into(), "gcc".into())]).unwrap()
+        );
+        assert!(hash_relevant_environment([(" ".into(), "value".into())]).is_err());
+        assert!(
+            hash_relevant_environment(
+                [("CC".into(), "clang".into()), ("CC".into(), "gcc".into()),]
+            )
+            .is_err()
+        );
     }
 }
