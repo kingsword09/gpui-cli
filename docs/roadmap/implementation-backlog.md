@@ -327,7 +327,9 @@ observation/run/revision/scene/connection fencing。通用组件的 bounds/focus
 整数总位移保持守恒。动作故障矩阵已覆盖 queued/delivered、deadline、窗口/scene/owner
 fencing、runtime dispatch failure、target miss、取消和 app-channel 断线；已投递动作的
 不确定结果统一为 unknown，禁止重放。真实 macOS 窗口注入、遮挡/人工输入污染、平台滚动
-惯性和触控板 provider 仍未完成。动作 query 已接入可选 `clip_bounds` 与显式
+惯性和触控板 provider 仍未完成。真实 macOS window screenshot 的 limited-adopt 证据见
+[S04 macOS window evidence](../experiments/S04-macos-window-evidence-2026-09-27.md)，但
+动作 query 已接入可选 `clip_bounds` 与显式
 `obscured` 语义：中心命中点不可见时返回 `element_not_visible`，provider 明确报告遮挡时
 返回 `element_obscured`，缺字段不会被猜测为可见。
 
