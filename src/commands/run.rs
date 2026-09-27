@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
+use crate::runner::build_cache::{BuildCacheLookup, BuildOutputLock, lookup_verified};
 use crate::runner::build_inputs::{
     DesktopBuildPlan, android_build_plan, desktop_build_plan, ios_build_plan,
 };
@@ -257,7 +258,21 @@ fn build_desktop_artifacts(
     project: &Project,
     plan: &DesktopBuildPlan,
     release: bool,
-) -> Result<Vec<CargoBinaryArtifact>> {
+) -> Result<()> {
+    let _output_lock = BuildOutputLock::acquire(&plan.layout)?;
+    match lookup_verified(&plan.layout, &plan.key) {
+        BuildCacheLookup::Hit(manifest) => {
+            println!(
+                "  {} BuildKey cache hit: {} verified artifact(s)",
+                "✓".green(),
+                manifest.files.len()
+            );
+            return Ok(());
+        }
+        BuildCacheLookup::Miss(reason) => {
+            println!("  {} desktop cache miss: {reason}", "→".blue());
+        }
+    }
     let artifacts = run_desktop_cargo_build(project, plan, release)?;
     let manifest = publish_desktop_build_manifest(&plan.layout, &artifacts)?;
     println!(
@@ -269,7 +284,7 @@ fn build_desktop_artifacts(
         println!("  {} {}", "✓".green(), artifact.executable.display());
     }
     debug_assert_eq!(manifest.files.len(), artifacts.len());
-    Ok(artifacts)
+    Ok(())
 }
 
 pub fn run_desktop(project: &Project, release: bool) -> Result<()> {

@@ -409,11 +409,16 @@ iOS 的切片见
 非 live Android 构建成功后已发布覆盖 JNI staging 与 APK variant 输出的 manifest；记录见
 [M04 Android artifact manifest](../experiments/M04-android-artifact-manifest-2026-09-28.md)。
 非 live iOS 构建成功后也已发布完整 `.app` bundle manifest；记录见
-[M04 iOS artifact manifest](../experiments/M04-ios-artifact-manifest-2026-09-28.md)。M04 仍未
+[M04 iOS artifact manifest](../experiments/M04-ios-artifact-manifest-2026-09-28.md)。
 非 live desktop 构建也已登记 Cargo JSON 返回的实际 package binary；记录见
 [M04 desktop artifact manifest](../experiments/M04-desktop-artifact-manifest-2026-09-28.md)。
 M04 仍未完成：live builder、snapshot build orchestration、同 key 在途任务合并和
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。
+
+T06 的 desktop 首个缓存切片以 BuildKey 级 OS 文件锁串行请求，manifest 完整校验后跳过
+Rust 编译；记录见
+[T06 desktop manifest cache hit](../experiments/T06-desktop-cache-hit-2026-09-28.md)。当前只
+覆盖 desktop 本地构建，iOS/Android cache hit、真实在途任务共享和缓存清理仍未接入。
 
 ### S04 · 断言和 gpui check 执行器
 
