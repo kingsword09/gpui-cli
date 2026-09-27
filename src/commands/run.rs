@@ -225,6 +225,27 @@ pub(crate) fn xcode_app_path(
     derived_dir.join(format!("Build/Products/{config}-{sdk_dir}/{scheme}.app"))
 }
 
+fn publish_ios_build_manifest(
+    layout: &BuildOutputLayout,
+    app_path: &Path,
+) -> Result<BuildArtifactManifest> {
+    if layout.ios_derived_data_dir.is_none() {
+        bail!("iOS output layout did not provide a DerivedData path");
+    }
+    let app_relative = app_path.strip_prefix(&layout.root).with_context(|| {
+        format!(
+            "iOS app bundle is outside the BuildKey output root: {}",
+            app_path.display()
+        )
+    })?;
+    let manifest = BuildArtifactManifest::capture(layout, &[app_relative.to_owned()])
+        .context("capturing iOS BuildKey app bundle")?;
+    manifest
+        .write_atomic(&layout.artifact_manifest_path())
+        .context("publishing iOS BuildKey artifact manifest")?;
+    Ok(manifest)
+}
+
 /// Builds the Rust staticlib, generates the Xcode project, then builds the app.
 /// Returns the path of the produced `.app` bundle.
 pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Result<PathBuf> {
@@ -311,12 +332,18 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
     run_step(&format!("xcodebuild ({config})"), &mut xcodebuild)?;
 
     let app_path = xcode_app_path(derived_dir, &scheme, device, release);
-    if !app_path.exists() {
+    if !app_path.is_dir() {
         bail!(
-            "Xcode reported success but no app bundle was found at '{}'.",
+            "Xcode reported success but no app bundle directory was found at '{}'.",
             app_path.display()
         );
     }
+    publish_ios_build_manifest(layout, &app_path)?;
+    println!(
+        "  {} artifact manifest: {}",
+        "✓".green(),
+        layout.artifact_manifest_path().display()
+    );
     println!("  {} {}", "✓".green(), app_path.display());
     Ok(app_path)
 }
@@ -927,6 +954,69 @@ mod tests {
                 &layout.artifact_manifest_path(),
                 &layout.root,
                 BuildPlatform::Android,
+                &key,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ios_build_publishes_a_verified_manifest_for_the_app_bundle() {
+        use crate::runner::build_key::{BuildKey, BuildKeyMaterial};
+        use crate::runner::output_layout::BuildPlatform;
+
+        let base = tempfile::tempdir().unwrap();
+        let key = BuildKey::new(BuildKeyMaterial {
+            source_manifest_hash: "source".into(),
+            cargo_lock_hash: "lock".into(),
+            target_triple: "aarch64-apple-ios-sim".into(),
+            profile: "dev".into(),
+            features: Vec::new(),
+            abi: None,
+            native_config_hash: "native".into(),
+            toolchain_fingerprint: "toolchain".into(),
+            relevant_env_hash: "env".into(),
+            preview_registry_hash: "registry".into(),
+        })
+        .unwrap();
+        let layout = BuildOutputLayout::for_key(base.path(), &key, BuildPlatform::Ios).unwrap();
+        layout.prepare().unwrap();
+        let derived_data = layout.ios_derived_data_dir.as_ref().unwrap();
+        let app_path = derived_data.join("Build/Products/Debug-iphonesimulator/Probe.app");
+        fs::create_dir_all(&app_path).unwrap();
+        fs::write(app_path.join("Probe"), b"app executable").unwrap();
+        fs::write(app_path.join("Info.plist"), b"plist fixture").unwrap();
+
+        let manifest = publish_ios_build_manifest(&layout, &app_path).unwrap();
+        let loaded = BuildArtifactManifest::read_verified(
+            &layout.artifact_manifest_path(),
+            &layout.root,
+            BuildPlatform::Ios,
+            &key,
+        )
+        .unwrap();
+
+        assert_eq!(manifest, loaded);
+        assert_eq!(manifest.files.len(), 2);
+        assert!(
+            manifest
+                .files
+                .iter()
+                .any(|file| file.path.ends_with("Probe"))
+        );
+        assert!(
+            manifest
+                .files
+                .iter()
+                .any(|file| file.path.ends_with("Info.plist"))
+        );
+
+        fs::write(app_path.join("unexpected-resource"), b"extra output").unwrap();
+        assert!(
+            BuildArtifactManifest::read_verified(
+                &layout.artifact_manifest_path(),
+                &layout.root,
+                BuildPlatform::Ios,
                 &key,
             )
             .is_err()
