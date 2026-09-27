@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
+use crate::runner::build_inputs::desktop_output_layout;
 use crate::template::Platform;
 
 /// Resolved project layout, read from the current working directory.
@@ -134,9 +135,12 @@ pub fn run_desktop(project: &Project, release: bool) -> Result<()> {
     if !project.has_desktop() {
         bail!("This project has no desktop target. Add one with `gpui init --add`.");
     }
+    let layout = desktop_output_layout(&project.root, release)?;
+    layout.prepare()?;
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&project.root)
-        .args(["run", "-p", &project.desktop_crate()]);
+        .args(["run", "-p", &project.desktop_crate()])
+        .env("CARGO_TARGET_DIR", &layout.cargo_target_dir);
     if release {
         cmd.arg("--release");
     }
@@ -150,9 +154,12 @@ pub fn build_desktop(project: &Project, release: bool) -> Result<()> {
     if !project.has_desktop() {
         bail!("This project has no desktop target. Add one with `gpui init --add`.");
     }
+    let layout = desktop_output_layout(&project.root, release)?;
+    layout.prepare()?;
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&project.root)
-        .args(["build", "-p", &project.desktop_crate()]);
+        .args(["build", "-p", &project.desktop_crate()])
+        .env("CARGO_TARGET_DIR", &layout.cargo_target_dir);
     if release {
         cmd.arg("--release");
     }
