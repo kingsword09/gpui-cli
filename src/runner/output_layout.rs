@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub const BUILD_OUTPUT_LOCK_FILE: &str = ".build-output.lock";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BuildPlatform {
@@ -110,6 +112,10 @@ impl BuildOutputLayout {
 
     pub fn artifact_manifest_path(&self) -> PathBuf {
         self.root.join(BUILD_ARTIFACT_MANIFEST_FILE)
+    }
+
+    pub fn lock_file_path(&self) -> PathBuf {
+        self.root.join(BUILD_OUTPUT_LOCK_FILE)
     }
 }
 
