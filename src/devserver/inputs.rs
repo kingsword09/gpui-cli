@@ -1,6 +1,6 @@
 //! Content manifests for the files covered by the live project watcher.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -67,6 +67,34 @@ impl AssetDelta {
 }
 
 impl Inputs {
+    /// Reads the project manifest until two consecutive content scans agree.
+    ///
+    /// The live watcher uses this bounded check before binding a build or
+    /// observation target. It does not freeze arbitrary build-script inputs,
+    /// but it prevents a file edit racing the directory walk from being
+    /// silently reported as a coherent revision.
+    pub fn scan_stable(root: &Path, max_rescans: usize) -> Result<Self> {
+        Self::scan_stable_with(max_rescans, || Self::scan(root))
+    }
+
+    fn scan_stable_with(
+        max_rescans: usize,
+        mut scan: impl FnMut() -> Result<Self>,
+    ) -> Result<Self> {
+        let mut previous = scan()?;
+        for _ in 0..=max_rescans {
+            let current = scan()?;
+            if current == previous {
+                return Ok(current);
+            }
+            previous = current;
+        }
+        bail!(
+            "project inputs changed during the bounded stability scan after {} rescans",
+            max_rescans
+        )
+    }
+
     pub fn scan(root: &Path) -> Result<Self> {
         let mut result = Self::default();
         let mut pending = vec![root.to_owned()];
@@ -174,5 +202,34 @@ mod tests {
         let delta = AssetDelta::between(&before, &after);
         assert_eq!(delta.changed, vec!["assets/changed.png", "assets/new.png"]);
         assert_eq!(delta.removed, vec!["assets/old.png"]);
+    }
+
+    #[test]
+    fn stable_scan_retries_until_two_consecutive_manifests_match() {
+        let first = Inputs {
+            sources: BTreeMap::from([(String::from("main.rs"), String::from("a"))]),
+            ..Inputs::default()
+        };
+        let second = Inputs {
+            sources: BTreeMap::from([(String::from("main.rs"), String::from("b"))]),
+            ..Inputs::default()
+        };
+        let mut scans = vec![first.clone(), second.clone(), second.clone()].into_iter();
+        let stable = Inputs::scan_stable_with(2, || Ok(scans.next().unwrap())).unwrap();
+        assert_eq!(stable, second);
+    }
+
+    #[test]
+    fn stable_scan_rejects_continuous_changes_after_the_bound() {
+        let mut next = 0_u8;
+        let error = Inputs::scan_stable_with(1, || {
+            next += 1;
+            Ok(Inputs {
+                sources: BTreeMap::from([(String::from("main.rs"), next.to_string())]),
+                ..Inputs::default()
+            })
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("bounded stability scan"));
     }
 }
