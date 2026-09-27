@@ -25,6 +25,7 @@ use std::time::Duration;
 
 const MAX_SCENARIO_RESET_QUEUE: usize = 16;
 const MAX_ACTION_QUEUE: usize = 16;
+const MAX_INPUT_STABILITY_RESCANS: usize = 2;
 
 pub struct Session {
     pub id: String,
@@ -2013,11 +2014,16 @@ impl Session {
             revision: self.store.state().desired,
             ..Scope::default()
         };
-        let scan = self.start_span("inputs.scan", &scan_scope, None, json!({}));
+        let scan = self.start_span(
+            "inputs.scan",
+            &scan_scope,
+            None,
+            json!({"max_stability_rescans": MAX_INPUT_STABILITY_RESCANS}),
+        );
         // Serialize scans without holding the event/state mutex. Queries stay
         // responsive even with a large workspace or a running compiler.
         let mut previous = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
-        let inputs = match Inputs::scan(&self.root) {
+        let inputs = match Inputs::scan_stable(&self.root, MAX_INPUT_STABILITY_RESCANS) {
             Ok(inputs) => inputs,
             Err(error) => {
                 let message = error.to_string();
