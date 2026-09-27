@@ -1232,6 +1232,17 @@ fn dispatch_duration_scroll_action(cx: &mut gpui::App, request: PointerActionReq
 /// Executes one action on the foreground GPUI context. The network thread
 /// only queues the parsed request; it never touches a Window.
 pub fn dispatch_pointer_action(cx: &mut gpui::App, request: PointerActionRequest) {
+    if now_ms() >= request.deadline_at_ms {
+        respond_action_result(
+            &request.operation_id,
+            &request.window_id,
+            &request.logical_id,
+            false,
+            false,
+            Some("deadline_elapsed_before_dispatch"),
+        );
+        return;
+    }
     if matches!(&request.action, PointerActionKind::Scroll { duration_ms, .. } if *duration_ms > 0) {
         dispatch_duration_scroll_action(cx, request);
         return;
@@ -2123,6 +2134,17 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
         ) else {
             return;
         };
+        if now_ms() >= deadline_at_ms {
+            respond_action_result(
+                &operation_id,
+                &window_id,
+                &logical_id,
+                false,
+                false,
+                Some("deadline_elapsed_before_dispatch"),
+            );
+            return;
+        }
         if button != "left" {
             respond_action_result(
                 &operation_id,
@@ -2181,6 +2203,17 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
         ) else {
             return;
         };
+        if now_ms() >= deadline_at_ms {
+            respond_action_result(
+                &operation_id,
+                &window_id,
+                &logical_id,
+                false,
+                false,
+                Some("deadline_elapsed_before_dispatch"),
+            );
+            return;
+        }
         let mut actions = KEYBOARD_ACTIONS.lock().unwrap_or_else(|e| e.into_inner());
         if actions.len() >= KEYBOARD_ACTION_QUEUE_BOUND {
             respond_action_result(
@@ -2222,6 +2255,17 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
         ) else {
             return;
         };
+        if now_ms() >= deadline_at_ms {
+            respond_action_result(
+                &operation_id,
+                &window_id,
+                &logical_id,
+                false,
+                false,
+                Some("deadline_elapsed_before_dispatch"),
+            );
+            return;
+        }
         let mut actions = KEYBOARD_ACTIONS.lock().unwrap_or_else(|e| e.into_inner());
         if actions.len() >= KEYBOARD_ACTION_QUEUE_BOUND {
             respond_action_result(
@@ -2271,6 +2315,17 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
         ) else {
             return;
         };
+        if now_ms() >= deadline_at_ms {
+            respond_action_result(
+                &operation_id,
+                &window_id,
+                &logical_id,
+                false,
+                false,
+                Some("deadline_elapsed_before_dispatch"),
+            );
+            return;
+        }
         let mut actions = POINTER_ACTIONS.lock().unwrap_or_else(|e| e.into_inner());
         if actions.len() >= POINTER_ACTION_QUEUE_BOUND {
             respond_action_result(
@@ -3156,6 +3211,39 @@ mod tests {
         assert_eq!(requests[0].request_id, "op-1");
         assert_eq!(requests[0].window_id, "w-main");
         assert_eq!(requests[0].max_bytes, MAX_SEMANTICS_TREE_BYTES);
+    }
+
+    #[test]
+    fn expired_pointer_dispatches_are_rejected_before_the_ui_queue() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::sync_channel(8);
+        *OUTBOUND.lock().unwrap() = Some(tx);
+        POINTER_ACTIONS.lock().unwrap().clear();
+        PENDING_CONTROL.lock().unwrap().clear();
+        let config = LiveConfig {
+            addr: String::new(),
+            token: String::new(),
+            project: String::new(),
+            session: None,
+            state_file: None,
+        };
+        let deadline = now_ms().saturating_sub(1);
+        let click = format!(
+            r#"{{"type":"action_dispatch","operation_id":"op-click","observation_id":"obs","window_id":"main","logical_id":"counter.increment","button":"left","x_milli":1,"y_milli":2,"scene_epoch":1,"deadline_at_ms":{deadline}}}"#
+        );
+        let scroll = format!(
+            r#"{{"type":"scroll_dispatch","operation_id":"op-scroll","observation_id":"obs","window_id":"main","logical_id":"list.viewport","x_milli":1,"y_milli":2,"delta_x_milli":0,"delta_y_milli":-1000,"duration_ms":0,"scene_epoch":1,"deadline_at_ms":{deadline}}}"#
+        );
+        dispatch(click.as_bytes(), &config);
+        dispatch(scroll.as_bytes(), &config);
+        assert!(take_pointer_action_requests().is_empty());
+        *OUTBOUND.lock().unwrap() = None;
+        let first = rx.recv().unwrap();
+        let second = rx.recv().unwrap();
+        assert!(first.contains("op-click") || second.contains("op-click"));
+        assert!(first.contains("op-scroll") || second.contains("op-scroll"));
+        assert!(first.contains("deadline_elapsed_before_dispatch"));
+        assert!(second.contains("deadline_elapsed_before_dispatch"));
     }
 
     #[test]

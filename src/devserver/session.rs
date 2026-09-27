@@ -2278,3 +2278,481 @@ mod observation_tests {
         assert_eq!(capture_orientation(480, 480), "square");
     }
 }
+
+#[cfg(test)]
+mod action_fault_tests {
+    use super::*;
+    use crate::devserver::windows::{SceneCompletion, WindowRegistration};
+    use std::thread;
+    use std::time::Duration;
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        session: std::sync::Arc<Session>,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+        Fixture { _dir: dir, session }
+    }
+
+    fn scope(run_id: &str) -> Scope {
+        Scope {
+            build_id: Some(format!("build-{run_id}")),
+            run_id: Some(run_id.to_owned()),
+            revision: Revision {
+                source_revision: 1,
+                asset_revision: 0,
+            },
+        }
+    }
+
+    fn running_action(
+        fixture: &Fixture,
+        request_id: &str,
+        action_scope: Scope,
+        operation_deadline_at_ms: u64,
+        dispatch_deadline_at_ms: u64,
+        connection_id: u64,
+        scene_epoch: u64,
+    ) -> ActionDispatchRequest {
+        let snapshot = match fixture
+            .session
+            .submit_operation(
+                request_id,
+                "action",
+                action_scope.clone(),
+                json!({"window_id": "main", "logical_id": "counter.increment"}),
+                operation_deadline_at_ms,
+            )
+            .unwrap()
+        {
+            SubmitResult::Created(snapshot) => snapshot,
+            SubmitResult::Existing(_) => panic!("expected a new action operation"),
+        };
+        fixture
+            .session
+            .start_operation(&snapshot.operation_id)
+            .unwrap();
+        ActionDispatchRequest {
+            operation_id: snapshot.operation_id,
+            observation_id: "observation-1".into(),
+            window_id: "main".into(),
+            logical_id: "counter.increment".into(),
+            action: ActionDispatchKind::Click {
+                button: "left".into(),
+                x_milli: 10_000,
+                y_milli: 20_000,
+            },
+            scene_epoch,
+            deadline_at_ms: dispatch_deadline_at_ms,
+            connection_id,
+            scope: action_scope,
+        }
+    }
+
+    fn insert_delivery(fixture: &Fixture, request: ActionDispatchRequest) {
+        fixture
+            .session
+            .action_deliveries
+            .lock()
+            .unwrap()
+            .insert(request.operation_id.clone(), request);
+    }
+
+    fn operation(fixture: &Fixture, operation_id: &str) -> OperationSnapshot {
+        fixture
+            .session
+            .operations
+            .get(operation_id, events::now_ms())
+            .unwrap()
+    }
+
+    #[test]
+    fn delivered_action_disconnect_becomes_unknown_and_late_result_is_rejected() {
+        let fixture = fixture();
+        let action_scope = scope("run-1");
+        let request = running_action(
+            &fixture,
+            "action-disconnect",
+            action_scope.clone(),
+            events::now_ms() + 10_000,
+            events::now_ms() + 10_000,
+            7,
+            3,
+        );
+        let operation_id = request.operation_id.clone();
+        insert_delivery(&fixture, request);
+
+        fixture.session.action_connection_disconnected(7);
+
+        let finished = operation(&fixture, &operation_id);
+        assert_eq!(finished.state, OperationState::Unknown);
+        assert_eq!(
+            finished.error.as_ref().unwrap().code,
+            "action_outcome_unknown"
+        );
+        assert_eq!(
+            finished.result.as_ref().unwrap()["reason"],
+            "app_channel_disconnected"
+        );
+        assert!(!fixture.session.accept_action_result(
+            7,
+            &action_scope,
+            ActionResult {
+                operation_id,
+                window_id: "main".into(),
+                logical_id: "counter.increment".into(),
+                dispatched: true,
+                target_event_received: true,
+                completed_at_ms: events::now_ms(),
+                reason: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn queued_action_disconnect_fails_without_replay() {
+        let fixture = fixture();
+        let request = running_action(
+            &fixture,
+            "action-queued-disconnect",
+            scope("run-1"),
+            events::now_ms() + 10_000,
+            events::now_ms() + 10_000,
+            7,
+            3,
+        );
+        let operation_id = request.operation_id.clone();
+        fixture
+            .session
+            .action_dispatches
+            .lock()
+            .unwrap()
+            .push_back(request);
+
+        fixture.session.action_connection_disconnected(7);
+
+        let finished = operation(&fixture, &operation_id);
+        assert_eq!(finished.state, OperationState::Failed);
+        assert_eq!(
+            finished.error.as_ref().unwrap().code,
+            "app_channel_unavailable"
+        );
+        assert!(fixture.session.action_dispatches.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mismatched_action_result_does_not_consume_delivery() {
+        let fixture = fixture();
+        let action_scope = scope("run-1");
+        let request = running_action(
+            &fixture,
+            "action-mismatch",
+            action_scope.clone(),
+            events::now_ms() + 10_000,
+            events::now_ms() + 10_000,
+            7,
+            3,
+        );
+        let operation_id = request.operation_id.clone();
+        insert_delivery(&fixture, request);
+
+        assert!(!fixture.session.accept_action_result(
+            8,
+            &action_scope,
+            ActionResult {
+                operation_id: operation_id.clone(),
+                window_id: "main".into(),
+                logical_id: "counter.increment".into(),
+                dispatched: true,
+                target_event_received: true,
+                completed_at_ms: events::now_ms(),
+                reason: None,
+            }
+        ));
+        assert!(
+            fixture
+                .session
+                .action_deliveries
+                .lock()
+                .unwrap()
+                .contains_key(&operation_id)
+        );
+
+        assert!(fixture.session.accept_action_result(
+            7,
+            &action_scope,
+            ActionResult {
+                operation_id: operation_id.clone(),
+                window_id: "main".into(),
+                logical_id: "counter.increment".into(),
+                dispatched: true,
+                target_event_received: true,
+                completed_at_ms: events::now_ms(),
+                reason: None,
+            }
+        ));
+        assert_eq!(
+            operation(&fixture, &operation_id).state,
+            OperationState::Succeeded
+        );
+    }
+
+    #[test]
+    fn delivered_action_timeout_is_unknown_and_not_timed_out() {
+        let fixture = fixture();
+        let request = running_action(
+            &fixture,
+            "action-timeout",
+            scope("run-1"),
+            events::now_ms() + 10_000,
+            events::now_ms() + 10,
+            7,
+            3,
+        );
+        let operation_id = request.operation_id.clone();
+        insert_delivery(&fixture, request);
+        thread::sleep(Duration::from_millis(20));
+
+        fixture.session.expire_operations();
+
+        let finished = operation(&fixture, &operation_id);
+        assert_eq!(finished.state, OperationState::Unknown);
+        assert_eq!(
+            finished.error.as_ref().unwrap().code,
+            "action_outcome_unknown"
+        );
+    }
+
+    #[test]
+    fn cancelling_delivered_action_is_unknown() {
+        let fixture = fixture();
+        let request = running_action(
+            &fixture,
+            "action-cancel",
+            scope("run-1"),
+            events::now_ms() + 10_000,
+            events::now_ms() + 10_000,
+            7,
+            3,
+        );
+        let operation_id = request.operation_id.clone();
+        insert_delivery(&fixture, request);
+
+        let transition = fixture.session.cancel_operation(&operation_id).unwrap();
+
+        assert_eq!(transition.snapshot.state, OperationState::Unknown);
+        assert_eq!(
+            transition.snapshot.error.as_ref().unwrap().code,
+            "action_outcome_unknown"
+        );
+    }
+
+    #[test]
+    fn queued_action_is_fenced_by_scope_window_scene_owner_and_deadline() {
+        let fixture = fixture();
+        let current_scope = scope("run-current");
+        fixture.session.windows.register(
+            &current_scope,
+            7,
+            WindowRegistration {
+                window_id: "main".into(),
+                title: "Counter".into(),
+                width: 800,
+                height: 600,
+                scale_milli: 1000,
+                foreground: true,
+                registered_at_ms: events::now_ms(),
+            },
+        );
+        assert!(
+            fixture
+                .session
+                .windows
+                .record_scene_completed(
+                    &current_scope,
+                    SceneCompletion {
+                        window_id: "main".into(),
+                        connection_id: 7,
+                        scene_epoch: 3,
+                        source_revision: 1,
+                        asset_revision: 0,
+                        presented_frame_id: None,
+                        completed_at_ms: events::now_ms(),
+                    },
+                )
+                .accepted
+        );
+
+        let now = events::now_ms();
+        let ready_request = running_action(
+            &fixture,
+            "action-ready",
+            current_scope.clone(),
+            now + 10_000,
+            now + 10_000,
+            7,
+            3,
+        );
+        let ready_operation_id = ready_request.operation_id.clone();
+        fixture
+            .session
+            .action_dispatches
+            .lock()
+            .unwrap()
+            .push_back(ready_request);
+
+        let ready = fixture.session.take_action_dispatches(&current_scope);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].operation_id, ready_operation_id);
+
+        let reject = |request: ActionDispatchRequest, code: &str| {
+            let operation_id = request.operation_id.clone();
+            fixture
+                .session
+                .action_dispatches
+                .lock()
+                .unwrap()
+                .push_back(request);
+            assert!(
+                fixture
+                    .session
+                    .take_action_dispatches(&current_scope)
+                    .is_empty()
+            );
+            let finished = operation(&fixture, &operation_id);
+            assert_eq!(finished.state, OperationState::Failed);
+            assert_eq!(finished.error.as_ref().unwrap().code, code);
+        };
+        reject(
+            running_action(
+                &fixture,
+                "action-old-run",
+                scope("run-old"),
+                now + 10_000,
+                now + 10_000,
+                7,
+                3,
+            ),
+            "stale_observation",
+        );
+        reject(
+            running_action(
+                &fixture,
+                "action-old-scene",
+                current_scope.clone(),
+                now + 10_000,
+                now + 10_000,
+                7,
+                2,
+            ),
+            "stale_observation",
+        );
+        reject(
+            running_action(
+                &fixture,
+                "action-wrong-owner",
+                current_scope.clone(),
+                now + 10_000,
+                now + 10_000,
+                8,
+                3,
+            ),
+            "stale_observation",
+        );
+        reject(
+            running_action(
+                &fixture,
+                "action-expired-before-delivery",
+                current_scope.clone(),
+                now + 10_000,
+                now.saturating_sub(1),
+                7,
+                3,
+            ),
+            "timed_out",
+        );
+        fixture
+            .session
+            .windows
+            .close(&current_scope, "main", Some("test".into()));
+        reject(
+            running_action(
+                &fixture,
+                "action-closed-window",
+                current_scope.clone(),
+                now + 10_000,
+                now + 10_000,
+                7,
+                3,
+            ),
+            "stale_observation",
+        );
+    }
+
+    #[test]
+    fn runtime_result_maps_dispatch_failure_to_failed_and_target_miss_to_unknown() {
+        let fixture = fixture();
+        let action_scope = scope("run-1");
+        let failed = running_action(
+            &fixture,
+            "action-dispatch-failed",
+            action_scope.clone(),
+            events::now_ms() + 10_000,
+            events::now_ms() + 10_000,
+            7,
+            3,
+        );
+        let unknown = running_action(
+            &fixture,
+            "action-target-miss",
+            action_scope.clone(),
+            events::now_ms() + 10_000,
+            events::now_ms() + 10_000,
+            7,
+            3,
+        );
+        let failed_id = failed.operation_id.clone();
+        let unknown_id = unknown.operation_id.clone();
+        insert_delivery(&fixture, failed);
+        insert_delivery(&fixture, unknown);
+
+        assert!(fixture.session.accept_action_result(
+            7,
+            &action_scope,
+            ActionResult {
+                operation_id: failed_id.clone(),
+                window_id: "main".into(),
+                logical_id: "counter.increment".into(),
+                dispatched: false,
+                target_event_received: false,
+                completed_at_ms: events::now_ms(),
+                reason: Some("window_dispatch_failed".into()),
+            }
+        ));
+        assert!(fixture.session.accept_action_result(
+            7,
+            &action_scope,
+            ActionResult {
+                operation_id: unknown_id.clone(),
+                window_id: "main".into(),
+                logical_id: "counter.increment".into(),
+                dispatched: true,
+                target_event_received: false,
+                completed_at_ms: events::now_ms(),
+                reason: Some("target_event_not_received".into()),
+            }
+        ));
+
+        assert_eq!(
+            operation(&fixture, &failed_id).state,
+            OperationState::Failed
+        );
+        assert_eq!(
+            operation(&fixture, &unknown_id).state,
+            OperationState::Unknown
+        );
+    }
+}
