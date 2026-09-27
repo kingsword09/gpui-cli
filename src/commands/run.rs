@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
-use crate::runner::build_inputs::{desktop_output_layout, ios_output_layout};
+use crate::runner::build_inputs::{
+    android_output_layout, desktop_output_layout, ios_output_layout,
+};
 use crate::template::Platform;
 
 /// Resolved project layout, read from the current working directory.
@@ -400,10 +402,21 @@ pub(crate) fn gradle_task(release: bool) -> &'static str {
 }
 
 pub(crate) fn apk_path(project: &Project, release: bool) -> Result<PathBuf> {
+    apk_path_at(project, release, None)
+}
+
+pub(crate) fn apk_path_at(
+    project: &Project,
+    release: bool,
+    gradle_build_dir: Option<&Path>,
+) -> Result<PathBuf> {
     let variant = if release { "release" } else { "debug" };
-    let dir = project
-        .android_gradle_dir()
-        .join(format!("app/build/outputs/apk/{variant}"));
+    let dir = match gradle_build_dir {
+        Some(build_dir) => build_dir.join(format!("outputs/apk/{variant}")),
+        None => project
+            .android_gradle_dir()
+            .join(format!("app/build/outputs/apk/{variant}")),
+    };
     let metadata_path = dir.join("output-metadata.json");
     #[derive(serde::Deserialize)]
     struct Metadata {
@@ -459,6 +472,16 @@ fn ensure_installable_apk(apk: &Path) -> Result<()> {
 }
 
 pub(crate) fn gradle_command(project: &Project, release: bool, abis: &[String]) -> Command {
+    gradle_command_with_outputs(project, release, abis, None, None)
+}
+
+pub(crate) fn gradle_command_with_outputs(
+    project: &Project,
+    release: bool,
+    abis: &[String],
+    jni_libs_dir: Option<&Path>,
+    gradle_build_dir: Option<&Path>,
+) -> Command {
     let wrapper = if cfg!(windows) {
         "gradlew.bat"
     } else {
@@ -469,15 +492,30 @@ pub(crate) fn gradle_command(project: &Project, release: bool, abis: &[String]) 
         .arg(gradle_task(release))
         .arg(format!("-Pgpui.abis={}", abis.join(",")))
         .env("GPUI_ANDROID_ABIS", abis.join(","));
+    if let Some(path) = jni_libs_dir {
+        cmd.arg(format!("-Pgpui.jniLibsDir={}", path.display()));
+    }
+    if let Some(path) = gradle_build_dir {
+        cmd.arg(format!("-Pgpui.buildDir={}", path.display()));
+    }
     cmd
 }
 
 pub(crate) fn check_android_libraries(project: &Project, abis: &[String]) -> Result<()> {
+    check_android_libraries_at(
+        &project.android_jni_libs_dir(),
+        &project.app_lib_name(),
+        abis,
+    )
+}
+
+pub(crate) fn check_android_libraries_at(
+    jni_libs_dir: &Path,
+    app_lib_name: &str,
+    abis: &[String],
+) -> Result<()> {
     for abi in abis {
-        let expected = project
-            .android_jni_libs_dir()
-            .join(abi)
-            .join(format!("lib{}.so", project.app_lib_name()));
+        let expected = jni_libs_dir.join(abi).join(format!("lib{app_lib_name}.so"));
         if !expected.is_file() {
             bail!(
                 "cargo-ndk finished but '{}' is missing. Check the `[lib] name` in crates/app/Cargo.toml.",
@@ -501,34 +539,48 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     for abi in &abis {
         ensure_rust_target(android_rust_target(abi)?)?;
     }
+    let layout = android_output_layout(&project.root, release, &abis)?;
+    layout.prepare()?;
+    let jni_libs_dir = layout
+        .android_jni_dir
+        .as_deref()
+        .context("Android output layout did not provide a JNI staging path")?;
+    let gradle_build_dir = layout
+        .android_gradle_build_dir
+        .as_deref()
+        .context("Android output layout did not provide a Gradle build path")?;
 
     // 1. Rust shared library via cargo-ndk.
     let mut ndk = Command::new("cargo");
-    ndk.current_dir(&project.root).args(["ndk"]);
+    ndk.current_dir(&project.root)
+        .args(["ndk"])
+        .env("CARGO_TARGET_DIR", &layout.cargo_target_dir);
     for abi in &abis {
         ndk.args(["-t", abi]);
     }
-    ndk.arg("-o").arg(project.android_jni_libs_dir()).args([
-        "--platform",
-        "31",
-        "build",
-        "-p",
-        &project.app_crate(),
-    ]);
+    ndk.arg("-o")
+        .arg(jni_libs_dir)
+        .args(["--platform", "31", "build", "-p", &project.app_crate()]);
     if release {
         ndk.arg("--release");
     }
     run_step(&format!("cargo ndk ({})", abis.join(", ")), &mut ndk)?;
 
-    check_android_libraries(project, &abis)?;
+    check_android_libraries_at(jni_libs_dir, &project.app_lib_name(), &abis)?;
 
     // 2. Gradle: package the APK.
     run_step(
         &format!("gradlew {}", gradle_task(release)),
-        &mut gradle_command(project, release, &abis),
+        &mut gradle_command_with_outputs(
+            project,
+            release,
+            &abis,
+            Some(jni_libs_dir),
+            Some(gradle_build_dir),
+        ),
     )?;
 
-    let apk = apk_path(project, release)?;
+    let apk = apk_path_at(project, release, Some(gradle_build_dir))?;
     println!("  {} {}", "✓".green(), apk.display());
     Ok(apk)
 }
@@ -710,6 +762,24 @@ mod tests {
             command
                 .get_args()
                 .any(|arg| arg == "-Pgpui.abis=arm64-v8a,x86_64")
+        );
+
+        let isolated_jni = dir.path().join("isolated-jni");
+        let isolated_gradle = dir.path().join("isolated-gradle");
+        let isolated_command = gradle_command_with_outputs(
+            &project,
+            false,
+            &abis,
+            Some(&isolated_jni),
+            Some(&isolated_gradle),
+        );
+        assert!(
+            isolated_command.get_args().any(|arg| arg.to_string_lossy()
+                == format!("-Pgpui.jniLibsDir={}", isolated_jni.display()))
+        );
+        assert!(
+            isolated_command.get_args().any(|arg| arg.to_string_lossy()
+                == format!("-Pgpui.buildDir={}", isolated_gradle.display()))
         );
     }
 }

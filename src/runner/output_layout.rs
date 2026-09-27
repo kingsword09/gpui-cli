@@ -37,6 +37,7 @@ pub struct BuildOutputLayout {
     pub cargo_target_dir: PathBuf,
     pub native_staging_dir: PathBuf,
     pub android_jni_dir: Option<PathBuf>,
+    pub android_gradle_build_dir: Option<PathBuf>,
     pub ios_derived_data_dir: Option<PathBuf>,
 }
 
@@ -53,8 +54,8 @@ impl BuildOutputLayout {
         let root = base.join(platform.label()).join(key.key_hash());
         let cargo_target_dir = root.join("cargo-target");
         let native_staging_dir = root.join("native-staging");
-        let (android_jni_dir, ios_derived_data_dir) = match platform {
-            BuildPlatform::Desktop => (None, None),
+        let (android_jni_dir, android_gradle_build_dir, ios_derived_data_dir) = match platform {
+            BuildPlatform::Desktop => (None, None, None),
             BuildPlatform::Android => {
                 let abi = key.material().abi.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("Android output layout requires a BuildKey ABI")
@@ -67,10 +68,12 @@ impl BuildOutputLayout {
                             .join("jni-libs")
                             .join(abi),
                     ),
+                    Some(root.join("gradle-build")),
                     None,
                 )
             }
             BuildPlatform::Ios => (
+                None,
                 None,
                 Some(native_staging_dir.join("ios").join("derived-data")),
             ),
@@ -83,6 +86,7 @@ impl BuildOutputLayout {
             cargo_target_dir,
             native_staging_dir,
             android_jni_dir,
+            android_gradle_build_dir,
             ios_derived_data_dir,
         })
     }
@@ -92,6 +96,9 @@ impl BuildOutputLayout {
         fs::create_dir_all(&self.cargo_target_dir)?;
         fs::create_dir_all(&self.native_staging_dir)?;
         if let Some(path) = &self.android_jni_dir {
+            fs::create_dir_all(path)?;
+        }
+        if let Some(path) = &self.android_gradle_build_dir {
             fs::create_dir_all(path)?;
         }
         if let Some(path) = &self.ios_derived_data_dir {
@@ -161,6 +168,7 @@ mod tests {
         first.prepare().unwrap();
         assert!(first.cargo_target_dir.is_dir());
         assert!(first.android_jni_dir.as_ref().unwrap().is_dir());
+        assert!(first.android_gradle_build_dir.as_ref().unwrap().is_dir());
     }
 
     #[test]
@@ -178,6 +186,7 @@ mod tests {
         assert_ne!(first_android.root, second_android.root);
         assert_ne!(first_android.root, first_ios.root);
         assert!(first_ios.android_jni_dir.is_none());
+        assert!(first_ios.android_gradle_build_dir.is_none());
         assert!(first_ios.ios_derived_data_dir.is_some());
     }
 
@@ -189,6 +198,7 @@ mod tests {
                 .unwrap();
 
         assert!(layout.android_jni_dir.is_none());
+        assert!(layout.android_gradle_build_dir.is_none());
         assert!(layout.ios_derived_data_dir.is_none());
         assert_eq!(
             layout.root,
