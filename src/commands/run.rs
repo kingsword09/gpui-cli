@@ -1,11 +1,14 @@
 use anyhow::{Context, Result, bail};
 use colored::*;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
-use crate::runner::build_inputs::{android_build_plan, desktop_build_plan, ios_build_plan};
+use crate::runner::build_inputs::{
+    DesktopBuildPlan, android_build_plan, desktop_build_plan, ios_build_plan,
+};
 use crate::runner::build_manifest::BuildArtifactManifest;
 use crate::runner::output_layout::BuildOutputLayout;
 use crate::template::Platform;
@@ -133,11 +136,148 @@ pub(crate) fn ensure_rust_target(target: &str) -> Result<()> {
 
 // ── Desktop ──────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CargoBinaryArtifact {
+    name: String,
+    executable: PathBuf,
+}
+
+fn parse_cargo_binary_artifact(line: &str, package_name: &str) -> Option<CargoBinaryArtifact> {
+    let message: serde_json::Value = serde_json::from_str(line).ok()?;
+    if message["reason"].as_str()? != "compiler-artifact" {
+        return None;
+    }
+    let package_id = message["package_id"].as_str()?;
+    let package_id_name = package_id
+        .rsplit('#')
+        .next()?
+        .split('@')
+        .next()
+        .unwrap_or_default();
+    if package_id_name != package_name {
+        return None;
+    }
+    let target = &message["target"];
+    let is_binary = target["kind"]
+        .as_array()?
+        .iter()
+        .any(|kind| kind.as_str() == Some("bin"));
+    if !is_binary {
+        return None;
+    }
+    Some(CargoBinaryArtifact {
+        name: target["name"].as_str()?.to_string(),
+        executable: PathBuf::from(message["executable"].as_str()?),
+    })
+}
+
+fn run_desktop_cargo_build(
+    project: &Project,
+    plan: &DesktopBuildPlan,
+    release: bool,
+) -> Result<Vec<CargoBinaryArtifact>> {
+    let package = project.desktop_crate();
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(&plan.snapshot.root)
+        .args([
+            "build",
+            "-p",
+            &package,
+            "--message-format=json-render-diagnostics",
+        ])
+        .env("CARGO_TARGET_DIR", &plan.layout.cargo_target_dir);
+    if release {
+        command.arg("--release");
+    }
+    println!("  {} cargo build -p {}", "→".blue(), package);
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to spawn: cargo build for desktop")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("capturing cargo build output for desktop")?;
+    let mut artifacts = Vec::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.context("reading cargo build output for desktop")?;
+        if let Some(artifact) = parse_cargo_binary_artifact(&line, &package) {
+            artifacts.push(artifact);
+            continue;
+        }
+        if serde_json::from_str::<serde_json::Value>(&line).is_err() {
+            println!("{line}");
+        }
+    }
+    let status = child.wait().context("waiting for desktop cargo build")?;
+    if !status.success() {
+        bail!("cargo build -p {package} failed");
+    }
+    artifacts.sort_by(|left, right| left.name.cmp(&right.name));
+    artifacts.dedup_by(|left, right| left.name == right.name);
+    if artifacts.is_empty() {
+        bail!("cargo build succeeded but reported no binary artifacts for {package}");
+    }
+    Ok(artifacts)
+}
+
+fn publish_desktop_build_manifest(
+    layout: &BuildOutputLayout,
+    artifacts: &[CargoBinaryArtifact],
+) -> Result<BuildArtifactManifest> {
+    if artifacts.is_empty() {
+        bail!("desktop build produced no binary artifacts");
+    }
+    let entries = artifacts
+        .iter()
+        .map(|artifact| {
+            artifact
+                .executable
+                .strip_prefix(&layout.root)
+                .map(Path::to_owned)
+                .with_context(|| {
+                    format!(
+                        "desktop executable is outside the BuildKey output root: {}",
+                        artifact.executable.display()
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let manifest = BuildArtifactManifest::capture(layout, &entries)
+        .context("capturing desktop BuildKey artifacts")?;
+    manifest
+        .write_atomic(&layout.artifact_manifest_path())
+        .context("publishing desktop BuildKey artifact manifest")?;
+    Ok(manifest)
+}
+
+fn build_desktop_artifacts(
+    project: &Project,
+    plan: &DesktopBuildPlan,
+    release: bool,
+) -> Result<Vec<CargoBinaryArtifact>> {
+    let artifacts = run_desktop_cargo_build(project, plan, release)?;
+    let manifest = publish_desktop_build_manifest(&plan.layout, &artifacts)?;
+    println!(
+        "  {} artifact manifest: {}",
+        "✓".green(),
+        plan.layout.artifact_manifest_path().display()
+    );
+    for artifact in &artifacts {
+        println!("  {} {}", "✓".green(), artifact.executable.display());
+    }
+    debug_assert_eq!(manifest.files.len(), artifacts.len());
+    Ok(artifacts)
+}
+
 pub fn run_desktop(project: &Project, release: bool) -> Result<()> {
     if !project.has_desktop() {
         bail!("This project has no desktop target. Add one with `gpui init --add`.");
     }
     let plan = desktop_build_plan(&project.root, release)?;
+    build_desktop_artifacts(project, &plan, release)?;
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&plan.snapshot.root)
         .args(["run", "-p", &project.desktop_crate()])
@@ -156,17 +296,8 @@ pub fn build_desktop(project: &Project, release: bool) -> Result<()> {
         bail!("This project has no desktop target. Add one with `gpui init --add`.");
     }
     let plan = desktop_build_plan(&project.root, release)?;
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(&plan.snapshot.root)
-        .args(["build", "-p", &project.desktop_crate()])
-        .env("CARGO_TARGET_DIR", &plan.layout.cargo_target_dir);
-    if release {
-        cmd.arg("--release");
-    }
-    run_step(
-        &format!("cargo build -p {}", project.desktop_crate()),
-        &mut cmd,
-    )
+    build_desktop_artifacts(project, &plan, release)?;
+    Ok(())
 }
 
 // ── iOS ──────────────────────────────────────────────────────────────────────
@@ -1017,6 +1148,103 @@ mod tests {
                 &layout.artifact_manifest_path(),
                 &layout.root,
                 BuildPlatform::Ios,
+                &key,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cargo_json_parser_selects_only_binary_artifacts_for_the_desktop_package() {
+        let executable = "/tmp/builds/desktop/key/cargo-target/debug/probe-desktop";
+        let desktop_bin = serde_json::json!({
+            "reason": "compiler-artifact",
+            "package_id": "path+file:///tmp/project/crates/desktop#probe-desktop@0.1.0",
+            "target": {"name": "probe-desktop", "kind": ["bin"]},
+            "executable": executable
+        })
+        .to_string();
+        let dependency_bin = serde_json::json!({
+            "reason": "compiler-artifact",
+            "package_id": "registry+https://github.com/rust-lang/crates.io-index#other@1.0.0",
+            "target": {"name": "other", "kind": ["bin"]},
+            "executable": "/tmp/other"
+        })
+        .to_string();
+        let desktop_library = serde_json::json!({
+            "reason": "compiler-artifact",
+            "package_id": "path+file:///tmp/project/crates/desktop#probe-desktop@0.1.0",
+            "target": {"name": "probe-desktop", "kind": ["lib"]},
+            "executable": null
+        })
+        .to_string();
+
+        let artifact = parse_cargo_binary_artifact(&desktop_bin, "probe-desktop").unwrap();
+        assert_eq!(artifact.name, "probe-desktop");
+        assert_eq!(artifact.executable, PathBuf::from(executable));
+        assert!(parse_cargo_binary_artifact(&dependency_bin, "probe-desktop").is_none());
+        assert!(parse_cargo_binary_artifact(&desktop_library, "probe-desktop").is_none());
+        assert!(
+            parse_cargo_binary_artifact(
+                r#"{"reason":"compiler-message","message":{"rendered":"warning"}}"#,
+                "probe-desktop"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn desktop_build_publishes_a_verified_manifest_for_cargo_binaries() {
+        use crate::runner::build_key::{BuildKey, BuildKeyMaterial};
+        use crate::runner::output_layout::BuildPlatform;
+
+        let base = tempfile::tempdir().unwrap();
+        let key = BuildKey::new(BuildKeyMaterial {
+            source_manifest_hash: "source".into(),
+            cargo_lock_hash: "lock".into(),
+            target_triple: "x86_64-unknown-linux-gnu".into(),
+            profile: "dev".into(),
+            features: Vec::new(),
+            abi: None,
+            native_config_hash: "native".into(),
+            toolchain_fingerprint: "toolchain".into(),
+            relevant_env_hash: "env".into(),
+            preview_registry_hash: "registry".into(),
+        })
+        .unwrap();
+        let layout = BuildOutputLayout::for_key(base.path(), &key, BuildPlatform::Desktop).unwrap();
+        layout.prepare().unwrap();
+        let executable = layout.cargo_target_dir.join("debug/probe-desktop");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"desktop executable").unwrap();
+        let artifacts = [CargoBinaryArtifact {
+            name: "probe-desktop".into(),
+            executable: executable.clone(),
+        }];
+
+        let manifest = publish_desktop_build_manifest(&layout, &artifacts).unwrap();
+        let loaded = BuildArtifactManifest::read_verified(
+            &layout.artifact_manifest_path(),
+            &layout.root,
+            BuildPlatform::Desktop,
+            &key,
+        )
+        .unwrap();
+
+        assert_eq!(manifest, loaded);
+        assert_eq!(manifest.files.len(), 1);
+        assert!(
+            manifest.files[0]
+                .path
+                .ends_with("cargo-target/debug/probe-desktop")
+        );
+
+        fs::write(executable, b"changed executable bytes").unwrap();
+        assert!(
+            BuildArtifactManifest::read_verified(
+                &layout.artifact_manifest_path(),
+                &layout.root,
+                BuildPlatform::Desktop,
                 &key,
             )
             .is_err()
