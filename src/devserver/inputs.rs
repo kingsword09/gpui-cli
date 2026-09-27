@@ -34,6 +34,13 @@ pub struct Inputs {
     pub untracked_directory_links: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FrozenInputs {
+    pub manifest: Inputs,
+    pub input_hash: String,
+    pub snapshot_path: String,
+}
+
 /// Exact asset changes between two input scans. A watcher event can report a
 /// deleted directory rather than each file beneath it, so live reload uses
 /// this content-manifest diff instead of trusting the raw filesystem paths.
@@ -75,6 +82,71 @@ impl Inputs {
     /// silently reported as a coherent revision.
     pub fn scan_stable(root: &Path, max_rescans: usize) -> Result<Self> {
         Self::scan_stable_with(max_rescans, || Self::scan(root))
+    }
+
+    /// Copies a stable manifest into a new directory and verifies both the
+    /// copy and the source once more before returning. The destination must
+    /// not exist and must be outside the source root; callers own its
+    /// lifetime and cleanup.
+    pub fn freeze_to(root: &Path, destination: &Path, max_rescans: usize) -> Result<FrozenInputs> {
+        let root = fs::canonicalize(root)
+            .with_context(|| format!("resolving input root for snapshot: {}", root.display()))?;
+        let destination = if destination.is_absolute() {
+            destination.to_owned()
+        } else {
+            std::env::current_dir()?.join(destination)
+        };
+        if destination.exists() {
+            bail!(
+                "snapshot destination already exists: {}",
+                destination.display()
+            );
+        }
+        let parent = destination
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("snapshot destination has no parent"))?;
+        fs::create_dir_all(parent)?;
+        let parent = fs::canonicalize(parent)?;
+        let destination = parent.join(
+            destination
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("snapshot destination has no file name"))?,
+        );
+        if destination.starts_with(&root) {
+            bail!("snapshot destination must be outside the input root");
+        }
+
+        let manifest = Self::scan_stable(&root, max_rescans)?;
+        if !manifest.untracked_directory_links.is_empty() {
+            bail!(
+                "cannot freeze inputs with untracked directory links: {:?}",
+                manifest.untracked_directory_links
+            );
+        }
+        fs::create_dir(&destination)?;
+        let copy_result = (|| -> Result<()> {
+            for relative in manifest.sources.keys().chain(manifest.assets.keys()) {
+                copy_input_file(&root, &destination, relative)?;
+            }
+            let copied = Self::scan(&destination)?;
+            if copied != manifest {
+                bail!("frozen input copy does not match its manifest");
+            }
+            let current = Self::scan_stable(&root, max_rescans)?;
+            if current != manifest {
+                bail!("source inputs changed while freezing the snapshot");
+            }
+            Ok(())
+        })();
+        if let Err(error) = copy_result {
+            let _ = fs::remove_dir_all(&destination);
+            return Err(error);
+        }
+        Ok(FrozenInputs {
+            input_hash: manifest.digest(),
+            manifest,
+            snapshot_path: destination.to_string_lossy().into_owned(),
+        })
     }
 
     fn scan_stable_with(
@@ -162,6 +234,29 @@ impl Inputs {
     }
 }
 
+fn copy_input_file(root: &Path, destination: &Path, relative: &str) -> Result<()> {
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!("input manifest contains an unsafe path: {relative}");
+    }
+    let source = root.join(relative_path);
+    let metadata = fs::symlink_metadata(&source)
+        .with_context(|| format!("reading frozen input {}", source.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        bail!("cannot freeze non-regular input: {relative}");
+    }
+    let target = destination.join(relative_path);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, &target).with_context(|| format!("copying frozen input {}", relative))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +326,35 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.to_string().contains("bounded stability scan"));
+    }
+
+    #[test]
+    fn freeze_to_copies_and_rechecks_a_manifest_outside_the_source_root() {
+        let root = tempfile::tempdir().unwrap();
+        let destination_parent = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("assets")).unwrap();
+        fs::write(root.path().join("main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.path().join("assets/icon.txt"), "icon\n").unwrap();
+        fs::create_dir_all(root.path().join("target")).unwrap();
+        fs::write(root.path().join("target/ignored"), "ignored\n").unwrap();
+        let destination = destination_parent.path().join("snapshot");
+
+        let frozen = Inputs::freeze_to(root.path(), &destination, 1).unwrap();
+
+        assert_eq!(frozen.manifest, Inputs::scan(&destination).unwrap());
+        assert_eq!(frozen.input_hash, frozen.manifest.digest());
+        assert_eq!(
+            fs::read_to_string(destination.join("main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        assert!(!destination.join("target/ignored").exists());
+    }
+
+    #[test]
+    fn freeze_to_rejects_a_destination_inside_the_source_root() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("main.rs"), "main\n").unwrap();
+        let error = Inputs::freeze_to(root.path(), &root.path().join("snapshot"), 1).unwrap_err();
+        assert!(error.to_string().contains("outside the input root"));
     }
 }
