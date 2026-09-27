@@ -1130,7 +1130,7 @@ fn pointer_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation()
         .submit_action(
             "test.action.key",
             super::actions::ActionRequest {
-                observation_id,
+                observation_id: observation_id.clone(),
                 window_id: "main".into(),
                 logical_id: "login.password".into(),
                 action: super::actions::Action::Key {
@@ -1185,6 +1185,113 @@ fn pointer_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation()
             .operations
             .get(&key_action.operation_id, super::events::now_ms())
             .is_ok_and(|operation| operation.state == super::operations::OperationState::Succeeded)
+    });
+
+    let missed_action = match session
+        .submit_action(
+            "test.action.target-miss",
+            super::actions::ActionRequest {
+                observation_id: observation_id.clone(),
+                window_id: "main".into(),
+                logical_id: "counter.increment".into(),
+                action: super::actions::Action::Click {
+                    button: "left".into(),
+                },
+            },
+            10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot,
+        SubmitResult::Existing(_) => panic!("expected a new target-miss action"),
+    };
+    let missed_dispatch = loop {
+        let message =
+            protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+        match message {
+            ServerMessage::ActionDispatch { operation_id, .. } => break operation_id,
+            ServerMessage::ProbeUi {
+                request_id,
+                window_id,
+            } => send(
+                &mut socket,
+                &ClientMessage::UiProbeResult {
+                    request_id,
+                    window_id,
+                    responsive: true,
+                    latency_ms: Some(1),
+                },
+            ),
+            other => panic!("expected target-miss action dispatch, got {other:?}"),
+        }
+    };
+    assert_eq!(missed_dispatch, missed_action.operation_id);
+    send(
+        &mut socket,
+        &ClientMessage::ActionResult {
+            operation_id: missed_dispatch,
+            window_id: "main".into(),
+            logical_id: "counter.increment".into(),
+            dispatched: true,
+            target_event_received: false,
+            completed_at_ms: super::events::now_ms(),
+            reason: Some("target_event_not_received".into()),
+        },
+    );
+    wait_until(|| {
+        session
+            .operations
+            .get(&missed_action.operation_id, super::events::now_ms())
+            .is_ok_and(|operation| operation.state == super::operations::OperationState::Unknown)
+    });
+
+    let disconnected_scroll = match session
+        .submit_action(
+            "test.action.disconnect-scroll",
+            super::actions::ActionRequest {
+                observation_id,
+                window_id: "main".into(),
+                logical_id: "list.viewport".into(),
+                action: super::actions::Action::Scroll {
+                    delta_x: 0.0,
+                    delta_y: -12.5,
+                    duration_ms: 32,
+                },
+            },
+            10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot,
+        SubmitResult::Existing(_) => panic!("expected a new disconnect scroll action"),
+    };
+    let disconnect_dispatch = loop {
+        let message =
+            protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+        match message {
+            ServerMessage::ScrollDispatch { operation_id, .. } => break operation_id,
+            ServerMessage::ProbeUi {
+                request_id,
+                window_id,
+            } => send(
+                &mut socket,
+                &ClientMessage::UiProbeResult {
+                    request_id,
+                    window_id,
+                    responsive: true,
+                    latency_ms: Some(1),
+                },
+            ),
+            other => panic!("expected disconnect scroll dispatch, got {other:?}"),
+        }
+    };
+    assert_eq!(disconnect_dispatch, disconnected_scroll.operation_id);
+    drop(socket);
+    wait_until(|| {
+        session
+            .operations
+            .get(&disconnected_scroll.operation_id, super::events::now_ms())
+            .is_ok_and(|operation| operation.state == super::operations::OperationState::Unknown)
     });
 }
 
