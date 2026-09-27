@@ -390,8 +390,11 @@ sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化�
 非 live 的 iOS `build`/`run` 也已使用 iOS target 对应的 BuildKey，将 Cargo target 和
 Xcode DerivedData 放入 `.gpui/builds/ios/<key>`；见
 [M04 iOS BuildKey](../experiments/M04-ios-build-key-2026-09-27.md)。Android 多 ABI 的
-构建命令、live builder、snapshot build orchestration、同 key 在途任务合并和 `build.rs`
-隐藏输入尚未接入。desktop/iOS 命令也尚未以 `FrozenInputs` 副本作为 Cargo 工作根，因此
+非 live `build`/`run` 也已使用 ABI 集合对应的 BuildKey，将 Cargo target、JNI staging
+和 Gradle app build 放入 `.gpui/builds/android/<key>`；见
+[M04 Android BuildKey](../experiments/M04-android-build-key-2026-09-27.md)。Android
+live builder、snapshot build orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
+尚未接入。desktop/iOS/Android 命令也尚未以 `FrozenInputs` 副本作为 Cargo 工作根，因此
 M04 仍未完成。
 
 ### S04 · 断言和 gpui check 执行器

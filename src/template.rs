@@ -1379,6 +1379,8 @@ mod tests {
         assert!(
             android.contains("manifestPlaceholders[\"nativeLibraryName\"] = \"delta_mobile_app\"")
         );
+        assert!(android.contains("gpui.jniLibsDir"));
+        assert!(android.contains("gpui.buildDir"));
         assert!(!android.contains("{{"));
 
         // The workspace override must point to an actual, version-matched crate

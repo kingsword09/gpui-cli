@@ -11,6 +11,8 @@ use std::path::Path;
 use std::process::Command;
 
 const RELEVANT_ENVIRONMENT: &[&str] = &[
+    "ANDROID_HOME",
+    "ANDROID_NDK_HOME",
     "CARGO_BUILD_TARGET",
     "CARGO_INCREMENTAL",
     "CARGO_PROFILE_DEV_OPT_LEVEL",
@@ -21,6 +23,7 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "MACOSX_DEPLOYMENT_TARGET",
     "RUSTC_WRAPPER",
     "RUSTFLAGS",
+    "JAVA_HOME",
 ];
 
 /// Collects the current project's explicit desktop build dimensions and
@@ -35,7 +38,7 @@ pub fn desktop_output_layout(root: &Path, release: bool) -> Result<BuildOutputLa
 pub fn desktop_build_key(root: &Path, release: bool) -> Result<BuildKey> {
     let (host, toolchain_fingerprint) = rustc_identity()?;
     let target_triple = env::var("CARGO_BUILD_TARGET").unwrap_or(host);
-    build_key_for_target(root, target_triple, release, toolchain_fingerprint)
+    build_key_for_target(root, target_triple, release, toolchain_fingerprint, None)
 }
 
 /// Collects the BuildKey and isolated output layout used by a non-live iOS
@@ -59,6 +62,48 @@ pub fn ios_build_key(root: &Path, release: bool, rust_target: &str) -> Result<Bu
         rust_target.to_string(),
         release,
         toolchain_fingerprint,
+        None,
+    )
+}
+
+/// Collects the BuildKey and isolated output layout used by a non-live
+/// Android build. The ABI set is normalized so equivalent input order does not
+/// produce different JNI or Gradle output roots.
+pub fn android_output_layout(
+    root: &Path,
+    release: bool,
+    abis: &[String],
+) -> Result<BuildOutputLayout> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving Android build root: {}", root.display()))?;
+    let key = android_build_key(&root, release, abis)?;
+    BuildOutputLayout::for_key(&root.join(".gpui/builds"), &key, BuildPlatform::Android)
+}
+
+pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<BuildKey> {
+    let mut abis: Vec<_> = abis
+        .iter()
+        .map(|abi| abi.trim().to_string())
+        .filter(|abi| !abi.is_empty())
+        .collect();
+    abis.sort();
+    abis.dedup();
+    if abis.is_empty() {
+        bail!("Android BuildKey requires at least one ABI");
+    }
+    let target_triple = abis
+        .iter()
+        .map(|abi| android_rust_target(abi))
+        .collect::<Result<Vec<_>>>()?
+        .join("+");
+    let abi_set = abis.join("+");
+    let (_, toolchain_fingerprint) = rustc_identity()?;
+    build_key_for_target(
+        root,
+        target_triple,
+        release,
+        toolchain_fingerprint,
+        Some(abi_set),
     )
 }
 
@@ -67,6 +112,7 @@ fn build_key_for_target(
     target_triple: String,
     release: bool,
     toolchain_fingerprint: String,
+    abi: Option<String>,
 ) -> Result<BuildKey> {
     let manifest = Inputs::scan_stable(root, 2)?;
     let native = NativeInputs::scan(root)?;
@@ -87,12 +133,22 @@ fn build_key_for_target(
         target_triple,
         profile: if release { "release" } else { "dev" }.into(),
         features: Vec::new(),
-        abi: None,
+        abi,
         native_config_hash: native.digest(),
         toolchain_fingerprint,
         relevant_env_hash: relevant_environment,
         preview_registry_hash: "none".into(),
     })
+}
+
+fn android_rust_target(abi: &str) -> Result<&'static str> {
+    match abi {
+        "arm64-v8a" => Ok("aarch64-linux-android"),
+        "armeabi-v7a" => Ok("armv7-linux-androideabi"),
+        "x86" => Ok("i686-linux-android"),
+        "x86_64" => Ok("x86_64-linux-android"),
+        _ => bail!("Unknown Android ABI '{abi}'"),
+    }
 }
 
 fn rustc_identity() -> Result<(String, String)> {
@@ -178,5 +234,30 @@ mod tests {
                 .as_ref()
                 .is_some_and(|path| path.ends_with("derived-data"))
         );
+    }
+
+    #[test]
+    fn android_abi_sets_are_order_independent_and_isolate_gradle_output() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(root.path().join("Cargo.lock"), "# lock\n").unwrap();
+        fs::write(root.path().join("gpui.toml"), "[app]\nname = \"probe\"\n").unwrap();
+
+        let first =
+            android_output_layout(root.path(), false, &["arm64-v8a".into(), "x86_64".into()])
+                .unwrap();
+        let second =
+            android_output_layout(root.path(), false, &["x86_64".into(), "arm64-v8a".into()])
+                .unwrap();
+
+        assert_eq!(first, second);
+        assert!(first.android_jni_dir.is_some());
+        assert!(
+            first
+                .android_gradle_build_dir
+                .as_ref()
+                .is_some_and(|path| path.ends_with("gradle-build"))
+        );
+        assert_eq!(first.key_hash.len(), 64);
     }
 }

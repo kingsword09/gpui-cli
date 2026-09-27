@@ -17,6 +17,14 @@ require(gpuiAbis.all { it in setOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") 
     "Unsupported GPUI Android ABI: $gpuiAbis"
 }
 
+providers.gradleProperty("gpui.buildDir").orNull?.let { configuredBuildDir ->
+    layout.buildDirectory.set(file(configuredBuildDir))
+}
+
+val gpuiJniLibsDir = providers.gradleProperty("gpui.jniLibsDir")
+    .orElse("src/main/jniLibs")
+    .get()
+
 android {
     namespace = "dev.gpui.mobile"
     compileSdk = 34
@@ -83,7 +91,7 @@ android {
     // Tell Gradle where the pre-built .so files live.
     sourceSets {
         getByName("main") {
-            jniLibs.srcDirs("src/main/jniLibs")
+            jniLibs.srcDirs(gpuiJniLibsDir)
         }
     }
 
