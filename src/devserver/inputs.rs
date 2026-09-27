@@ -57,6 +57,28 @@ pub struct PathRelocation {
     pub snapshot_root: String,
 }
 
+/// Explicit native-host input scope used alongside the Cargo source manifest.
+///
+/// The scope is intentionally limited to generated-project native manifests,
+/// scripts, resources and source trees. Build outputs, IDE projects and local
+/// signing/configuration files are excluded and never become build inputs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct NativeInputs {
+    pub files: BTreeMap<String, String>,
+    pub untracked_directory_links: Vec<String>,
+    pub excluded_sensitive_files: Vec<String>,
+}
+
+const NATIVE_ROOTS: &[&str] = &[
+    "mobile/ios",
+    "mobile/android/gradle",
+    "mobile/android/.cargo/config.toml",
+    ".cargo/config.toml",
+    "gpui.toml",
+];
+
+const NATIVE_EXCLUDED_FILE_NAMES: &[&str] = &["local.properties", "keystore.properties"];
+
 /// The local filesystem roots that Cargo reports for a project workspace.
 ///
 /// Registry and git packages are intentionally not included here. Their
@@ -122,12 +144,112 @@ impl AssetDelta {
     }
 }
 
+impl NativeInputs {
+    /// Scans only the known native-host input roots. Missing platform roots
+    /// are valid because a project may target desktop only.
+    pub fn scan(root: &Path) -> Result<Self> {
+        let mut result = Self::default();
+        let mut pending = Vec::new();
+        for relative in NATIVE_ROOTS {
+            let path = root.join(relative);
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.is_file() {
+                collect_native_file(root, &path, &mut result)?;
+            }
+        }
+
+        while let Some(dir) = pending.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("reading native inputs in {}", dir.display()));
+                }
+            };
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                let relative = path.strip_prefix(root)?;
+                if !native_should_trigger(relative) {
+                    continue;
+                }
+                let kind = entry.file_type()?;
+                if kind.is_dir() {
+                    pending.push(path);
+                } else if kind.is_symlink() && path.is_dir() {
+                    result
+                        .untracked_directory_links
+                        .push(relative.to_string_lossy().replace('\\', "/"));
+                } else if kind.is_symlink() {
+                    bail!(
+                        "native input uses an untracked file symlink: {}",
+                        relative.display()
+                    );
+                } else if kind.is_file() {
+                    collect_native_file(root, &path, &mut result)?;
+                }
+            }
+        }
+        result.untracked_directory_links.sort();
+        result.excluded_sensitive_files.sort();
+        Ok(result)
+    }
+
+    pub fn digest(&self) -> String {
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(self).expect("serializable native inputs"))
+        )
+    }
+}
+
+fn native_should_trigger(path: &Path) -> bool {
+    path.components().all(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        !IGNORED.contains(&name.as_ref())
+            && !name.ends_with(".xcodeproj")
+            && !name.ends_with(".xcworkspace")
+    })
+}
+
+fn collect_native_file(root: &Path, path: &Path, result: &mut NativeInputs) -> Result<()> {
+    let relative = path.strip_prefix(root)?;
+    let name = relative.to_string_lossy().replace('\\', "/");
+    let file_name = relative
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if NATIVE_EXCLUDED_FILE_NAMES.contains(&file_name) {
+        result.excluded_sensitive_files.push(name);
+        return Ok(());
+    }
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("reading native input: {}", path.display()))?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 32 * 1024];
+    loop {
+        let len = file.read(&mut buffer)?;
+        if len == 0 {
+            break;
+        }
+        hash.update(&buffer[..len]);
+    }
+    result.files.insert(name, format!("{:x}", hash.finalize()));
+    Ok(())
+}
+
 impl Inputs {
     /// Discovers Cargo's local path-package boundary without mutating the
     /// project. `--locked` is deliberate: strict input discovery must not
     /// create or rewrite Cargo.lock as a side effect.
     pub fn cargo_input_scope(root: &Path) -> Result<CargoInputScope> {
         CargoInputScope::discover(root)
+    }
+
+    pub fn native_input_scope(root: &Path) -> Result<NativeInputs> {
+        NativeInputs::scan(root)
     }
 
     /// Reads the project manifest until two consecutive content scans agree.
@@ -987,6 +1109,88 @@ mod tests {
                 .into_owned()
         );
         assert!(scope.external_path_dependencies.is_empty());
+    }
+
+    #[test]
+    fn native_scope_collects_manifests_and_sources_but_excludes_generated_and_sensitive_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".cargo")).unwrap();
+        fs::create_dir_all(root.path().join("mobile/ios/Assets.xcassets/App.imageset")).unwrap();
+        fs::create_dir_all(root.path().join("mobile/ios/build")).unwrap();
+        fs::create_dir_all(root.path().join("mobile/ios/App.xcodeproj")).unwrap();
+        fs::create_dir_all(root.path().join("mobile/android/gradle/app/src/main/res")).unwrap();
+        fs::create_dir_all(root.path().join("mobile/android/gradle/app/build")).unwrap();
+        fs::create_dir_all(root.path().join("mobile/android/gradle/.gradle")).unwrap();
+        fs::create_dir_all(
+            root.path()
+                .join("mobile/android/gradle/app/src/main/jniLibs"),
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join("mobile/android/.cargo")).unwrap();
+        fs::write(root.path().join("gpui.toml"), "[app]\nname = \"probe\"\n").unwrap();
+        fs::write(root.path().join(".cargo/config.toml"), "[build]\n").unwrap();
+        fs::write(root.path().join("mobile/ios/project.yml"), "name: Probe\n").unwrap();
+        fs::write(root.path().join("mobile/ios/App.swift"), "struct App {}\n").unwrap();
+        fs::write(
+            root.path()
+                .join("mobile/ios/Assets.xcassets/App.imageset/Contents.json"),
+            "{}\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("mobile/ios/build/generated"), "ignored\n").unwrap();
+        fs::write(
+            root.path()
+                .join("mobile/android/gradle/app/build.gradle.kts"),
+            "plugins {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path()
+                .join("mobile/android/gradle/app/src/main/res/values.xml"),
+            "<resources/>\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("mobile/android/gradle/local.properties"),
+            "sdk.dir=/secret\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("mobile/android/.cargo/config.toml"),
+            "[target]\n",
+        )
+        .unwrap();
+
+        let native = NativeInputs::scan(root.path()).unwrap();
+
+        assert!(native.files.contains_key("gpui.toml"));
+        assert!(native.files.contains_key("mobile/ios/project.yml"));
+        assert!(
+            native
+                .files
+                .contains_key("mobile/ios/Assets.xcassets/App.imageset/Contents.json")
+        );
+        assert!(
+            native
+                .files
+                .contains_key("mobile/android/gradle/app/build.gradle.kts")
+        );
+        assert!(
+            native
+                .files
+                .contains_key("mobile/android/.cargo/config.toml")
+        );
+        assert!(!native.files.contains_key("mobile/ios/build/generated"));
+        assert!(
+            !native
+                .files
+                .contains_key("mobile/android/gradle/app/src/main/jniLibs/anything.so")
+        );
+        assert_eq!(
+            native.excluded_sensitive_files,
+            vec!["mobile/android/gradle/local.properties"]
+        );
+        assert!(!native.digest().is_empty());
     }
 
     #[test]
