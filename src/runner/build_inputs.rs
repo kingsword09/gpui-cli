@@ -1,4 +1,4 @@
-//! Build-key input collection for the local desktop command path.
+//! Build-key input collection for local build command paths.
 
 use super::build_key::{BuildKey, BuildKeyMaterial, hash_relevant_environment};
 use super::output_layout::{BuildOutputLayout, BuildPlatform};
@@ -33,10 +33,43 @@ pub fn desktop_output_layout(root: &Path, release: bool) -> Result<BuildOutputLa
 }
 
 pub fn desktop_build_key(root: &Path, release: bool) -> Result<BuildKey> {
-    let manifest = Inputs::scan_stable(root, 2)?;
-    let native = NativeInputs::scan(root)?;
     let (host, toolchain_fingerprint) = rustc_identity()?;
     let target_triple = env::var("CARGO_BUILD_TARGET").unwrap_or(host);
+    build_key_for_target(root, target_triple, release, toolchain_fingerprint)
+}
+
+/// Collects the BuildKey and isolated output layout used by a non-live iOS
+/// build/run. The Rust target is explicit because device and simulator builds
+/// have different Cargo artifacts and Xcode destinations.
+pub fn ios_output_layout(
+    root: &Path,
+    release: bool,
+    rust_target: &str,
+) -> Result<BuildOutputLayout> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving iOS build root: {}", root.display()))?;
+    let key = ios_build_key(&root, release, rust_target)?;
+    BuildOutputLayout::for_key(&root.join(".gpui/builds"), &key, BuildPlatform::Ios)
+}
+
+pub fn ios_build_key(root: &Path, release: bool, rust_target: &str) -> Result<BuildKey> {
+    let (_, toolchain_fingerprint) = rustc_identity()?;
+    build_key_for_target(
+        root,
+        rust_target.to_string(),
+        release,
+        toolchain_fingerprint,
+    )
+}
+
+fn build_key_for_target(
+    root: &Path,
+    target_triple: String,
+    release: bool,
+    toolchain_fingerprint: String,
+) -> Result<BuildKey> {
+    let manifest = Inputs::scan_stable(root, 2)?;
+    let native = NativeInputs::scan(root)?;
     let relevant_environment =
         hash_relevant_environment(RELEVANT_ENVIRONMENT.iter().map(|name| {
             (
@@ -116,5 +149,34 @@ mod tests {
 
         let key = desktop_build_key(root.path(), false).unwrap();
         assert_eq!(key.material().cargo_lock_hash, "missing");
+    }
+
+    #[test]
+    fn ios_targets_get_distinct_key_isolated_derived_data() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(root.path().join("Cargo.lock"), "# lock\n").unwrap();
+        fs::write(root.path().join("gpui.toml"), "[app]\nname = \"probe\"\n").unwrap();
+
+        let simulator = ios_output_layout(root.path(), false, "aarch64-apple-ios-sim").unwrap();
+        let device = ios_output_layout(root.path(), false, "aarch64-apple-ios").unwrap();
+
+        assert_ne!(simulator.key_hash, device.key_hash);
+        assert!(
+            simulator.root.starts_with(
+                fs::canonicalize(root.path())
+                    .unwrap()
+                    .join(".gpui")
+                    .join("builds")
+                    .join("ios")
+            )
+        );
+        assert!(simulator.android_jni_dir.is_none());
+        assert!(
+            simulator
+                .ios_derived_data_dir
+                .as_ref()
+                .is_some_and(|path| path.ends_with("derived-data"))
+        );
     }
 }

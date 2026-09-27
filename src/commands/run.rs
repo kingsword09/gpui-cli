@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
-use crate::runner::build_inputs::desktop_output_layout;
+use crate::runner::build_inputs::{desktop_output_layout, ios_output_layout};
 use crate::template::Platform;
 
 /// Resolved project layout, read from the current working directory.
@@ -240,18 +240,23 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         "aarch64-apple-ios-sim"
     };
     ensure_rust_target(rust_target)?;
+    let layout = ios_output_layout(&project.root, release, rust_target)?;
+    layout.prepare()?;
 
     // 1. Rust staticlib (Xcode's build phase also does this, but doing it here
     //    surfaces Rust errors with Rust-quality messages).
     let mut cargo = Command::new("cargo");
-    cargo.current_dir(&project.root).args([
-        "build",
-        "--lib",
-        "-p",
-        &project.app_crate(),
-        "--target",
-        rust_target,
-    ]);
+    cargo
+        .current_dir(&project.root)
+        .args([
+            "build",
+            "--lib",
+            "-p",
+            &project.app_crate(),
+            "--target",
+            rust_target,
+        ])
+        .env("CARGO_TARGET_DIR", &layout.cargo_target_dir);
     if release {
         cargo.arg("--release");
     }
@@ -270,8 +275,10 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
     let scheme = project.xcode_target();
     let xcode_project = ios_dir.join(format!("{scheme}.xcodeproj"));
     let config = if release { "Release" } else { "Debug" };
-    let derived_dir = ios_dir.join("build");
-    fs::create_dir_all(&derived_dir)?;
+    let derived_dir = layout
+        .ios_derived_data_dir
+        .as_deref()
+        .context("iOS output layout did not provide a DerivedData path")?;
 
     // Resolve to a concrete UDID: matching a simulator by name is ambiguous
     // once several runtimes are installed, and xcodebuild then refuses to pick.
@@ -292,12 +299,17 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         .arg("-destination")
         .arg(&destination)
         .arg("-derivedDataPath")
-        .arg(&derived_dir)
+        .arg(derived_dir)
+        .arg(format!(
+            "GPUI_CARGO_TARGET_DIR={}",
+            layout.cargo_target_dir.display()
+        ))
+        .env("CARGO_TARGET_DIR", &layout.cargo_target_dir)
         .arg("-allowProvisioningUpdates")
         .arg("build");
     run_step(&format!("xcodebuild ({config})"), &mut xcodebuild)?;
 
-    let app_path = xcode_app_path(&derived_dir, &scheme, device, release);
+    let app_path = xcode_app_path(derived_dir, &scheme, device, release);
     if !app_path.exists() {
         bail!(
             "Xcode reported success but no app bundle was found at '{}'.",

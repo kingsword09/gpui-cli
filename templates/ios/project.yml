@@ -78,8 +78,12 @@ targets:
         ARCHS: "arm64"
         ONLY_ACTIVE_ARCH: YES
         # The Cargo workspace root sits two levels above mobile/ios.
-        "GPUI_STATIC_LIB[sdk=iphonesimulator*]": "$(PROJECT_DIR)/../../target/aarch64-apple-ios-sim/$(GPUI_PROFILE_DIR)/lib{{APP_LIB_NAME}}.a"
-        "GPUI_STATIC_LIB[sdk=iphoneos*]": "$(PROJECT_DIR)/../../target/aarch64-apple-ios/$(GPUI_PROFILE_DIR)/lib{{APP_LIB_NAME}}.a"
+        # CLI builds override GPUI_CARGO_TARGET_DIR with their BuildKey-owned
+        # target directory; manual Xcode builds keep the normal workspace
+        # target default.
+        GPUI_CARGO_TARGET_DIR: "$(PROJECT_DIR)/../../target"
+        "GPUI_STATIC_LIB[sdk=iphonesimulator*]": "$(GPUI_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/$(GPUI_PROFILE_DIR)/lib{{APP_LIB_NAME}}.a"
+        "GPUI_STATIC_LIB[sdk=iphoneos*]": "$(GPUI_CARGO_TARGET_DIR)/aarch64-apple-ios/$(GPUI_PROFILE_DIR)/lib{{APP_LIB_NAME}}.a"
       configs:
         Debug:
           GCC_OPTIMIZATION_LEVEL: "0"

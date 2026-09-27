@@ -26,9 +26,9 @@ impl BuildPlatform {
 
 /// Planned directories for one immutable `(platform, BuildKey)` build.
 ///
-/// The layout is deliberately only a path plan in this slice. The build
-/// commands and cache coordinator will consume it later; they must not fall
-/// back to a shared project `target`, JNI, or DerivedData directory.
+/// Build commands consume the platform-specific paths as they are integrated;
+/// callers must not fall back to a shared project `target`, JNI, or DerivedData
+/// directory when a layout is available.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct BuildOutputLayout {
     pub platform: BuildPlatform,

@@ -1363,6 +1363,14 @@ mod tests {
         let workspace = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         assert!(!workspace.contains("crates/desktop"));
 
+        let ios = fs::read_to_string(dir.join("mobile/ios/project.yml")).unwrap();
+        assert!(ios.contains("GPUI_CARGO_TARGET_DIR: \"$(PROJECT_DIR)/../../target\""));
+        assert!(ios.contains("$(GPUI_CARGO_TARGET_DIR)/aarch64-apple-ios-sim"));
+        assert!(
+            !ios.contains("{{"),
+            "unsubstituted placeholder in project.yml"
+        );
+
         // No placeholder may survive into generated output.
         let lib = fs::read_to_string(dir.join("crates/app/src/lib.rs")).unwrap();
         assert!(!lib.contains("{{"), "unsubstituted placeholder in lib.rs");

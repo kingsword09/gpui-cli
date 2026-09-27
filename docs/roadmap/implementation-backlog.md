@@ -387,10 +387,12 @@ sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化�
 `rustc -vV` 和显式环境 allowlist，使用真实 BuildKey 生成
 `.gpui/builds/desktop/<key>/cargo-target` 并设置 `CARGO_TARGET_DIR`；见
 [M04 desktop BuildKey](../experiments/M04-desktop-build-key-2026-09-27.md)。
-`src/runner/output_layout.rs` 仍只为 Android JNI/iOS DerivedData 提供隔离布局契约，
-移动端构建命令、snapshot build orchestration、同 key 在途任务合并和 `build.rs` 隐藏
-输入尚未接入。desktop 命令也尚未以 `FrozenInputs` 副本作为 Cargo 工作根，因此 M04
-仍未完成。
+非 live 的 iOS `build`/`run` 也已使用 iOS target 对应的 BuildKey，将 Cargo target 和
+Xcode DerivedData 放入 `.gpui/builds/ios/<key>`；见
+[M04 iOS BuildKey](../experiments/M04-ios-build-key-2026-09-27.md)。Android 多 ABI 的
+构建命令、live builder、snapshot build orchestration、同 key 在途任务合并和 `build.rs`
+隐藏输入尚未接入。desktop/iOS 命令也尚未以 `FrozenInputs` 副本作为 Cargo 工作根，因此
+M04 仍未完成。
 
 ### S04 · 断言和 gpui check 执行器
 
