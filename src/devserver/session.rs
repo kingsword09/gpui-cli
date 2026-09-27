@@ -80,6 +80,13 @@ pub enum ActionDispatchKind {
         x_milli: u32,
         y_milli: u32,
     },
+    TypeText {
+        text: String,
+        mode: String,
+    },
+    Key {
+        key: String,
+    },
     Scroll {
         x_milli: u32,
         y_milli: u32,
@@ -176,6 +183,12 @@ impl Session {
                     "provider": "gpui-window-dispatch", "constraints": {"buttons": ["left"]}},
                 "input.pointer.scroll": {"available": false, "reason": "runtime_unavailable",
                     "provider": "gpui-window-dispatch", "constraints": {"delta_precision": "milli_pixel"}},
+                "input.keyboard": {"available": false, "reason": "runtime_unavailable",
+                    "provider": "gpui-window-dispatch", "constraints": {"dispatch": "focused_target"}},
+                "input.keyboard.type_text": {"available": false, "reason": "runtime_unavailable",
+                    "provider": "gpui-window-dispatch", "constraints": {"mode": ["replace", "append"]}},
+                "input.keyboard.key": {"available": false, "reason": "runtime_unavailable",
+                    "provider": "gpui-window-dispatch", "constraints": {"key_bytes": 64}},
                 "checks": false, "input_scope": "project_files",
                 "native_mobile_logs": false, "timing_spans": true,
                 "capture.scene": {"available": false, "reason": "backend_unsupported",
@@ -344,9 +357,9 @@ impl Session {
         Ok(result)
     }
 
-    /// Admits one observation-bound action and queues supported left clicks
-    /// for the owning app connection. Completion is reported only after the
-    /// generated element receives GPUI's normal mouse-up event.
+    /// Admits one observation-bound action and queues it for the owning app
+    /// connection. Completion is reported only after the generated element
+    /// receives GPUI's normal input event.
     pub fn submit_action(
         &self,
         request_id: &str,
@@ -407,6 +420,8 @@ impl Session {
                     }
                     "input.pointer.click"
                 }
+                Action::TypeText { .. } => "input.keyboard.type_text",
+                Action::Key { .. } => "input.keyboard.key",
                 Action::Scroll { duration_ms, .. } => {
                     if *duration_ms != 0 {
                         return Err(OperationError::new(
@@ -415,13 +430,6 @@ impl Session {
                         ));
                     }
                     "input.pointer.scroll"
-                }
-                _ => {
-                    return Err(OperationError::with_details(
-                        "input_adapter_unavailable",
-                        "only pointer click and scroll actions are connected to the GPUI event path",
-                        json!({"action": request.action.kind(), "capability": request.required_capability()}),
-                    ));
                 }
             };
             if state.capabilities[capability]["available"] != true {
@@ -551,21 +559,31 @@ impl Session {
                 message: error.message,
                 details: error.details,
             })?;
-            let (x_milli, y_milli) =
+            let center = || {
                 super::actions::click_center_milli(&query).map_err(|error| OperationError {
                     code: error.code,
                     message: error.message,
                     details: error.details,
-                })?;
+                })
+            };
             let action = match &request.action {
-                Action::Click { .. } => ActionDispatchKind::Click {
-                    button: "left".into(),
-                    x_milli,
-                    y_milli,
+                Action::Click { .. } => {
+                    let (x_milli, y_milli) = center()?;
+                    ActionDispatchKind::Click {
+                        button: "left".into(),
+                        x_milli,
+                        y_milli,
+                    }
+                }
+                Action::TypeText { text, mode } => ActionDispatchKind::TypeText {
+                    text: text.clone(),
+                    mode: mode.clone(),
                 },
+                Action::Key { key } => ActionDispatchKind::Key { key: key.clone() },
                 Action::Scroll {
                     delta_x, delta_y, ..
                 } => {
+                    let (x_milli, y_milli) = center()?;
                     let (delta_x_milli, delta_y_milli) = super::actions::scroll_delta_milli(
                         *delta_x, *delta_y,
                     )
@@ -581,7 +599,6 @@ impl Session {
                         delta_y_milli,
                     }
                 }
-                _ => unreachable!("unsupported action was rejected above"),
             };
             Ok::<_, OperationError>((action, observed_scene_epoch, connection_id))
         })();

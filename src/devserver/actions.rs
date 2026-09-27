@@ -97,6 +97,12 @@ impl Action {
                         "type_text mode must be replace or append",
                     ));
                 }
+                if text.is_empty() && mode == "append" {
+                    return Err(ActionError::new(
+                        "invalid_text",
+                        "append mode requires at least one character",
+                    ));
+                }
             }
             Self::Key { key } => {
                 if key.is_empty() || key.len() > MAX_ACTION_KEY_BYTES || key.contains('\0') {
@@ -358,6 +364,13 @@ mod tests {
             "input.keyboard"
         );
         assert_eq!(
+            request(Action::Key {
+                key: "Enter".into()
+            })
+            .required_capability(),
+            "input.keyboard"
+        );
+        assert_eq!(
             request(Action::Scroll {
                 delta_x: 0.0,
                 delta_y: 10.0,
@@ -396,6 +409,15 @@ mod tests {
             invalid_scroll.validate().unwrap_err().code,
             "invalid_scroll_delta"
         );
+
+        let invalid_key = request(Action::Key { key: "\0".into() });
+        assert_eq!(invalid_key.validate().unwrap_err().code, "invalid_key");
+
+        let empty_append = request(Action::TypeText {
+            text: String::new(),
+            mode: "append".into(),
+        });
+        assert_eq!(empty_append.validate().unwrap_err().code, "invalid_text");
 
         let unknown_field = serde_json::from_value::<Action>(json!({
             "type": "click",

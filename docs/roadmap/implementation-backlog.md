@@ -315,16 +315,20 @@ pointer click 已按窗口 owner connection 串行投递，run/revision/scene/co
 再次 fencing；断连、超时或已投递但未确认的结果为 unknown，禁止重放。enabled/bounds
 缺失、节点 disabled、selector 缺失/歧义和非左键动作均在投递前明确失败。
 
-当前仍未完成的是 type_text/key、通用组件的 bounds instrumentation，以及真实窗口故障
-矩阵。Scroll 已为生成的 VirtualList viewport 接通一次性的 GPUI `ScrollWheel` 分发；带
-duration 的滚动手势和任意组件滚动容器仍未支持。
+keyboard 子切片已交付：`type_text`/`key` 分别通过独立的 app-channel
+`text_dispatch`/`key_dispatch` 消息进入生成 LoginForm 的 GPUI focus/key event 路径；
+replace/append、Enter、Backspace 和目标事件确认均保留在 runtime/UI 线程。服务端按
+`input.keyboard.type_text`/`input.keyboard.key` 能力 admission，并继续执行
+observation/run/revision/scene/connection fencing。通用组件的 bounds/focus instrumentation
+和真实窗口故障矩阵仍未完成。Scroll 仍只为生成的 VirtualList viewport 接通一次性的 GPUI
+`ScrollWheel` 分发；带 duration 的滚动手势和任意组件滚动容器仍未支持。
 
 1. 对 observation/run/window/revision 预检，解析唯一节点并校验可见、enabled、遮挡和焦点。
 2. 通过 GPUI 正常事件路径实现 click/type/key/scroll；坐标路径显式记录像素→逻辑坐标转换。
 3. 实现持久接受记录、1000 项/10min 结果缓存和 10000 项 run 级墓碑；先记录再投递，缓存过期不能重新点击。
 4. 窗口队列串行；已投递动作的取消/断线/崩溃按 unknown 处理。人工输入污染要能区分来源。
 
-PR 拆分：请求/幂等状态机、pointer/hit test 与生成 VirtualList scroll（当前）→ keyboard
+PR 拆分：请求/幂等状态机、pointer/hit test 与生成 VirtualList scroll → keyboard（当前已交付）
 → 通用滚动容器与真窗口故障测试。
 验收 S-03/S-04/S-05/S-06/S-08。
 

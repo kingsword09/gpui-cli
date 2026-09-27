@@ -527,6 +527,27 @@ fn heartbeat_loop(shared: &Arc<Shared>) {
                             scene_epoch: request.scene_epoch,
                             deadline_at_ms: request.deadline_at_ms,
                         },
+                        ActionDispatchKind::TypeText { text, mode } => {
+                            ServerMessage::TextDispatch {
+                                operation_id: request.operation_id.clone(),
+                                observation_id: request.observation_id.clone(),
+                                window_id: request.window_id.clone(),
+                                logical_id: request.logical_id.clone(),
+                                text: text.clone(),
+                                mode: mode.clone(),
+                                scene_epoch: request.scene_epoch,
+                                deadline_at_ms: request.deadline_at_ms,
+                            }
+                        }
+                        ActionDispatchKind::Key { key } => ServerMessage::KeyDispatch {
+                            operation_id: request.operation_id.clone(),
+                            observation_id: request.observation_id.clone(),
+                            window_id: request.window_id.clone(),
+                            logical_id: request.logical_id.clone(),
+                            key: key.clone(),
+                            scene_epoch: request.scene_epoch,
+                            deadline_at_ms: request.deadline_at_ms,
+                        },
                         ActionDispatchKind::Scroll {
                             x_milli,
                             y_milli,

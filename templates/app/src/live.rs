@@ -99,6 +99,29 @@ static PENDING_ACTION_HITS: Mutex<BTreeMap<(String, String), Arc<AtomicBool>>> =
     Mutex::new(BTreeMap::new());
 const POINTER_ACTION_QUEUE_BOUND: usize = 16;
 
+/// One accepted keyboard command waiting for execution on the GPUI UI thread.
+#[derive(Clone, Debug)]
+pub struct KeyboardActionRequest {
+    pub operation_id: String,
+    pub observation_id: String,
+    pub window_id: String,
+    pub logical_id: String,
+    pub action: KeyboardActionKind,
+    pub scene_epoch: u64,
+    pub deadline_at_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum KeyboardActionKind {
+    TypeText { text: String, mode: String },
+    Key { key: String },
+}
+
+static KEYBOARD_ACTIONS: Mutex<Vec<KeyboardActionRequest>> = Mutex::new(Vec::new());
+static KEYBOARD_TARGETS: Mutex<BTreeMap<String, gpui::FocusHandle>> = Mutex::new(BTreeMap::new());
+const KEYBOARD_ACTION_QUEUE_BOUND: usize = 16;
+const MAX_KEYBOARD_TEXT_BYTES: usize = 32 * 1024;
+
 /// Sender half of the current connection; `None` while disconnected.
 static OUTBOUND: Mutex<Option<mpsc::SyncSender<String>>> = Mutex::new(None);
 
@@ -358,6 +381,23 @@ pub fn begin_action_bounds_frame() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    KEYBOARD_TARGETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// Registers the focus handle for one explicitly instrumented keyboard target.
+/// The supervisor still selects the target from an observation; this map only
+/// lets the UI thread move focus to that already-rendered element.
+pub fn register_keyboard_target(logical_id: &str, focus_handle: gpui::FocusHandle) {
+    if logical_id.is_empty() || logical_id.len() > 256 || logical_id.contains('\0') {
+        return;
+    }
+    KEYBOARD_TARGETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(logical_id.to_owned(), focus_handle);
 }
 
 /// Records the actual prepaint bounds for one explicitly instrumented target.
@@ -402,6 +442,16 @@ pub fn take_pointer_action_requests() -> Vec<PointerActionRequest> {
     )
 }
 
+/// Drains keyboard commands received by the network thread for UI-thread
+/// execution.
+pub fn take_keyboard_action_requests() -> Vec<KeyboardActionRequest> {
+    std::mem::take(
+        &mut *KEYBOARD_ACTIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    )
+}
+
 /// Called by the generated element's bubbled mouse-up observer. This is the
 /// success signal for the transport; it does not assert the business outcome.
 pub fn confirm_action_target_hit(logical_id: &str) {
@@ -414,6 +464,12 @@ pub fn confirm_action_target_hit(logical_id: &str) {
     if let Some(hit) = hit {
         hit.store(true, Ordering::SeqCst);
     }
+}
+
+/// Called by an instrumented keyboard target after GPUI delivered its key
+/// event. This confirms event-path delivery, not the business outcome.
+pub fn confirm_keyboard_target_hit(logical_id: &str) {
+    confirm_action_target_hit(logical_id);
 }
 
 fn enrich_semantics_tree(tree: &str) -> Result<String, &'static str> {
@@ -1104,6 +1160,167 @@ pub fn dispatch_pointer_action(cx: &mut gpui::App, request: PointerActionRequest
     );
 }
 
+fn keystroke_for_text_character(character: char) -> Result<gpui::Keystroke, &'static str> {
+    let source = match character {
+        ' ' => "space".to_owned(),
+        '\t' => "tab".to_owned(),
+        '\n' | '\r' => "enter".to_owned(),
+        _ => character.to_string(),
+    };
+    gpui::Keystroke::parse(&source).map_err(|_| "unsupported_text_character")
+}
+
+/// Executes one keyboard action on the focused GPUI target. Text is sent as a
+/// sequence of normal keystrokes; replace mode first sends the platform
+/// secondary-select-all chord so the target owns replacement semantics.
+pub fn dispatch_keyboard_action(cx: &mut gpui::App, request: KeyboardActionRequest) {
+    if now_ms() >= request.deadline_at_ms {
+        respond_action_result(
+            &request.operation_id,
+            &request.window_id,
+            &request.logical_id,
+            false,
+            false,
+            Some("deadline_elapsed_before_dispatch"),
+        );
+        return;
+    }
+    let focus_handle = KEYBOARD_TARGETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&request.logical_id)
+        .cloned();
+    let Some(focus_handle) = focus_handle else {
+        respond_action_result(
+            &request.operation_id,
+            &request.window_id,
+            &request.logical_id,
+            false,
+            false,
+            Some("keyboard_target_unavailable"),
+        );
+        return;
+    };
+    let prepared: Result<Vec<gpui::Keystroke>, &'static str> = match &request.action {
+        KeyboardActionKind::TypeText { text, mode } => {
+            if text.len() > MAX_KEYBOARD_TEXT_BYTES {
+                Err("text_too_large")
+            } else if !matches!(mode.as_str(), "replace" | "append") {
+                Err("invalid_text_mode")
+            } else {
+                let mut keystrokes = Vec::with_capacity(text.chars().count().saturating_add(2));
+                if mode == "replace" {
+                    match gpui::Keystroke::parse("secondary-a") {
+                        Ok(keystroke) => keystrokes.push(keystroke),
+                        Err(_) => {
+                            respond_action_result(
+                                &request.operation_id,
+                                &request.window_id,
+                                &request.logical_id,
+                                false,
+                                false,
+                                Some("invalid_select_all_keystroke"),
+                            );
+                            return;
+                        }
+                    }
+                    if text.is_empty() {
+                        keystrokes.push(
+                            gpui::Keystroke::parse("backspace").expect("known GPUI key"),
+                        );
+                    }
+                }
+                for character in text.chars() {
+                    match keystroke_for_text_character(character) {
+                        Ok(keystroke) => keystrokes.push(keystroke),
+                        Err(reason) => {
+                            respond_action_result(
+                                &request.operation_id,
+                                &request.window_id,
+                                &request.logical_id,
+                                false,
+                                false,
+                                Some(reason),
+                            );
+                            return;
+                        }
+                    }
+                }
+                Ok(keystrokes)
+            }
+        }
+        KeyboardActionKind::Key { key } => gpui::Keystroke::parse(key)
+            .map(|keystroke| vec![keystroke])
+            .map_err(|_| "invalid_key"),
+    };
+    let keystrokes = match prepared {
+        Ok(keystrokes) => keystrokes,
+        Err(reason) => {
+            respond_action_result(
+                &request.operation_id,
+                &request.window_id,
+                &request.logical_id,
+                false,
+                false,
+                Some(reason),
+            );
+            return;
+        }
+    };
+
+    let hit = Arc::new(AtomicBool::new(false));
+    PENDING_ACTION_HITS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            (request.operation_id.clone(), request.logical_id.clone()),
+            hit.clone(),
+        );
+    let result: Result<(), &'static str> = {
+        let handle = REGISTERED_WINDOW_HANDLES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&request.window_id)
+            .copied();
+        match handle {
+            None => Err("window_handle_unavailable"),
+            Some(handle) => match handle.update(cx, |_, window, cx| {
+                focus_handle.focus(window, cx);
+                for keystroke in keystrokes {
+                    window.dispatch_keystroke(keystroke, cx);
+                }
+                Ok::<(), &'static str>(())
+            }) {
+                Ok(result) => result,
+                Err(_) => Err("window_dispatch_failed"),
+            },
+        }
+    };
+    let dispatched = result.is_ok();
+    let reason = result.err();
+    let target_event_received = hit.load(Ordering::SeqCst);
+    PENDING_ACTION_HITS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(request.operation_id.clone(), request.logical_id.clone()));
+    respond_action_result(
+        &request.operation_id,
+        &request.window_id,
+        &request.logical_id,
+        dispatched,
+        target_event_received,
+        reason.or_else(|| {
+            if dispatched && target_event_received {
+                None
+            } else if !dispatched {
+                Some("window_dispatch_failed")
+            } else {
+                Some("target_event_not_received")
+            }
+        }),
+    );
+}
+
 /// Reports one bounded semantics read. A tree is sent as an escaped JSON
 /// string so the app-channel envelope remains unambiguous and bounded.
 pub fn respond_semantics_read(
@@ -1425,7 +1642,7 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
     };
 
     let hello = format!(
-        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\",\"semantics.logical_id\",\"input.pointer.click\",\"input.pointer.scroll\"{}{}]}}",
+        "{{\"type\":\"hello\",\"proto\":{PROTO_VERSION},\"token\":\"{}\",\"project\":\"{}\",\"pid\":{},\"platform\":\"{platform}\",\"asset_reload\":{},\"runtime_version\":\"{RUNTIME_VERSION}\",\"gpui_version\":\"{GPUI_VERSION}\",\"capabilities\":[\"logs\",\"panic\",\"state\",\"semantics.read\",\"semantics.logical_id\",\"input.pointer.click\",\"input.pointer.scroll\",\"input.keyboard.type_text\",\"input.keyboard.key\"{}{}]}}",
         json_escape(&config.token),
         json_escape(&config.project),
         std::process::id(),
@@ -1765,6 +1982,90 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                     deadline_at_ms,
                 });
             }
+        }
+    } else if find_bytes(frame, b"\"text_dispatch\"") {
+        let (
+            Some(operation_id),
+            Some(observation_id),
+            Some(window_id),
+            Some(logical_id),
+            Some(text),
+            Some(mode),
+            Some(scene_epoch),
+            Some(deadline_at_ms),
+        ) = (
+            string_field(frame, "operation_id"),
+            string_field(frame, "observation_id"),
+            string_field(frame, "window_id"),
+            string_field(frame, "logical_id"),
+            string_field(frame, "text"),
+            string_field(frame, "mode"),
+            number_field(frame, "scene_epoch"),
+            number_field(frame, "deadline_at_ms"),
+        ) else {
+            return;
+        };
+        let mut actions = KEYBOARD_ACTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if actions.len() >= KEYBOARD_ACTION_QUEUE_BOUND {
+            respond_action_result(
+                &operation_id,
+                &window_id,
+                &logical_id,
+                false,
+                false,
+                Some("action_queue_full"),
+            );
+        } else {
+            actions.push(KeyboardActionRequest {
+                operation_id,
+                observation_id,
+                window_id,
+                logical_id,
+                action: KeyboardActionKind::TypeText { text, mode },
+                scene_epoch,
+                deadline_at_ms,
+            });
+        }
+    } else if find_bytes(frame, b"\"key_dispatch\"") {
+        let (
+            Some(operation_id),
+            Some(observation_id),
+            Some(window_id),
+            Some(logical_id),
+            Some(key),
+            Some(scene_epoch),
+            Some(deadline_at_ms),
+        ) = (
+            string_field(frame, "operation_id"),
+            string_field(frame, "observation_id"),
+            string_field(frame, "window_id"),
+            string_field(frame, "logical_id"),
+            string_field(frame, "key"),
+            number_field(frame, "scene_epoch"),
+            number_field(frame, "deadline_at_ms"),
+        ) else {
+            return;
+        };
+        let mut actions = KEYBOARD_ACTIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if actions.len() >= KEYBOARD_ACTION_QUEUE_BOUND {
+            respond_action_result(
+                &operation_id,
+                &window_id,
+                &logical_id,
+                false,
+                false,
+                Some("action_queue_full"),
+            );
+        } else {
+            actions.push(KeyboardActionRequest {
+                operation_id,
+                observation_id,
+                window_id,
+                logical_id,
+                action: KeyboardActionKind::Key { key },
+                scene_epoch,
+                deadline_at_ms,
+            });
         }
     } else if find_bytes(frame, b"\"scroll_dispatch\"") {
         let (
