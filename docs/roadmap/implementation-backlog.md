@@ -321,15 +321,16 @@ replace/append、Enter、Backspace 和目标事件确认均保留在 runtime/UI 
 `input.keyboard.type_text`/`input.keyboard.key` 能力 admission，并继续执行
 observation/run/revision/scene/connection fencing。通用组件的 bounds/focus instrumentation
 和真实窗口故障矩阵仍未完成。Scroll 仍只为生成的 VirtualList viewport 接通一次性的 GPUI
-`ScrollWheel` 分发；带 duration 的滚动手势和任意组件滚动容器仍未支持。
+`ScrollWheel` 分发；duration scroll 现在由 runtime 按有界分段执行，整数总位移保持守恒，
+但任意组件滚动容器的通用注册与真实窗口故障矩阵仍未支持。
 
 1. 对 observation/run/window/revision 预检，解析唯一节点并校验可见、enabled、遮挡和焦点。
 2. 通过 GPUI 正常事件路径实现 click/type/key/scroll；坐标路径显式记录像素→逻辑坐标转换。
 3. 实现持久接受记录、1000 项/10min 结果缓存和 10000 项 run 级墓碑；先记录再投递，缓存过期不能重新点击。
 4. 窗口队列串行；已投递动作的取消/断线/崩溃按 unknown 处理。人工输入污染要能区分来源。
 
-PR 拆分：请求/幂等状态机、pointer/hit test 与生成 VirtualList scroll → keyboard（当前已交付）
-→ 通用滚动容器与真窗口故障测试。
+PR 拆分：请求/幂等状态机、pointer/hit test 与生成 VirtualList scroll → keyboard → duration
+scroll（当前已交付）→ 通用滚动容器与真窗口故障测试。
 验收 S-03/S-04/S-05/S-06/S-08。
 
 回退：缺真实路由的动作 capability=false；禁止直接调用业务回调来使测试通过。

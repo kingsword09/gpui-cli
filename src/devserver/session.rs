@@ -92,6 +92,7 @@ pub enum ActionDispatchKind {
         y_milli: u32,
         delta_x_milli: i32,
         delta_y_milli: i32,
+        duration_ms: u64,
     },
 }
 
@@ -423,10 +424,10 @@ impl Session {
                 Action::TypeText { .. } => "input.keyboard.type_text",
                 Action::Key { .. } => "input.keyboard.key",
                 Action::Scroll { duration_ms, .. } => {
-                    if *duration_ms != 0 {
+                    if *duration_ms > deadline_ms {
                         return Err(OperationError::new(
-                            "unsupported_duration",
-                            "scroll dispatch currently supports instantaneous wheel events only",
+                            "duration_exceeds_action_deadline",
+                            "scroll duration must fit within the action deadline",
                         ));
                     }
                     "input.pointer.scroll"
@@ -581,7 +582,9 @@ impl Session {
                 },
                 Action::Key { key } => ActionDispatchKind::Key { key: key.clone() },
                 Action::Scroll {
-                    delta_x, delta_y, ..
+                    delta_x,
+                    delta_y,
+                    duration_ms,
                 } => {
                     let (x_milli, y_milli) = center()?;
                     let (delta_x_milli, delta_y_milli) = super::actions::scroll_delta_milli(
@@ -597,6 +600,7 @@ impl Session {
                         y_milli,
                         delta_x_milli,
                         delta_y_milli,
+                        duration_ms: *duration_ms,
                     }
                 }
             };
