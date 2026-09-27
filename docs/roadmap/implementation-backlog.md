@@ -387,6 +387,9 @@ sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化�
 `rustc -vV` 和显式环境 allowlist，使用真实 BuildKey 生成
 `.gpui/builds/desktop/<key>/cargo-target` 并设置 `CARGO_TARGET_DIR`；见
 [M04 desktop BuildKey](../experiments/M04-desktop-build-key-2026-09-27.md)。
+当前 desktop build plan 还会先创建临时 `FrozenInputs` 副本，将 Cargo workspace 和允许的
+外部 path package 作为冻结工作根执行；见
+[M04 desktop frozen build root](../experiments/M04-desktop-frozen-build-root-2026-09-27.md)。
 非 live 的 iOS `build`/`run` 也已使用 iOS target 对应的 BuildKey，将 Cargo target 和
 Xcode DerivedData 放入 `.gpui/builds/ios/<key>`；见
 [M04 iOS BuildKey](../experiments/M04-ios-build-key-2026-09-27.md)。Android 多 ABI 的

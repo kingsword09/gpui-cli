@@ -23,6 +23,7 @@
 
 ## 未覆盖
 
-本切片尚未让现有 `cargo build`/`run` 命令消费冻结副本，也没有接入 snapshot 构建编排、
-build.rs 隐藏 I/O 报告、缓存命中或实际矩阵执行。manifest 中非 Cargo workspace member
+本切片本身尚未让移动端或 live 构建命令消费冻结副本；desktop 非 live 消费冻结副本的接线
+记录在后续 [desktop frozen build root](M04-desktop-frozen-build-root-2026-09-27.md)。本切片
+仍没有接入 snapshot 构建编排、build.rs 隐藏 I/O 报告、缓存命中或实际矩阵执行。manifest 中非 Cargo workspace member
 的特殊生成路径和原生 manifest 仍需后续边界处理。
