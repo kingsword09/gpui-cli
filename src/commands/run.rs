@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
-use crate::runner::build_inputs::{android_output_layout, desktop_build_plan, ios_output_layout};
+use crate::runner::build_inputs::{android_output_layout, desktop_build_plan, ios_build_plan};
 use crate::template::Platform;
 
 /// Resolved project layout, read from the current working directory.
@@ -238,14 +238,15 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         "aarch64-apple-ios-sim"
     };
     ensure_rust_target(rust_target)?;
-    let layout = ios_output_layout(&project.root, release, rust_target)?;
-    layout.prepare()?;
+    let plan = ios_build_plan(&project.root, release, rust_target)?;
+    let layout = &plan.layout;
+    let snapshot_root = &plan.snapshot.root;
 
     // 1. Rust staticlib (Xcode's build phase also does this, but doing it here
     //    surfaces Rust errors with Rust-quality messages).
     let mut cargo = Command::new("cargo");
     cargo
-        .current_dir(&project.root)
+        .current_dir(snapshot_root)
         .args([
             "build",
             "--lib",
@@ -261,7 +262,7 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
     run_step(&format!("cargo build --target {rust_target}"), &mut cargo)?;
 
     // 2. XcodeGen: project.yml -> .xcodeproj
-    let ios_dir = project.ios_dir();
+    let ios_dir = snapshot_root.join("mobile/ios");
     run_step(
         "xcodegen generate",
         Command::new("xcodegen")
