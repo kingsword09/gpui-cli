@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
-use crate::runner::build_inputs::{android_output_layout, desktop_build_plan, ios_build_plan};
+use crate::runner::build_inputs::{android_build_plan, desktop_build_plan, ios_build_plan};
 use crate::template::Platform;
 
 /// Resolved project layout, read from the current working directory.
@@ -479,13 +479,29 @@ pub(crate) fn gradle_command_with_outputs(
     jni_libs_dir: Option<&Path>,
     gradle_build_dir: Option<&Path>,
 ) -> Command {
+    gradle_command_at(
+        &project.android_gradle_dir(),
+        release,
+        abis,
+        jni_libs_dir,
+        gradle_build_dir,
+    )
+}
+
+fn gradle_command_at(
+    gradle_dir: &Path,
+    release: bool,
+    abis: &[String],
+    jni_libs_dir: Option<&Path>,
+    gradle_build_dir: Option<&Path>,
+) -> Command {
     let wrapper = if cfg!(windows) {
         "gradlew.bat"
     } else {
         "gradlew"
     };
-    let mut cmd = Command::new(project.android_gradle_dir().join(wrapper));
-    cmd.current_dir(project.android_gradle_dir())
+    let mut cmd = Command::new(gradle_dir.join(wrapper));
+    cmd.current_dir(gradle_dir)
         .arg(gradle_task(release))
         .arg(format!("-Pgpui.abis={}", abis.join(",")))
         .env("GPUI_ANDROID_ABIS", abis.join(","));
@@ -536,8 +552,9 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     for abi in &abis {
         ensure_rust_target(android_rust_target(abi)?)?;
     }
-    let layout = android_output_layout(&project.root, release, &abis)?;
-    layout.prepare()?;
+    let plan = android_build_plan(&project.root, release, &abis)?;
+    let layout = &plan.layout;
+    let snapshot_root = &plan.snapshot.root;
     let jni_libs_dir = layout
         .android_jni_dir
         .as_deref()
@@ -549,7 +566,7 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
 
     // 1. Rust shared library via cargo-ndk.
     let mut ndk = Command::new("cargo");
-    ndk.current_dir(&project.root)
+    ndk.current_dir(snapshot_root)
         .args(["ndk"])
         .env("CARGO_TARGET_DIR", &layout.cargo_target_dir);
     for abi in &abis {
@@ -568,8 +585,8 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     // 2. Gradle: package the APK.
     run_step(
         &format!("gradlew {}", gradle_task(release)),
-        &mut gradle_command_with_outputs(
-            project,
+        &mut gradle_command_at(
+            &snapshot_root.join("mobile/android/gradle"),
             release,
             &abis,
             Some(jni_libs_dir),
@@ -777,6 +794,27 @@ mod tests {
         assert!(
             isolated_command.get_args().any(|arg| arg.to_string_lossy()
                 == format!("-Pgpui.buildDir={}", isolated_gradle.display()))
+        );
+
+        let snapshot_gradle = dir.path().join("snapshot/mobile/android/gradle");
+        let snapshot_command = gradle_command_at(
+            &snapshot_gradle,
+            false,
+            &abis,
+            Some(&isolated_jni),
+            Some(&isolated_gradle),
+        );
+        assert_eq!(
+            snapshot_command.get_current_dir(),
+            Some(snapshot_gradle.as_path())
+        );
+        assert_eq!(
+            snapshot_command.get_program(),
+            snapshot_gradle.join(if cfg!(windows) {
+                "gradlew.bat"
+            } else {
+                "gradlew"
+            })
         );
     }
 }
