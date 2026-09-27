@@ -153,6 +153,18 @@ pub fn report_scene_completed(
     );
 }
 
+/// Reports the scene after the current GPUI frame is rendered. The live
+/// adapter never invents a presented-frame id; only a verified backend may
+/// supply one.
+pub fn schedule_scene_completed(window: &Window, window_id: &str) {
+    #[cfg(all(debug_assertions, feature = "gpui-dev"))]
+    {
+        let _ = live::schedule_scene_completed(window, window_id);
+    }
+    #[cfg(not(all(debug_assertions, feature = "gpui-dev")))]
+    let _ = (window, window_id);
+}
+
 /// Under `gpui run --live`, drains asset changes and UI probes received by the
 /// dev channel. Asset invalidation and probe responses are completed from the
 /// GPUI foreground context so the network thread never touches UI state.
@@ -856,7 +868,7 @@ impl Default for MainView {
 }
 
 impl Render for MainView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let current_generation = crate::previews::active_reset_generation();
         if current_generation != self.preview_generation {
             self.reset_preview_state();
@@ -874,6 +886,9 @@ impl Render for MainView {
             Some("VirtualList") => self.render_virtual_list(cx),
             _ => self.render_counter(cx),
         };
+
+        #[cfg(debug_assertions)]
+        crate::schedule_scene_completed(window, "main");
 
         div()
             .flex()

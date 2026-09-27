@@ -329,7 +329,9 @@ fencing、runtime dispatch failure、target miss、取消和 app-channel 断线�
 不确定结果统一为 unknown，禁止重放。真实 macOS 窗口注入、遮挡/人工输入污染、平台滚动
 惯性和触控板 provider 仍未完成。真实 macOS window screenshot 的 limited-adopt 证据见
 [S04 macOS window evidence](../experiments/S04-macos-window-evidence-2026-09-27.md)，但
-动作 query 已接入可选 `clip_bounds` 与显式
+真实生成模板 scene completion 与截图 revision 绑定的验收见
+[O04 scene completion live](../experiments/O04-scene-completion-live-2026-09-27.md)。动作
+query 已接入可选 `clip_bounds` 与显式
 `obscured` 语义：中心命中点不可见时返回 `element_not_visible`，provider 明确报告遮挡时
 返回 `element_obscured`，缺字段不会被猜测为可见。
 

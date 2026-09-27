@@ -18,7 +18,7 @@ use std::thread;
 use std::time::Duration;
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const PROTO_VERSION: u32 = 2;
 const RUNTIME_VERSION: &str = "agent-native-dev-runtime-v1";
@@ -29,10 +29,13 @@ const MAX_FRAME_LEN: u32 = 1024 * 1024;
 /// stalling the app (panics and logs are best-effort by design).
 const OUTBOUND_BOUND: usize = 256;
 
+#[derive(Default)]
 struct LiveConfig {
     addr: String,
     token: String,
     project: String,
+    source_revision: u64,
+    asset_revision: u64,
     /// Snapshot session to restore, injected by the CLI on relaunch.
     session: Option<String>,
     /// Where the CLI stored that session's snapshot bytes.
@@ -167,6 +170,8 @@ static FAILED_REQUIRED_ASSETS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::ne
 static LAST_REQUIRED_LOADED_REPORT: Mutex<Option<String>> = Mutex::new(None);
 #[cfg(feature = "gpui-dev")]
 static LAST_SCENE_COMPLETION_REPORT: Mutex<Option<String>> = Mutex::new(None);
+static CURRENT_SOURCE_REVISION: Mutex<u64> = Mutex::new(0);
+static NEXT_SCENE_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// Probe requests waiting for the UI thread. The app consumes these from its
 /// render/event loop and answers with `respond_ui_probe`.
@@ -215,6 +220,14 @@ static ASSET_SOURCE_INSTALLED: std::sync::atomic::AtomicBool =
 /// `gpui run --live`.
 fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
     let project = std::env::var("GPUI_LIVE_PROJECT").unwrap_or_default();
+    let source_revision = std::env::var("GPUI_LIVE_SOURCE_REVISION")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let asset_revision = std::env::var("GPUI_LIVE_ASSET_REVISION")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
     let session = std::env::var("GPUI_LIVE_SESSION").ok().filter(|s| !s.is_empty());
     let state_file = std::env::var("GPUI_LIVE_STATE_FILE")
         .ok()
@@ -227,6 +240,8 @@ fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
             addr,
             token,
             project,
+            source_revision,
+            asset_revision,
             session,
             state_file,
         });
@@ -240,6 +255,8 @@ fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
     let mut token = None;
     let mut file_project = None;
     let mut file_session = None;
+    let mut file_source_revision = 0;
+    let mut file_asset_revision = 0;
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("addr=") {
             addr = Some(value.trim().to_string());
@@ -249,12 +266,18 @@ fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
             file_project = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("session=") {
             file_session = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("source_revision=") {
+            file_source_revision = value.trim().parse().unwrap_or(0);
+        } else if let Some(value) = line.strip_prefix("asset_revision=") {
+            file_asset_revision = value.trim().parse().unwrap_or(0);
         }
     }
     Some(LiveConfig {
         addr: addr?,
         token: token?,
         project: file_project.unwrap_or(project),
+        source_revision: file_source_revision,
+        asset_revision: file_asset_revision,
         session: file_session.filter(|s| !s.is_empty()),
         state_file: config_file
             .and_then(Path::parent)
@@ -268,6 +291,14 @@ pub fn init(config_file: Option<&Path>) {
     let Some(config) = resolve_config(config_file) else {
         return;
     };
+
+    *CURRENT_SOURCE_REVISION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = config.source_revision;
+    *DESIRED_ASSET_REVISION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = config.asset_revision;
+    NEXT_SCENE_EPOCH.store(0, Ordering::SeqCst);
 
     // A snapshot from the previous process may be waiting; stage it for the
     // view to pick up. Unreadable or version-mismatched snapshots just mean a
@@ -768,6 +799,34 @@ pub fn report_scene_completed(
         "{{\"type\":\"scene_completed\",\"window_id\":\"{}\",\"scene_epoch\":{scene_epoch},\"source_revision\":{source_revision},\"asset_revision\":{asset_revision}{presented}}}",
         json_escape(window_id),
     ));
+    true
+}
+
+/// Schedules a scene completion report after GPUI has rendered the current
+/// frame. This is intentionally weaker than a platform present callback:
+/// `presented_frame_id` remains null unless a backend proves presentation.
+#[cfg(feature = "gpui-dev")]
+pub fn schedule_scene_completed(window: &gpui::Window, window_id: &str) -> bool {
+    let source_revision = *CURRENT_SOURCE_REVISION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let asset_revision = *DESIRED_ASSET_REVISION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if source_revision == 0 || asset_revision == 0 {
+        return false;
+    }
+    let window_id = window_id.to_owned();
+    window.on_next_frame(move |_, _| {
+        let scene_epoch = NEXT_SCENE_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = report_scene_completed(
+            &window_id,
+            scene_epoch,
+            source_revision,
+            asset_revision,
+            None,
+        );
+    });
     true
 }
 
@@ -3009,6 +3068,7 @@ mod tests {
                 project: String::new(),
                 session: None,
                 state_file: None,
+                ..Default::default()
             },
         );
         *OUTBOUND.lock().unwrap() = None;
@@ -3031,6 +3091,7 @@ mod tests {
                 project: String::new(),
                 session: None,
                 state_file: None,
+                ..Default::default()
             },
         );
         let events = take_asset_events();
@@ -3054,6 +3115,7 @@ mod tests {
             project: String::new(),
             session: None,
             state_file: None,
+            ..Default::default()
         };
 
         dispatch(
@@ -3090,6 +3152,7 @@ mod tests {
             project: String::new(),
             session: None,
             state_file: None,
+            ..Default::default()
         };
 
         dispatch(
@@ -3145,6 +3208,7 @@ mod tests {
                 project: String::new(),
                 session: None,
                 state_file: None,
+                ..Default::default()
             },
         );
 
@@ -3184,6 +3248,7 @@ mod tests {
                 project: String::new(),
                 session: None,
                 state_file: None,
+                ..Default::default()
             },
         );
         let requests = take_ui_probe_requests();
@@ -3204,6 +3269,7 @@ mod tests {
                 project: String::new(),
                 session: None,
                 state_file: None,
+                ..Default::default()
             },
         );
         let requests = take_semantics_read_requests();
@@ -3226,6 +3292,7 @@ mod tests {
             project: String::new(),
             session: None,
             state_file: None,
+            ..Default::default()
         };
         let deadline = now_ms().saturating_sub(1);
         let click = format!(
@@ -3258,6 +3325,7 @@ mod tests {
                 project: String::new(),
                 session: None,
                 state_file: None,
+                ..Default::default()
             },
         );
         let requests = take_preview_reset_requests();
