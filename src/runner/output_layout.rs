@@ -1,12 +1,13 @@
 //! Build-output paths isolated by platform and BuildKey.
 
 use super::build_key::BuildKey;
+use super::build_manifest::BUILD_ARTIFACT_MANIFEST_FILE;
 use anyhow::{Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BuildPlatform {
     Desktop,
@@ -15,7 +16,7 @@ pub enum BuildPlatform {
 }
 
 impl BuildPlatform {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
             Self::Android => "android",
@@ -105,6 +106,10 @@ impl BuildOutputLayout {
             fs::create_dir_all(path)?;
         }
         Ok(())
+    }
+
+    pub fn artifact_manifest_path(&self) -> PathBuf {
+        self.root.join(BUILD_ARTIFACT_MANIFEST_FILE)
     }
 }
 
