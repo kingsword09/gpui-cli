@@ -401,7 +401,10 @@ live builder、snapshot build orchestration、同 key 在途任务合并和 `bui
 [M04 desktop frozen build root](../experiments/M04-desktop-frozen-build-root-2026-09-27.md)，
 iOS 的切片见
 [M04 iOS frozen build root](../experiments/M04-ios-frozen-build-root-2026-09-27.md)。Android
-非 live 命令仍待接入冻结工作根，因此 M04 仍未完成。
+非 live 命令的切片见
+[M04 Android frozen build root](../experiments/M04-android-frozen-build-root-2026-09-27.md)。
+M04 仍未完成：live builder、snapshot build orchestration、同 key 在途任务合并和
+`build.rs`/Gradle/NDK 隐藏输入尚未接入。
 
 ### S04 · 断言和 gpui check 执行器
 
