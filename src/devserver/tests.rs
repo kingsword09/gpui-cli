@@ -732,10 +732,16 @@ fn pointer_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation()
             "semantics.logical_id".into(),
             "input.pointer.click".into(),
             "input.pointer.scroll".into(),
+            "input.keyboard.type_text".into(),
+            "input.keyboard.key".into(),
         ],
     );
     wait_until(|| session.store.state().capabilities["input.pointer.click"]["available"] == true);
     wait_until(|| session.store.state().capabilities["input.pointer.scroll"]["available"] == true);
+    wait_until(|| {
+        session.store.state().capabilities["input.keyboard.type_text"]["available"] == true
+    });
+    wait_until(|| session.store.state().capabilities["input.keyboard.key"]["available"] == true);
 
     send(
         &mut socket,
@@ -800,7 +806,7 @@ fn pointer_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation()
             status: "ready".into(),
             a11y_active: true,
             tree_json: Some(
-                r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window"},"children":["b","c"]},"b":{"logical_id":"counter.increment","aria":{"role":"Button","enabled":true},"bounds":{"x":10,"y":20,"width":10,"height":10},"children":[]},"c":{"logical_id":"list.viewport","aria":{"role":"List","enabled":true},"bounds":{"x":100,"y":100,"width":100,"height":200},"children":[]}}}"#.into(),
+                r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window"},"children":["b","c","d","e"]},"b":{"logical_id":"counter.increment","aria":{"role":"Button","enabled":true},"bounds":{"x":10,"y":20,"width":10,"height":10},"children":[]},"c":{"logical_id":"list.viewport","aria":{"role":"List","enabled":true},"bounds":{"x":100,"y":100,"width":100,"height":200},"children":[]},"d":{"logical_id":"login.username","aria":{"role":"TextField","enabled":true},"bounds":{"x":20,"y":40,"width":160,"height":24},"children":[]},"e":{"logical_id":"login.password","aria":{"role":"TextField","enabled":true},"bounds":{"x":20,"y":70,"width":160,"height":24},"children":[]}}}"#.into(),
             ),
             reason: None,
             captured_at_ms: 42,
@@ -914,7 +920,7 @@ fn pointer_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation()
         .submit_action(
             "test.action.scroll",
             super::actions::ActionRequest {
-                observation_id,
+                observation_id: observation_id.clone(),
                 window_id: "main".into(),
                 logical_id: "list.viewport".into(),
                 action: super::actions::Action::Scroll {
@@ -983,6 +989,133 @@ fn pointer_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation()
         session
             .operations
             .get(&scroll_action.operation_id, super::events::now_ms())
+            .is_ok_and(|operation| operation.state == super::operations::OperationState::Succeeded)
+    });
+
+    let text_action = match session
+        .submit_action(
+            "test.action.type-text",
+            super::actions::ActionRequest {
+                observation_id: observation_id.clone(),
+                window_id: "main".into(),
+                logical_id: "login.password".into(),
+                action: super::actions::Action::TypeText {
+                    text: "bad-password".into(),
+                    mode: "replace".into(),
+                },
+            },
+            10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot,
+        SubmitResult::Existing(_) => panic!("expected a new text action"),
+    };
+    let text_dispatch = loop {
+        let message =
+            protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+        match message {
+            ServerMessage::TextDispatch {
+                operation_id,
+                text,
+                mode,
+                ..
+            } => break (operation_id, text, mode),
+            ServerMessage::ProbeUi {
+                request_id,
+                window_id,
+            } => send(
+                &mut socket,
+                &ClientMessage::UiProbeResult {
+                    request_id,
+                    window_id,
+                    responsive: true,
+                    latency_ms: Some(1),
+                },
+            ),
+            other => panic!("expected text dispatch, got {other:?}"),
+        }
+    };
+    assert_eq!(text_dispatch.0, text_action.operation_id);
+    assert_eq!(text_dispatch.1, "bad-password");
+    assert_eq!(text_dispatch.2, "replace");
+    send(
+        &mut socket,
+        &ClientMessage::ActionResult {
+            operation_id: text_dispatch.0,
+            window_id: "main".into(),
+            logical_id: "login.password".into(),
+            dispatched: true,
+            target_event_received: true,
+            completed_at_ms: super::events::now_ms(),
+            reason: None,
+        },
+    );
+    wait_until(|| {
+        session
+            .operations
+            .get(&text_action.operation_id, super::events::now_ms())
+            .is_ok_and(|operation| operation.state == super::operations::OperationState::Succeeded)
+    });
+
+    let key_action = match session
+        .submit_action(
+            "test.action.key",
+            super::actions::ActionRequest {
+                observation_id,
+                window_id: "main".into(),
+                logical_id: "login.password".into(),
+                action: super::actions::Action::Key {
+                    key: "Enter".into(),
+                },
+            },
+            10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot,
+        SubmitResult::Existing(_) => panic!("expected a new key action"),
+    };
+    let key_dispatch = loop {
+        let message =
+            protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+        match message {
+            ServerMessage::KeyDispatch {
+                operation_id, key, ..
+            } => break (operation_id, key),
+            ServerMessage::ProbeUi {
+                request_id,
+                window_id,
+            } => send(
+                &mut socket,
+                &ClientMessage::UiProbeResult {
+                    request_id,
+                    window_id,
+                    responsive: true,
+                    latency_ms: Some(1),
+                },
+            ),
+            other => panic!("expected key dispatch, got {other:?}"),
+        }
+    };
+    assert_eq!(key_dispatch.0, key_action.operation_id);
+    assert_eq!(key_dispatch.1, "Enter");
+    send(
+        &mut socket,
+        &ClientMessage::ActionResult {
+            operation_id: key_dispatch.0,
+            window_id: "main".into(),
+            logical_id: "login.password".into(),
+            dispatched: true,
+            target_event_received: true,
+            completed_at_ms: super::events::now_ms(),
+            reason: None,
+        },
+    );
+    wait_until(|| {
+        session
+            .operations
+            .get(&key_action.operation_id, super::events::now_ms())
             .is_ok_and(|operation| operation.state == super::operations::OperationState::Succeeded)
     });
 }

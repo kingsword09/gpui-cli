@@ -544,11 +544,30 @@ impl State {
                         pointer_scroll_supported,
                         (!pointer_scroll_supported).then_some("runtime_unsupported"),
                     );
+                    let keyboard_type_text_supported =
+                        data["capabilities"].as_array().is_some_and(|capabilities| {
+                            capabilities
+                                .iter()
+                                .any(|value| value == "input.keyboard.type_text")
+                        });
+                    let keyboard_key_supported =
+                        data["capabilities"].as_array().is_some_and(|capabilities| {
+                            capabilities
+                                .iter()
+                                .any(|value| value == "input.keyboard.key")
+                        });
+                    self.set_keyboard_capability(
+                        keyboard_type_text_supported,
+                        keyboard_key_supported,
+                        (!keyboard_type_text_supported && !keyboard_key_supported)
+                            .then_some("runtime_unsupported"),
+                    );
                 } else if current_run && event.kind == Kind::AppDisconnected {
                     self.set_semantics_capability(false, Some("app_channel_disconnected"), false);
                     self.set_scenario_reset_capability(false, Some("app_channel_disconnected"));
                     self.set_pointer_click_capability(false, Some("app_channel_disconnected"));
                     self.set_pointer_scroll_capability(false, Some("app_channel_disconnected"));
+                    self.set_keyboard_capability(false, false, Some("app_channel_disconnected"));
                 }
                 if event.kind == Kind::AppExited
                     && data["success"] == false
@@ -678,6 +697,45 @@ impl State {
             .unwrap_or_default();
         if available && !supported.iter().any(|value| value == "scroll") {
             supported.push(json!("scroll"));
+        }
+        self.capabilities["actions"]["supported"] = Value::Array(supported);
+    }
+
+    fn set_keyboard_capability(
+        &mut self,
+        type_text_available: bool,
+        key_available: bool,
+        reason: Option<&str>,
+    ) {
+        let available = type_text_available || key_available;
+        let capability_reason = if available { None } else { reason };
+        self.capabilities["input.keyboard"] = json!({
+            "available": available,
+            "reason": capability_reason,
+            "provider": "gpui-window-dispatch",
+            "constraints": {"dispatch": "focused_target"},
+        });
+        self.capabilities["input.keyboard.type_text"] = json!({
+            "available": type_text_available,
+            "reason": if type_text_available { None } else { reason },
+            "provider": "gpui-window-dispatch",
+            "constraints": {"mode": ["replace", "append"]},
+        });
+        self.capabilities["input.keyboard.key"] = json!({
+            "available": key_available,
+            "reason": if key_available { None } else { reason },
+            "provider": "gpui-window-dispatch",
+            "constraints": {"key_bytes": 64},
+        });
+        let mut supported = self.capabilities["actions"]["supported"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if type_text_available && !supported.iter().any(|value| value == "type_text") {
+            supported.push(json!("type_text"));
+        }
+        if key_available && !supported.iter().any(|value| value == "key") {
+            supported.push(json!("key"));
         }
         self.capabilities["actions"]["supported"] = Value::Array(supported);
     }

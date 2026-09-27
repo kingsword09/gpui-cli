@@ -259,6 +259,25 @@ pub enum ServerMessage {
         scene_epoch: u64,
         deadline_at_ms: u64,
     },
+    TextDispatch {
+        operation_id: String,
+        observation_id: String,
+        window_id: String,
+        logical_id: String,
+        text: String,
+        mode: String,
+        scene_epoch: u64,
+        deadline_at_ms: u64,
+    },
+    KeyDispatch {
+        operation_id: String,
+        observation_id: String,
+        window_id: String,
+        logical_id: String,
+        key: String,
+        scene_epoch: u64,
+        deadline_at_ms: u64,
+    },
     ScrollDispatch {
         operation_id: String,
         observation_id: String,
@@ -726,6 +745,35 @@ mod tests {
         assert_eq!(
             decode::<ServerMessage>(&encode(&action).unwrap()).unwrap(),
             action
+        );
+
+        let text = ServerMessage::TextDispatch {
+            operation_id: "op-text-1".into(),
+            observation_id: "observation-1".into(),
+            window_id: "main".into(),
+            logical_id: "login.password".into(),
+            text: "bad-password".into(),
+            mode: "replace".into(),
+            scene_epoch: 7,
+            deadline_at_ms: 123_500,
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&text).unwrap()).unwrap(),
+            text
+        );
+
+        let key = ServerMessage::KeyDispatch {
+            operation_id: "op-key-1".into(),
+            observation_id: "observation-1".into(),
+            window_id: "main".into(),
+            logical_id: "login.password".into(),
+            key: "Enter".into(),
+            scene_epoch: 7,
+            deadline_at_ms: 123_600,
+        };
+        assert_eq!(
+            decode::<ServerMessage>(&encode(&key).unwrap()).unwrap(),
+            key
         );
 
         let action_result = ClientMessage::ActionResult {

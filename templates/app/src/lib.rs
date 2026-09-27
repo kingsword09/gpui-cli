@@ -170,11 +170,13 @@ pub fn pump_live_assets(cx: &mut App) {
                 let semantics = crate::live::take_semantics_read_requests();
                 let resets = crate::live::take_preview_reset_requests();
                 let actions = crate::live::take_pointer_action_requests();
+                let keyboard_actions = crate::live::take_keyboard_action_requests();
                 if asset_events.is_empty()
                     && probes.is_empty()
                     && semantics.is_empty()
                     && resets.is_empty()
                     && actions.is_empty()
+                    && keyboard_actions.is_empty()
                 {
                     continue;
                 }
@@ -251,6 +253,9 @@ pub fn pump_live_assets(cx: &mut App) {
                     }
                     for request in actions {
                         crate::live::dispatch_pointer_action(cx, request);
+                    }
+                    for request in keyboard_actions {
+                        crate::live::dispatch_keyboard_action(cx, request);
                     }
                     let mut has_preview_reset = false;
                     for request in resets {
@@ -351,19 +356,39 @@ pub fn confirm_action_target_hit(logical_id: &str) {
     let _ = logical_id;
 }
 
+/// Registers a focusable element as an explicit keyboard action target.
+pub fn register_keyboard_target(logical_id: &str, focus_handle: FocusHandle) {
+    #[cfg(debug_assertions)]
+    live::register_keyboard_target(logical_id, focus_handle);
+    #[cfg(not(debug_assertions))]
+    let _ = (logical_id, focus_handle);
+}
+
+/// Confirms that a keyboard event reached the generated target through GPUI.
+pub fn confirm_keyboard_target_hit(logical_id: &str) {
+    #[cfg(debug_assertions)]
+    live::confirm_keyboard_target_hit(logical_id);
+    #[cfg(not(debug_assertions))]
+    let _ = logical_id;
+}
+
 /// Root view of the application.
 ///
 /// The generated preview surfaces are intentionally small and deterministic.
 /// They provide the registry/runtime with real GPUI elements and stable
 /// semantic ids; the development adapter wires the explicitly instrumented
-/// pointer-click targets through GPUI's normal event path. Keyboard input,
-/// scrolling, and asynchronous form execution remain separate capabilities.
+/// pointer and keyboard targets through GPUI's normal event path. Scrolling
+/// and asynchronous form execution remain separate capabilities.
 pub struct MainView {
     clicks: usize,
     preview_generation: Option<u64>,
     login_username: String,
     login_password: String,
     login_error: Option<String>,
+    login_username_focus: Option<FocusHandle>,
+    login_password_focus: Option<FocusHandle>,
+    login_username_selected_all: bool,
+    login_password_selected_all: bool,
     virtual_list_scroll_handle: UniformListScrollHandle,
 }
 
@@ -417,6 +442,10 @@ impl MainView {
             login_username: crate::previews::login_initial_username().unwrap_or_default(),
             login_password: crate::previews::login_initial_password().unwrap_or_default(),
             login_error: None,
+            login_username_focus: None,
+            login_password_focus: None,
+            login_username_selected_all: false,
+            login_password_selected_all: false,
             virtual_list_scroll_handle,
         }
     }
@@ -426,6 +455,8 @@ impl MainView {
         self.login_username = crate::previews::login_initial_username().unwrap_or_default();
         self.login_password = crate::previews::login_initial_password().unwrap_or_default();
         self.login_error = None;
+        self.login_username_selected_all = false;
+        self.login_password_selected_all = false;
         let initial_scroll_y = crate::previews::virtual_list_initial_scroll_y().unwrap_or(0) as f32;
         self.virtual_list_scroll_handle
             .0
@@ -521,7 +552,62 @@ impl MainView {
             .into_any_element()
     }
 
+    fn apply_login_key(&mut self, logical_id: &str, event: &KeyDownEvent) {
+        let is_username = logical_id == "login.username";
+        let value = if is_username {
+            &mut self.login_username
+        } else {
+            &mut self.login_password
+        };
+        let selected_all = if is_username {
+            &mut self.login_username_selected_all
+        } else {
+            &mut self.login_password_selected_all
+        };
+        let key = event.keystroke.key.as_str();
+        let modifiers = event.keystroke.modifiers;
+        if (modifiers.control || modifiers.platform) && key == "a" {
+            *selected_all = true;
+            return;
+        }
+        if key == "backspace" || key == "delete" {
+            if *selected_all {
+                value.clear();
+                *selected_all = false;
+            } else {
+                value.pop();
+            }
+            return;
+        }
+        if key == "enter" {
+            self.login_error = crate::previews::login_error_message();
+            return;
+        }
+        if modifiers.control || modifiers.platform || modifiers.alt || modifiers.function {
+            return;
+        }
+        if let Some(text) = event.keystroke.key_char.as_deref() {
+            if !text.is_empty() {
+                if *selected_all {
+                    value.clear();
+                    *selected_all = false;
+                }
+                value.push_str(text);
+            }
+        }
+    }
+
     fn render_login(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let username_focus = self
+            .login_username_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
+        let password_focus = self
+            .login_password_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
+        crate::register_keyboard_target("login.username", username_focus.clone());
+        crate::register_keyboard_target("login.password", password_focus.clone());
         let password_display = if self.login_password.is_empty() {
             "(empty)".to_string()
         } else {
@@ -530,17 +616,65 @@ impl MainView {
         let username = div()
             .id("login-username")
             .accessibility_id("login.username")
+            .relative()
+            .track_focus(&username_focus)
+            .on_key_down(cx.listener(|this, event, _window, cx| {
+                crate::confirm_keyboard_target_hit("login.username");
+                this.apply_login_key("login.username", event);
+                cx.notify();
+            }))
             .px_3()
             .py_2()
             .bg(rgb(0xf1f5f9))
-            .child(format!("Username: {}", self.login_username));
+            .child(format!("Username: {}", self.login_username))
+            .child(
+                canvas(
+                    |bounds, _, _| {
+                        crate::record_action_target_bounds(
+                            "login.username",
+                            bounds.origin.x.as_f32(),
+                            bounds.origin.y.as_f32(),
+                            bounds.size.width.as_f32(),
+                            bounds.size.height.as_f32(),
+                            true,
+                        );
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
         let password = div()
             .id("login-password")
             .accessibility_id("login.password")
+            .relative()
+            .track_focus(&password_focus)
+            .on_key_down(cx.listener(|this, event, _window, cx| {
+                crate::confirm_keyboard_target_hit("login.password");
+                this.apply_login_key("login.password", event);
+                cx.notify();
+            }))
             .px_3()
             .py_2()
             .bg(rgb(0xf1f5f9))
-            .child(format!("Password: {password_display}"));
+            .child(format!("Password: {password_display}"))
+            .child(
+                canvas(
+                    |bounds, _, _| {
+                        crate::record_action_target_bounds(
+                            "login.password",
+                            bounds.origin.x.as_f32(),
+                            bounds.origin.y.as_f32(),
+                            bounds.size.width.as_f32(),
+                            bounds.size.height.as_f32(),
+                            true,
+                        );
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
         let submit = div()
             .id("login-submit")
             .accessibility_id("login.submit")
@@ -557,8 +691,8 @@ impl MainView {
             .hover(|style| style.bg(rgb(0x1d4ed8)))
             .child("Sign in")
             .on_click(cx.listener(|this, _event, _window, cx| {
-                // The fixture response is deterministic. Real text input,
-                // request cancellation and async fencing belong to S03.
+                // The fixture response is deterministic. Async request
+                // cancellation and fencing remain separate capabilities.
                 this.login_error = crate::previews::login_error_message();
                 cx.notify();
             }))
