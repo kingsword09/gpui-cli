@@ -7,6 +7,7 @@ mod config;
 pub mod device;
 pub mod devserver;
 pub mod fixtures;
+pub mod runner;
 pub mod scenario;
 pub mod template;
 pub mod template_manifest;
