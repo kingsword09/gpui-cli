@@ -992,6 +992,74 @@ fn pointer_dispatch_is_owner_bound_and_finishes_only_after_target_confirmation()
             .is_ok_and(|operation| operation.state == super::operations::OperationState::Succeeded)
     });
 
+    let duration_scroll = match session
+        .submit_action(
+            "test.action.scroll-duration",
+            super::actions::ActionRequest {
+                observation_id: observation_id.clone(),
+                window_id: "main".into(),
+                logical_id: "list.viewport".into(),
+                action: super::actions::Action::Scroll {
+                    delta_x: 1.25,
+                    delta_y: -12.5,
+                    duration_ms: 32,
+                },
+            },
+            10_000,
+        )
+        .unwrap()
+    {
+        SubmitResult::Created(snapshot) => snapshot,
+        SubmitResult::Existing(_) => panic!("expected a new duration scroll action"),
+    };
+    let duration_dispatch = loop {
+        let message =
+            protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
+        match message {
+            ServerMessage::ScrollDispatch {
+                operation_id,
+                duration_ms,
+                delta_x_milli,
+                delta_y_milli,
+                ..
+            } => break (operation_id, duration_ms, delta_x_milli, delta_y_milli),
+            ServerMessage::ProbeUi {
+                request_id,
+                window_id,
+            } => send(
+                &mut socket,
+                &ClientMessage::UiProbeResult {
+                    request_id,
+                    window_id,
+                    responsive: true,
+                    latency_ms: Some(1),
+                },
+            ),
+            other => panic!("expected duration scroll dispatch, got {other:?}"),
+        }
+    };
+    assert_eq!(duration_dispatch.0, duration_scroll.operation_id);
+    assert_eq!(duration_dispatch.1, 32);
+    assert_eq!((duration_dispatch.2, duration_dispatch.3), (1_250, -12_500));
+    send(
+        &mut socket,
+        &ClientMessage::ActionResult {
+            operation_id: duration_dispatch.0,
+            window_id: "main".into(),
+            logical_id: "list.viewport".into(),
+            dispatched: true,
+            target_event_received: true,
+            completed_at_ms: super::events::now_ms(),
+            reason: None,
+        },
+    );
+    wait_until(|| {
+        session
+            .operations
+            .get(&duration_scroll.operation_id, super::events::now_ms())
+            .is_ok_and(|operation| operation.state == super::operations::OperationState::Succeeded)
+    });
+
     let text_action = match session
         .submit_action(
             "test.action.type-text",

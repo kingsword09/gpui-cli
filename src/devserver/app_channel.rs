@@ -553,6 +553,7 @@ fn heartbeat_loop(shared: &Arc<Shared>) {
                             y_milli,
                             delta_x_milli,
                             delta_y_milli,
+                            duration_ms,
                         } => ServerMessage::ScrollDispatch {
                             operation_id: request.operation_id.clone(),
                             observation_id: request.observation_id.clone(),
@@ -562,6 +563,7 @@ fn heartbeat_loop(shared: &Arc<Shared>) {
                             y_milli: *y_milli,
                             delta_x_milli: *delta_x_milli,
                             delta_y_milli: *delta_y_milli,
+                            duration_ms: *duration_ms,
                             scene_epoch: request.scene_epoch,
                             deadline_at_ms: request.deadline_at_ms,
                         },

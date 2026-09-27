@@ -91,6 +91,7 @@ pub enum PointerActionKind {
         y_milli: u32,
         delta_x_milli: i32,
         delta_y_milli: i32,
+        duration_ms: u64,
     },
 }
 
@@ -1057,9 +1058,150 @@ pub fn respond_action_result(
     ));
 }
 
+const MAX_SCROLL_SEGMENTS: u32 = 240;
+const SCROLL_TARGET_INTERVAL_MS: u64 = 16;
+
+fn scroll_segment_count(duration_ms: u64) -> u32 {
+    duration_ms
+        .div_ceil(SCROLL_TARGET_INTERVAL_MS)
+        .clamp(1, u64::from(MAX_SCROLL_SEGMENTS)) as u32
+}
+
+fn scroll_segment_delta(total: i32, index: u32, count: u32) -> i32 {
+    let start = (i64::from(total) * i64::from(index)).div_euclid(i64::from(count));
+    let end = (i64::from(total) * i64::from(index + 1)).div_euclid(i64::from(count));
+    (end - start) as i32
+}
+
+/// Delivers a duration-bound scroll as bounded normal wheel events. Integer
+/// splitting makes the sum of all segments exactly equal the admitted milli-
+/// pixel delta, including negative and non-even values.
+fn dispatch_duration_scroll_action(cx: &mut gpui::App, request: PointerActionRequest) {
+    let handle = REGISTERED_WINDOW_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&request.window_id)
+        .copied();
+    let Some(handle) = handle else {
+        respond_action_result(
+            &request.operation_id,
+            &request.window_id,
+            &request.logical_id,
+            false,
+            false,
+            Some("window_handle_unavailable"),
+        );
+        return;
+    };
+    let (
+        x_milli,
+        y_milli,
+        delta_x_milli,
+        delta_y_milli,
+        duration_ms,
+    ) = match &request.action {
+        PointerActionKind::Scroll {
+            x_milli,
+            y_milli,
+            delta_x_milli,
+            delta_y_milli,
+            duration_ms,
+        } => (
+            *x_milli,
+            *y_milli,
+            *delta_x_milli,
+            *delta_y_milli,
+            *duration_ms,
+        ),
+        _ => return,
+    };
+    let hit = Arc::new(AtomicBool::new(false));
+    PENDING_ACTION_HITS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            (request.operation_id.clone(), request.logical_id.clone()),
+            hit.clone(),
+        );
+    let operation_id = request.operation_id.clone();
+    let window_id = request.window_id.clone();
+    let logical_id = request.logical_id.clone();
+    let deadline_at_ms = request.deadline_at_ms;
+    let segment_count = scroll_segment_count(duration_ms);
+    let interval_ms = if segment_count > 1 {
+        duration_ms / u64::from(segment_count - 1)
+    } else {
+        0
+    };
+    cx.spawn(async move |cx| {
+        let mut dispatched_any = false;
+        let mut reason = None;
+        for segment in 0..segment_count {
+            if segment > 0 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(interval_ms))
+                    .await;
+            }
+            if now_ms() >= deadline_at_ms {
+                reason = Some("scroll_deadline_elapsed");
+                break;
+            }
+            let delta_x = scroll_segment_delta(delta_x_milli, segment, segment_count);
+            let delta_y = scroll_segment_delta(delta_y_milli, segment, segment_count);
+            let x = x_milli as f32 / 1000.0;
+            let y = y_milli as f32 / 1000.0;
+            let result = handle.update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                        position: gpui::point(gpui::px(x), gpui::px(y)),
+                        delta: gpui::ScrollDelta::Pixels(gpui::point(
+                            gpui::px(delta_x as f32 / 1000.0),
+                            gpui::px(delta_y as f32 / 1000.0),
+                        )),
+                        modifiers: gpui::Modifiers::default(),
+                        touch_phase: gpui::TouchPhase::Moved,
+                    }),
+                    cx,
+                )
+            });
+            if result.is_err() {
+                reason = Some("window_dispatch_failed");
+                break;
+            }
+            dispatched_any = true;
+        }
+        let target_event_received = hit.load(Ordering::SeqCst);
+        PENDING_ACTION_HITS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(operation_id.clone(), logical_id.clone()));
+        respond_action_result(
+            &operation_id,
+            &window_id,
+            &logical_id,
+            dispatched_any,
+            target_event_received,
+            reason.or_else(|| {
+                if dispatched_any && target_event_received {
+                    None
+                } else if !dispatched_any {
+                    Some("window_dispatch_failed")
+                } else {
+                    Some("target_event_not_received")
+                }
+            }),
+        );
+    })
+    .detach();
+}
+
 /// Executes one action on the foreground GPUI context. The network thread
 /// only queues the parsed request; it never touches a Window.
 pub fn dispatch_pointer_action(cx: &mut gpui::App, request: PointerActionRequest) {
+    if matches!(&request.action, PointerActionKind::Scroll { duration_ms, .. } if *duration_ms > 0) {
+        dispatch_duration_scroll_action(cx, request);
+        return;
+    }
     let handle = REGISTERED_WINDOW_HANDLES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -2077,6 +2219,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
             Some(y_milli),
             Some(delta_x_milli),
             Some(delta_y_milli),
+            Some(duration_ms),
             Some(scene_epoch),
             Some(deadline_at_ms),
         ) = (
@@ -2088,6 +2231,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
             number_field(frame, "y_milli"),
             signed_number_field(frame, "delta_x_milli"),
             signed_number_field(frame, "delta_y_milli"),
+            number_field(frame, "duration_ms").or(Some(0)),
             number_field(frame, "scene_epoch"),
             number_field(frame, "deadline_at_ms"),
         ) else {
@@ -2114,6 +2258,7 @@ fn dispatch(frame: &[u8], config: &LiveConfig) {
                     y_milli: u32::try_from(y_milli).unwrap_or(u32::MAX),
                     delta_x_milli: i32::try_from(delta_x_milli).unwrap_or(0),
                     delta_y_milli: i32::try_from(delta_y_milli).unwrap_or(0),
+                    duration_ms,
                 },
                 scene_epoch,
                 deadline_at_ms,
@@ -2716,6 +2861,20 @@ mod tests {
     use super::*;
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn duration_scroll_segments_preserve_signed_milli_delta() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (duration, total) in [(1, 1_250), (32, -12_500), (2_000, 7_777)] {
+            let count = scroll_segment_count(duration);
+            let sum = (0..count)
+                .map(|index| scroll_segment_delta(total, index, count))
+                .sum::<i32>();
+            assert_eq!(sum, total);
+        }
+        assert_eq!(scroll_segment_count(0), 1);
+        assert!(scroll_segment_count(120_000) <= MAX_SCROLL_SEGMENTS);
+    }
 
     #[test]
     fn string_field_unescapes_known_sequences() {

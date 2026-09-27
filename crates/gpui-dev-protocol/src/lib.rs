@@ -287,6 +287,7 @@ pub enum ServerMessage {
         y_milli: u32,
         delta_x_milli: i32,
         delta_y_milli: i32,
+        duration_ms: u64,
         scene_epoch: u64,
         deadline_at_ms: u64,
     },
@@ -799,6 +800,7 @@ mod tests {
             y_milli: 240_250,
             delta_x_milli: 0,
             delta_y_milli: -12_500,
+            duration_ms: 2_000,
             scene_epoch: 8,
             deadline_at_ms: 123_789,
         };
