@@ -66,6 +66,9 @@ struct ActionTargetBounds {
 /// generated controls; the accessibility tree alone does not provide these.
 static ACTION_TARGET_BOUNDS: Mutex<BTreeMap<String, ActionTargetBounds>> =
     Mutex::new(BTreeMap::new());
+/// Logical ids explicitly declared as scroll containers by the application.
+/// A bounds record alone is intentionally insufficient for scroll admission.
+static DECLARED_SCROLL_TARGETS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// One accepted pointer command waiting for execution on the GPUI UI thread.
 #[derive(Clone, Debug)]
@@ -386,6 +389,22 @@ pub fn begin_action_bounds_frame() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+    DECLARED_SCROLL_TARGETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// Declares one semantic node as a scrollable container. The node must still
+/// expose bounds and consume wheel events through its normal GPUI path.
+pub fn declare_scroll_target(logical_id: &str) {
+    if logical_id.is_empty() || logical_id.len() > 256 || logical_id.contains('\0') {
+        return;
+    }
+    DECLARED_SCROLL_TARGETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(logical_id.to_owned());
 }
 
 /// Registers the focus handle for one explicitly instrumented keyboard target.
@@ -473,12 +492,22 @@ pub fn confirm_keyboard_target_hit(logical_id: &str) {
     confirm_action_target_hit(logical_id);
 }
 
+/// Called by an instrumented scroll container after GPUI delivered a wheel
+/// event. This confirms event-path delivery, not the resulting scroll offset.
+pub fn confirm_scroll_target_hit(logical_id: &str) {
+    confirm_action_target_hit(logical_id);
+}
+
 fn enrich_semantics_tree(tree: &str) -> Result<String, &'static str> {
     let declarations = DECLARED_LOGICAL_IDS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let action_bounds = ACTION_TARGET_BOUNDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let scroll_targets = DECLARED_SCROLL_TARGETS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
@@ -531,6 +560,11 @@ fn enrich_semantics_tree(tree: &str) -> Result<String, &'static str> {
                 .as_object_mut()
                 .ok_or("semantics_aria_invalid")?;
             aria.insert("enabled".into(), serde_json::json!(bounds.enabled));
+        }
+        if scroll_targets.contains(logical_id) {
+            node.as_object_mut()
+                .expect("node is an object")
+                .insert("scrollable".into(), Value::Bool(true));
         }
     }
     serde_json::to_string(&value).map_err(|_| "semantics_serialization_failed")
@@ -3178,6 +3212,29 @@ mod tests {
         );
         assert_eq!(duplicate, Err("logical_id_duplicate_in_tree"));
         clear_declared_logical_ids();
+    }
+
+    #[test]
+    fn scroll_target_enrichment_requires_an_explicit_declaration() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_declared_logical_ids();
+        begin_action_bounds_frame();
+        declare_logical_id("viewport", "list.viewport").unwrap();
+        declare_scroll_target("list.viewport");
+        let tree = enrich_semantics_tree(
+            r#"{"nodes":{"a":{"element_id":"viewport","aria":{}}}}"#,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&tree).unwrap();
+        assert_eq!(value["nodes"]["a"]["scrollable"], true);
+        clear_declared_logical_ids();
+        begin_action_bounds_frame();
+        let tree = enrich_semantics_tree(
+            r#"{"nodes":{"a":{"element_id":"viewport","aria":{}}}}"#,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&tree).unwrap();
+        assert_eq!(value["nodes"]["a"].get("scrollable"), None);
     }
 
     #[test]

@@ -545,7 +545,12 @@ impl Session {
                 super::query::QueryRequest {
                     observation_id: request.observation_id.clone(),
                     logical_id: Some(request.logical_id.clone()),
-                    fields: vec!["node_ref".into(), "enabled".into(), "bounds".into()],
+                    fields: vec![
+                        "node_ref".into(),
+                        "enabled".into(),
+                        "bounds".into(),
+                        "scrollable".into(),
+                    ],
                     limit: 2,
                     ..Default::default()
                 },
@@ -555,7 +560,12 @@ impl Session {
                 message: error.message,
                 details: error.details,
             })?;
-            super::actions::validate_target_query(&query).map_err(|error| OperationError {
+            let validate_target = if matches!(&request.action, Action::Scroll { .. }) {
+                super::actions::validate_scroll_target_query
+            } else {
+                super::actions::validate_target_query
+            };
+            validate_target(&query).map_err(|error| OperationError {
                 code: error.code,
                 message: error.message,
                 details: error.details,

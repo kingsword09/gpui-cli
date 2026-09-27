@@ -335,6 +335,15 @@ pub fn begin_action_bounds_frame() {
     live::begin_action_bounds_frame();
 }
 
+/// Declares a logical node as a scrollable container for observation-bound
+/// scroll actions. The node must also provide a normal GPUI wheel listener.
+pub fn declare_scroll_target(logical_id: &str) {
+    #[cfg(debug_assertions)]
+    live::declare_scroll_target(logical_id);
+    #[cfg(not(debug_assertions))]
+    let _ = logical_id;
+}
+
 pub fn record_action_target_bounds(
     logical_id: &str,
     x: f32,
@@ -349,9 +358,31 @@ pub fn record_action_target_bounds(
     let _ = (logical_id, x, y, width, height, enabled);
 }
 
+/// Records bounds for a scroll target. This named alias makes generic
+/// scroll-container instrumentation distinct from click-only controls while
+/// retaining the same bounded observation field.
+pub fn record_scroll_target_bounds(
+    logical_id: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    enabled: bool,
+) {
+    record_action_target_bounds(logical_id, x, y, width, height, enabled);
+}
+
 pub fn confirm_action_target_hit(logical_id: &str) {
     #[cfg(debug_assertions)]
     live::confirm_action_target_hit(logical_id);
+    #[cfg(not(debug_assertions))]
+    let _ = logical_id;
+}
+
+/// Confirms that a scroll event reached the target's normal GPUI wheel path.
+pub fn confirm_scroll_target_hit(logical_id: &str) {
+    #[cfg(debug_assertions)]
+    live::confirm_scroll_target_hit(logical_id);
     #[cfg(not(debug_assertions))]
     let _ = logical_id;
 }
@@ -736,6 +767,7 @@ impl MainView {
     }
 
     fn render_virtual_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        crate::declare_scroll_target("list.viewport");
         let count = crate::previews::virtual_list_item_count().unwrap_or(0);
         let prefix = crate::previews::virtual_list_stable_key_prefix().unwrap_or_default();
         let digits = crate::previews::virtual_list_stable_key_digits().unwrap_or(1);
@@ -792,13 +824,13 @@ impl MainView {
                     .h(px(360.0))
                     .overflow_hidden()
                     .on_scroll_wheel(|_event, _window, _cx| {
-                        crate::confirm_action_target_hit("list.viewport");
+                        crate::confirm_scroll_target_hit("list.viewport");
                     })
                     .child(list)
                     .child(
                         canvas(
                             |bounds, _, _| {
-                                crate::record_action_target_bounds(
+                                crate::record_scroll_target_bounds(
                                     "list.viewport",
                                     bounds.origin.x.as_f32(),
                                     bounds.origin.y.as_f32(),

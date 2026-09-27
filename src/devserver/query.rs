@@ -33,6 +33,7 @@ const ALLOWED_FIELDS: &[&str] = &[
     "focused",
     "bounds",
     "clip_bounds",
+    "scrollable",
     "children",
     "parent",
     "source_location",
@@ -685,6 +686,10 @@ fn semantic_fields(
             "clip_bounds".into(),
             node.get("clip_bounds").cloned().unwrap_or(Value::Null),
         ),
+        (
+            "scrollable".into(),
+            node.get("scrollable").cloned().unwrap_or(Value::Null),
+        ),
         ("children".into(), children),
         (
             "source_location".into(),
@@ -750,6 +755,7 @@ fn project_node(node_ref: &str, node: &Value, parent: Option<&str>, fields: &[St
             "focused" => aria_value(node, "focused"),
             "bounds" => node.get("bounds").cloned().unwrap_or(Value::Null),
             "clip_bounds" => node.get("clip_bounds").cloned().unwrap_or(Value::Null),
+            "scrollable" => node.get("scrollable").cloned().unwrap_or(Value::Null),
             "children" => node.get("children").cloned().unwrap_or_else(|| json!([])),
             "parent" => parent.map_or(Value::Null, |value| json!(value)),
             "source_location" => node.get("source_location").cloned().unwrap_or(Value::Null),
@@ -770,7 +776,7 @@ fn field_supported(
             "node_ref" | "role" | "name" | "children" => true,
             "logical_id" => logical_id(node).is_some(),
             "value" | "enabled" | "focused" => aria_value(node, field) != Value::Null,
-            "bounds" | "clip_bounds" | "source_location" | "parent" => {
+            "bounds" | "clip_bounds" | "scrollable" | "source_location" | "parent" => {
                 field == "parent" || node.get(field).is_some()
             }
             _ => false,
@@ -880,6 +886,28 @@ mod tests {
         assert_eq!(result["returned"], 1);
         assert_eq!(result["nodes"][0]["name"], "Click me");
         assert!(result["next_cursor"].is_null());
+    }
+
+    #[test]
+    fn query_projects_explicit_scrollable_field() {
+        let request = QueryRequest {
+            role: Some("List".into()),
+            fields: vec!["node_ref".into(), "scrollable".into()],
+            limit: 1,
+            ..QueryRequest::default()
+        };
+        let tree = json!({
+            "nodes": {
+                "viewport": {
+                    "children": [],
+                    "scrollable": true,
+                    "aria": {"role": "List"}
+                }
+            }
+        });
+        let result = query_tree(&tree, "sha256:tree", &request, "tree-1").unwrap();
+        assert_eq!(result["nodes"][0]["scrollable"], true);
+        assert_eq!(result["unsupported_fields"], json!([]));
     }
 
     #[test]

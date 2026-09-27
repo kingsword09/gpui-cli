@@ -1,7 +1,8 @@
 # S03：duration scroll 分段执行（2026-09-27）
 
 状态：生成 runtime 已支持有界 duration scroll；瞬时滚动和 duration scroll 都经过正常
-GPUI `ScrollWheel` 路径。通用滚动容器的注册、平台滚动惯性和真实窗口故障矩阵仍未完成。
+GPUI `ScrollWheel` 路径。通用滚动容器的显式声明契约已交付；平台滚动惯性和真实窗口
+故障矩阵仍未完成。
 
 ## 实现范围
 
@@ -26,6 +27,8 @@ GPUI `ScrollWheel` 路径。通用滚动容器的注册、平台滚动惯性和�
 
 ## 未覆盖
 
-尚未提供任意用户组件的通用 scroll target registry、真实平台惯性/触控板 provider、取消中途
-动作的显式 API，或真实窗口断线/崩溃故障证据。回退：超出动作 deadline 或 runtime 不支持
-scroll capability 时在 admission/执行边界返回明确错误，不重放部分滚动。
+尚未提供真实平台惯性/触控板 provider、取消中途动作的显式 API，或真实窗口断线/崩溃
+故障证据。通用契约要求组件在每个渲染帧调用 `declare_scroll_target`，并同时通过
+`record_scroll_target_bounds` 报告可见 bounds、通过 `confirm_scroll_target_hit` 证明
+正常 wheel listener 收到事件；服务端不会仅凭 bounds 接受滚动。回退：超出动作 deadline
+或 runtime 不支持 scroll capability 时在 admission/执行边界返回明确错误，不重放部分滚动。
