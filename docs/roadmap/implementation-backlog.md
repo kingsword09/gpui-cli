@@ -372,11 +372,13 @@ scroll（当前已交付）→ 通用滚动容器显式声明契约（当前已�
 
 回退：不能冻结时拒绝严格 check/matrix，允许普通 Live 的 tracked_scan 但不得提升其保证。任意 build.rs 的隐藏输入需列入限制，不能宣称工具能自动发现全部 I/O。
 
-当前已交付 M04 第一切片：`Inputs::scan_stable` 对 sources/assets/目录 symlink manifest
-执行最多两次重扫，连续变化明确失败；`Inputs::freeze_to` 可将稳定 manifest 复制到
-root 外并重核验；记录见
-[M04 input stability](../experiments/M04-input-stability-2026-09-27.md)。完整冻结副本、
-Cargo metadata 外部依赖范围、BuildKey 和隔离构建目录仍未完成。
+当前已交付 M04 的稳定扫描/副本切片和 Cargo scope 切片：`Inputs::scan_stable` 对
+sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化明确失败；
+`Inputs::freeze_to` 可将稳定 manifest 复制到 root 外并重核验；
+`CargoInputScope::discover` 使用锁定的完整 cargo metadata 发现并筛选外部 path package
+根，拒绝 workspace 祖先越界和 symlinked package root。记录见
+[M04 input stability](../experiments/M04-input-stability-2026-09-27.md)。外部 root 尚未
+并入 FrozenInputs，path dependency relocation、BuildKey 和隔离构建目录仍未完成。
 
 ### S04 · 断言和 gpui check 执行器
 

@@ -1,12 +1,13 @@
 //! Content manifests for the files covered by the live project watcher.
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const IGNORED: &[&str] = &[
     "target",
@@ -39,6 +40,39 @@ pub struct FrozenInputs {
     pub manifest: Inputs,
     pub input_hash: String,
     pub snapshot_path: String,
+}
+
+/// The local filesystem roots that Cargo reports for a project workspace.
+///
+/// Registry and git packages are intentionally not included here. Their
+/// sources are managed by Cargo and are not part of the project's explicit
+/// path-input boundary. External path packages are kept as separate roots so
+/// a later snapshot step can copy them without accidentally traversing the
+/// developer's parent directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CargoInputScope {
+    pub workspace_root: String,
+    pub external_path_dependencies: Vec<ExternalPathDependency>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ExternalPathDependency {
+    pub root: String,
+    pub manifest_path: String,
+    pub package_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadata {
+    workspace_root: PathBuf,
+    packages: Vec<CargoPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoPackage {
+    id: String,
+    manifest_path: PathBuf,
+    source: Option<String>,
 }
 
 /// Exact asset changes between two input scans. A watcher event can report a
@@ -74,6 +108,13 @@ impl AssetDelta {
 }
 
 impl Inputs {
+    /// Discovers Cargo's local path-package boundary without mutating the
+    /// project. `--locked` is deliberate: strict input discovery must not
+    /// create or rewrite Cargo.lock as a side effect.
+    pub fn cargo_input_scope(root: &Path) -> Result<CargoInputScope> {
+        CargoInputScope::discover(root)
+    }
+
     /// Reads the project manifest until two consecutive content scans agree.
     ///
     /// The live watcher uses this bounded check before binding a build or
@@ -234,6 +275,140 @@ impl Inputs {
     }
 }
 
+impl CargoInputScope {
+    /// Runs full locked Cargo metadata so path dependencies nested below a
+    /// workspace member are visible as well as direct path dependencies.
+    pub fn discover(root: &Path) -> Result<Self> {
+        let root = fs::canonicalize(root)
+            .with_context(|| format!("resolving Cargo workspace root: {}", root.display()))?;
+        let output = Command::new("cargo")
+            .current_dir(&root)
+            .args(["metadata", "--format-version", "1", "--locked"])
+            .output()
+            .context("running cargo metadata")?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            let detail = detail.trim();
+            if detail.is_empty() {
+                bail!("cargo metadata failed with status {}", output.status);
+            }
+            bail!("cargo metadata failed: {detail}");
+        }
+        Self::from_metadata_json(&root, &output.stdout)
+    }
+
+    /// Parses Cargo metadata separately from process execution so the input
+    /// boundary can be tested against deterministic fixtures.
+    pub fn from_metadata_json(root: &Path, json: &[u8]) -> Result<Self> {
+        let root = fs::canonicalize(root)
+            .with_context(|| format!("resolving Cargo workspace root: {}", root.display()))?;
+        let metadata: CargoMetadata =
+            serde_json::from_slice(json).context("parsing cargo metadata JSON")?;
+        let metadata_root = resolve_metadata_path(&root, &metadata.workspace_root);
+        let metadata_root = fs::canonicalize(&metadata_root).with_context(|| {
+            format!(
+                "resolving cargo metadata workspace root: {}",
+                metadata_root.display()
+            )
+        })?;
+        if metadata_root != root {
+            bail!(
+                "cargo metadata workspace root {} does not match input root {}",
+                metadata_root.display(),
+                root.display()
+            );
+        }
+
+        let mut external = BTreeMap::<PathBuf, (PathBuf, Vec<String>)>::new();
+        for package in metadata.packages {
+            // Cargo uses a null source for local path packages. Registry and
+            // git packages are intentionally outside the project input scope.
+            if package.source.is_some() {
+                continue;
+            }
+            let raw_manifest = resolve_metadata_path(&root, &package.manifest_path);
+            reject_symlinked_path_package(&raw_manifest)?;
+            let manifest = fs::canonicalize(&raw_manifest).with_context(|| {
+                format!(
+                    "resolving local Cargo package manifest: {}",
+                    raw_manifest.display()
+                )
+            })?;
+            let package_root = manifest.parent().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cargo package manifest has no parent: {}",
+                    manifest.display()
+                )
+            })?;
+
+            if package_root == root || package_root.starts_with(&root) {
+                continue;
+            }
+            if root.starts_with(package_root) {
+                bail!(
+                    "external Cargo path package {} contains the workspace root: {}",
+                    package.id,
+                    package_root.display()
+                );
+            }
+
+            let entry = external
+                .entry(package_root.to_owned())
+                .or_insert_with(|| (manifest.clone(), Vec::new()));
+            entry.1.push(package.id);
+        }
+
+        let external_path_dependencies = external
+            .into_iter()
+            .map(|(root, (manifest_path, mut package_ids))| {
+                package_ids.sort();
+                package_ids.dedup();
+                ExternalPathDependency {
+                    root: root.to_string_lossy().into_owned(),
+                    manifest_path: manifest_path.to_string_lossy().into_owned(),
+                    package_ids,
+                }
+            })
+            .collect();
+
+        Ok(Self {
+            workspace_root: root.to_string_lossy().into_owned(),
+            external_path_dependencies,
+        })
+    }
+}
+
+fn resolve_metadata_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        root.join(path)
+    }
+}
+
+fn reject_symlinked_path_package(manifest: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(manifest)
+        .with_context(|| format!("reading Cargo package manifest: {}", manifest.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "external Cargo path package uses a symlinked manifest: {}",
+            manifest.display()
+        );
+    }
+    let parent = manifest
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Cargo package manifest has no parent"))?;
+    let metadata = fs::symlink_metadata(parent)
+        .with_context(|| format!("reading Cargo path package directory: {}", parent.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "external Cargo path package uses a symlinked directory: {}",
+            parent.display()
+        );
+    }
+    Ok(())
+}
+
 fn copy_input_file(root: &Path, destination: &Path, relative: &str) -> Result<()> {
     let relative_path = Path::new(relative);
     if relative_path.is_absolute()
@@ -326,6 +501,166 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.to_string().contains("bounded stability scan"));
+    }
+
+    #[test]
+    fn cargo_scope_collects_sorted_external_path_packages_and_ignores_registry_sources() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dependencies = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::create_dir_all(dependencies.path().join("z-package")).unwrap();
+        fs::create_dir_all(dependencies.path().join("a-package")).unwrap();
+        fs::write(
+            dependencies.path().join("z-package/Cargo.toml"),
+            "[package]\nname = \"z-package\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"lib.rs\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dependencies.path().join("a-package/Cargo.toml"),
+            "[package]\nname = \"a-package\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"lib.rs\"\n",
+        )
+        .unwrap();
+
+        let package = |id: &str, manifest: &Path, source: Option<&str>| {
+            serde_json::json!({
+                "id": id,
+                "manifest_path": manifest,
+                "source": source,
+            })
+        };
+        let json = serde_json::json!({
+            "workspace_root": workspace.path(),
+            "packages": [
+                package(
+                    "path+file:///workspace#root@0.1.0",
+                    &workspace.path().join("Cargo.toml"),
+                    None,
+                ),
+                package(
+                    "path+file:///dependencies/z-package#z-package@0.1.0",
+                    &dependencies.path().join("z-package/Cargo.toml"),
+                    None,
+                ),
+                package(
+                    "path+file:///dependencies/a-package#a-package@0.1.0",
+                    &dependencies.path().join("a-package/Cargo.toml"),
+                    None,
+                ),
+                package(
+                    "registry+https://example.invalid#registry@1.0.0",
+                    &workspace.path().join("not-used/Cargo.toml"),
+                    Some("registry+https://example.invalid"),
+                ),
+            ],
+        });
+
+        let scope = CargoInputScope::from_metadata_json(
+            workspace.path(),
+            &serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+        let roots: Vec<_> = scope
+            .external_path_dependencies
+            .iter()
+            .map(|dependency| PathBuf::from(&dependency.root))
+            .collect();
+        assert_eq!(
+            roots,
+            vec![
+                fs::canonicalize(dependencies.path().join("a-package")).unwrap(),
+                fs::canonicalize(dependencies.path().join("z-package")).unwrap(),
+            ]
+        );
+        assert_eq!(
+            scope.external_path_dependencies[0].package_ids,
+            vec!["path+file:///dependencies/a-package#a-package@0.1.0"]
+        );
+    }
+
+    #[test]
+    fn cargo_scope_discovers_the_checked_in_workspace_without_mutating_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let scope = CargoInputScope::discover(root).unwrap();
+
+        assert_eq!(
+            scope.workspace_root,
+            fs::canonicalize(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        );
+        assert!(scope.external_path_dependencies.is_empty());
+    }
+
+    #[test]
+    fn cargo_scope_rejects_an_external_package_that_contains_the_workspace() {
+        let container = tempfile::tempdir().unwrap();
+        let workspace = container.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(container.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let json = serde_json::json!({
+            "workspace_root": workspace,
+            "packages": [{
+                "id": "path+file:///container#parent@0.1.0",
+                "manifest_path": container.path().join("Cargo.toml"),
+                "source": null,
+            }],
+        });
+
+        let error =
+            CargoInputScope::from_metadata_json(&workspace, &serde_json::to_vec(&json).unwrap())
+                .unwrap_err();
+        assert!(error.to_string().contains("contains the workspace root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_scope_rejects_a_symlinked_external_package_root() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let dependencies = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let real = dependencies.path().join("real-package");
+        let link = dependencies.path().join("linked-package");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("Cargo.toml"), "[package]\n").unwrap();
+        symlink(&real, &link).unwrap();
+        let json = serde_json::json!({
+            "workspace_root": workspace.path(),
+            "packages": [{
+                "id": "path+file:///dependencies/linked-package#linked@0.1.0",
+                "manifest_path": link.join("Cargo.toml"),
+                "source": null,
+            }],
+        });
+
+        let error = CargoInputScope::from_metadata_json(
+            workspace.path(),
+            &serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("symlinked directory"));
+    }
+
+    #[test]
+    fn cargo_scope_rejects_metadata_for_a_different_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(other.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let json = serde_json::json!({
+            "workspace_root": other.path(),
+            "packages": [],
+        });
+
+        let error = CargoInputScope::from_metadata_json(
+            workspace.path(),
+            &serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match input root"));
     }
 
     #[test]
