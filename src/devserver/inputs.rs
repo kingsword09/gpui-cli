@@ -256,7 +256,7 @@ impl Inputs {
             .zip(external_manifests)
             .map(|(external, manifest)| FrozenExternalInput {
                 source_root: external.source_root.to_string_lossy().into_owned(),
-                snapshot_root: external.snapshot_root.to_string_lossy().into_owned(),
+                snapshot_root: external.snapshot_root.to_string_lossy().replace('\\', "/"),
                 manifest,
             })
             .collect::<Vec<_>>();
