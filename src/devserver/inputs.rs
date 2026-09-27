@@ -38,8 +38,23 @@ pub struct Inputs {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FrozenInputs {
     pub manifest: Inputs,
+    pub external_inputs: Vec<FrozenExternalInput>,
+    pub path_relocations: Vec<PathRelocation>,
     pub input_hash: String,
     pub snapshot_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FrozenExternalInput {
+    pub source_root: String,
+    pub snapshot_root: String,
+    pub manifest: Inputs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PathRelocation {
+    pub source_root: String,
+    pub snapshot_root: String,
 }
 
 /// The local filesystem roots that Cargo reports for a project workspace.
@@ -132,50 +147,102 @@ impl Inputs {
     pub fn freeze_to(root: &Path, destination: &Path, max_rescans: usize) -> Result<FrozenInputs> {
         let root = fs::canonicalize(root)
             .with_context(|| format!("resolving input root for snapshot: {}", root.display()))?;
-        let destination = if destination.is_absolute() {
-            destination.to_owned()
-        } else {
-            std::env::current_dir()?.join(destination)
+        let scope = CargoInputScope {
+            workspace_root: root.to_string_lossy().into_owned(),
+            external_path_dependencies: Vec::new(),
         };
-        if destination.exists() {
+        Self::freeze_to_with_cargo_scope(&root, destination, &scope, max_rescans)
+    }
+
+    /// Freezes the workspace and the external local Cargo package roots in a
+    /// scope. External roots are copied below `external/NNNN`; Cargo manifest
+    /// path fields in the snapshot are rewritten to those relocated roots.
+    /// The source workspace and external packages are never rewritten.
+    pub fn freeze_to_with_cargo_scope(
+        root: &Path,
+        destination: &Path,
+        scope: &CargoInputScope,
+        max_rescans: usize,
+    ) -> Result<FrozenInputs> {
+        let root = fs::canonicalize(root)
+            .with_context(|| format!("resolving input root for snapshot: {}", root.display()))?;
+        let scope_root = fs::canonicalize(Path::new(&scope.workspace_root)).with_context(|| {
+            format!(
+                "resolving Cargo scope workspace root: {}",
+                scope.workspace_root
+            )
+        })?;
+        if scope_root != root {
             bail!(
-                "snapshot destination already exists: {}",
-                destination.display()
+                "Cargo input scope workspace root {} does not match input root {}",
+                scope_root.display(),
+                root.display()
             );
-        }
-        let parent = destination
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("snapshot destination has no parent"))?;
-        fs::create_dir_all(parent)?;
-        let parent = fs::canonicalize(parent)?;
-        let destination = parent.join(
-            destination
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("snapshot destination has no file name"))?,
-        );
-        if destination.starts_with(&root) {
-            bail!("snapshot destination must be outside the input root");
         }
 
+        let external_roots = resolve_external_roots(&root, scope)?;
+        let destination = prepare_snapshot_destination(&root, &external_roots, destination)?;
         let manifest = Self::scan_stable(&root, max_rescans)?;
-        if !manifest.untracked_directory_links.is_empty() {
-            bail!(
-                "cannot freeze inputs with untracked directory links: {:?}",
-                manifest.untracked_directory_links
-            );
-        }
+        reject_untracked_links("workspace", &manifest)?;
+        let external_manifests = external_roots
+            .iter()
+            .map(|external| {
+                let manifest = Self::scan_stable(&external.source_root, max_rescans)?;
+                reject_untracked_links("external Cargo package", &manifest)?;
+                Ok(manifest)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         fs::create_dir(&destination)?;
         let copy_result = (|| -> Result<()> {
-            for relative in manifest.sources.keys().chain(manifest.assets.keys()) {
-                copy_input_file(&root, &destination, relative)?;
-            }
+            copy_manifest_files(&root, &destination, &manifest)?;
             let copied = Self::scan(&destination)?;
             if copied != manifest {
-                bail!("frozen input copy does not match its manifest");
+                bail!("frozen workspace copy does not match its manifest");
             }
+
+            for (external, manifest) in external_roots.iter().zip(&external_manifests) {
+                let target = destination.join(&external.snapshot_root);
+                fs::create_dir_all(&target)?;
+                copy_manifest_files(&external.source_root, &target, manifest)?;
+                let copied = Self::scan(&target)?;
+                if copied != *manifest {
+                    bail!(
+                        "frozen external package copy does not match its manifest: {}",
+                        external.source_root.display()
+                    );
+                }
+            }
+
             let current = Self::scan_stable(&root, max_rescans)?;
             if current != manifest {
                 bail!("source inputs changed while freezing the snapshot");
+            }
+            for (external, expected) in external_roots.iter().zip(&external_manifests) {
+                let current = Self::scan_stable(&external.source_root, max_rescans)?;
+                if current != *expected {
+                    bail!(
+                        "external Cargo package changed while freezing the snapshot: {}",
+                        external.source_root.display()
+                    );
+                }
+            }
+
+            let relocations = external_roots
+                .iter()
+                .map(|external| ResolvedPathRelocation {
+                    source_root: external.source_root.clone(),
+                    snapshot_root: destination.join(&external.snapshot_root),
+                })
+                .collect::<Vec<_>>();
+            rewrite_cargo_manifests(&root, &destination, &manifest, &relocations)?;
+            for (external, manifest) in external_roots.iter().zip(&external_manifests) {
+                rewrite_cargo_manifests(
+                    &external.source_root,
+                    &destination.join(&external.snapshot_root),
+                    manifest,
+                    &relocations,
+                )?;
             }
             Ok(())
         })();
@@ -183,9 +250,29 @@ impl Inputs {
             let _ = fs::remove_dir_all(&destination);
             return Err(error);
         }
+
+        let external_inputs = external_roots
+            .iter()
+            .zip(external_manifests)
+            .map(|(external, manifest)| FrozenExternalInput {
+                source_root: external.source_root.to_string_lossy().into_owned(),
+                snapshot_root: external.snapshot_root.to_string_lossy().into_owned(),
+                manifest,
+            })
+            .collect::<Vec<_>>();
+        let path_relocations = external_inputs
+            .iter()
+            .map(|external| PathRelocation {
+                source_root: external.source_root.clone(),
+                snapshot_root: external.snapshot_root.clone(),
+            })
+            .collect::<Vec<_>>();
+        let input_hash = frozen_input_digest(&manifest, &external_inputs, &path_relocations)?;
         Ok(FrozenInputs {
-            input_hash: manifest.digest(),
             manifest,
+            external_inputs,
+            path_relocations,
+            input_hash,
             snapshot_path: destination.to_string_lossy().into_owned(),
         })
     }
@@ -273,6 +360,316 @@ impl Inputs {
             Sha256::digest(serde_json::to_vec(self).expect("serializable inputs"))
         )
     }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedExternalRoot {
+    source_root: PathBuf,
+    snapshot_root: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedPathRelocation {
+    source_root: PathBuf,
+    snapshot_root: PathBuf,
+}
+
+fn resolve_external_roots(
+    workspace_root: &Path,
+    scope: &CargoInputScope,
+) -> Result<Vec<ResolvedExternalRoot>> {
+    let mut roots = Vec::with_capacity(scope.external_path_dependencies.len());
+    for (index, dependency) in scope.external_path_dependencies.iter().enumerate() {
+        let raw_root = Path::new(&dependency.root);
+        let raw_root = if raw_root.is_absolute() {
+            raw_root.to_owned()
+        } else {
+            workspace_root.join(raw_root)
+        };
+        let metadata = fs::symlink_metadata(&raw_root).with_context(|| {
+            format!(
+                "reading external Cargo package root: {}",
+                raw_root.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!(
+                "external Cargo package root must be a non-symlink directory: {}",
+                raw_root.display()
+            );
+        }
+        let source_root = fs::canonicalize(&raw_root).with_context(|| {
+            format!(
+                "resolving external Cargo package root: {}",
+                raw_root.display()
+            )
+        })?;
+        if source_root == workspace_root || source_root.starts_with(workspace_root) {
+            bail!(
+                "external Cargo package root is inside the workspace: {}",
+                source_root.display()
+            );
+        }
+        if workspace_root.starts_with(&source_root) {
+            bail!(
+                "external Cargo package root contains the workspace: {}",
+                source_root.display()
+            );
+        }
+        if roots.iter().any(|existing: &ResolvedExternalRoot| {
+            source_root.starts_with(&existing.source_root)
+                || existing.source_root.starts_with(&source_root)
+        }) {
+            bail!(
+                "external Cargo package roots overlap: {}",
+                source_root.display()
+            );
+        }
+        roots.push(ResolvedExternalRoot {
+            source_root,
+            snapshot_root: PathBuf::from("external").join(format!("{index:04}")),
+        });
+    }
+    Ok(roots)
+}
+
+fn prepare_snapshot_destination(
+    workspace_root: &Path,
+    external_roots: &[ResolvedExternalRoot],
+    destination: &Path,
+) -> Result<PathBuf> {
+    let destination = if destination.is_absolute() {
+        destination.to_owned()
+    } else {
+        std::env::current_dir()?.join(destination)
+    };
+    if destination.exists() {
+        bail!(
+            "snapshot destination already exists: {}",
+            destination.display()
+        );
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("snapshot destination has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let parent = fs::canonicalize(parent)?;
+    let destination = parent.join(
+        destination
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("snapshot destination has no file name"))?,
+    );
+    if destination.starts_with(workspace_root)
+        || external_roots
+            .iter()
+            .any(|external| destination.starts_with(&external.source_root))
+    {
+        bail!("snapshot destination must be outside all input roots");
+    }
+    Ok(destination)
+}
+
+fn reject_untracked_links(label: &str, manifest: &Inputs) -> Result<()> {
+    if manifest.untracked_directory_links.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "cannot freeze {label} with untracked directory links: {:?}",
+        manifest.untracked_directory_links
+    )
+}
+
+fn copy_manifest_files(root: &Path, destination: &Path, manifest: &Inputs) -> Result<()> {
+    for relative in manifest.sources.keys().chain(manifest.assets.keys()) {
+        copy_input_file(root, destination, relative)?;
+    }
+    Ok(())
+}
+
+fn rewrite_cargo_manifests(
+    source_root: &Path,
+    destination_root: &Path,
+    manifest: &Inputs,
+    relocations: &[ResolvedPathRelocation],
+) -> Result<()> {
+    for relative in manifest.sources.keys().chain(manifest.assets.keys()) {
+        if Path::new(relative).file_name() != Some(std::ffi::OsStr::new("Cargo.toml")) {
+            continue;
+        }
+        let source_manifest = source_root.join(relative);
+        let destination_manifest = destination_root.join(relative);
+        rewrite_cargo_manifest(&source_manifest, &destination_manifest, relocations)?;
+    }
+    Ok(())
+}
+
+fn rewrite_cargo_manifest(
+    source_manifest: &Path,
+    destination_manifest: &Path,
+    relocations: &[ResolvedPathRelocation],
+) -> Result<()> {
+    let source = fs::read_to_string(source_manifest)
+        .with_context(|| format!("reading Cargo manifest: {}", source_manifest.display()))?;
+    let mut value: toml::Value = toml::from_str(&source)
+        .with_context(|| format!("parsing Cargo manifest: {}", source_manifest.display()))?;
+    if !rewrite_toml_paths(
+        &mut value,
+        source_manifest
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Cargo manifest has no parent"))?,
+        destination_manifest
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("snapshot Cargo manifest has no parent"))?,
+        relocations,
+    )? {
+        return Ok(());
+    }
+    let rewritten = toml::to_string(&value).context("serializing relocated Cargo manifest")?;
+    fs::write(destination_manifest, rewritten).with_context(|| {
+        format!(
+            "writing relocated Cargo manifest: {}",
+            destination_manifest.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn rewrite_toml_paths(
+    value: &mut toml::Value,
+    source_parent: &Path,
+    destination_parent: &Path,
+    relocations: &[ResolvedPathRelocation],
+) -> Result<bool> {
+    match value {
+        toml::Value::Array(values) => {
+            let mut changed = false;
+            for value in values {
+                changed |=
+                    rewrite_toml_paths(value, source_parent, destination_parent, relocations)?;
+            }
+            Ok(changed)
+        }
+        toml::Value::Table(table) => {
+            let original_path = table
+                .get("path")
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned);
+            let mut changed = false;
+            if let Some(original_path) = original_path
+                && let Some(rewritten) = relocated_path(
+                    &original_path,
+                    source_parent,
+                    destination_parent,
+                    relocations,
+                )?
+                && let Some(toml::Value::String(path)) = table.get_mut("path")
+            {
+                *path = rewritten;
+                changed = true;
+            }
+            for value in table.iter_mut().map(|(_, value)| value) {
+                changed |=
+                    rewrite_toml_paths(value, source_parent, destination_parent, relocations)?;
+            }
+            Ok(changed)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn relocated_path(
+    original: &str,
+    source_parent: &Path,
+    destination_parent: &Path,
+    relocations: &[ResolvedPathRelocation],
+) -> Result<Option<String>> {
+    let original_path = Path::new(original);
+    let candidate = if original_path.is_absolute() {
+        original_path.to_owned()
+    } else {
+        source_parent.join(original_path)
+    };
+    let candidate = match fs::canonicalize(candidate) {
+        Ok(candidate) => candidate,
+        Err(_) => return Ok(None),
+    };
+    let Some(relocation) = relocations
+        .iter()
+        .find(|relocation| candidate.starts_with(&relocation.source_root))
+    else {
+        return Ok(None);
+    };
+    let suffix = candidate.strip_prefix(&relocation.source_root)?;
+    let target = relocation.snapshot_root.join(suffix);
+    Ok(Some(relative_path(destination_parent, &target)?))
+}
+
+fn relative_path(from: &Path, to: &Path) -> Result<String> {
+    let from_components: Vec<_> = from.components().collect();
+    let to_components: Vec<_> = to.components().collect();
+    let common = from_components
+        .iter()
+        .zip(&to_components)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common == 0 {
+        bail!(
+            "cannot relocate Cargo path across filesystem roots: {} -> {}",
+            from.display(),
+            to.display()
+        );
+    }
+    let mut result = PathBuf::new();
+    for component in &from_components[common..] {
+        if matches!(component, std::path::Component::Normal(_)) {
+            result.push("..");
+        }
+    }
+    for component in &to_components[common..] {
+        if let std::path::Component::Normal(value) = component {
+            result.push(value);
+        }
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
+    Ok(result.to_string_lossy().replace('\\', "/"))
+}
+
+fn frozen_input_digest(
+    manifest: &Inputs,
+    external_inputs: &[FrozenExternalInput],
+    path_relocations: &[PathRelocation],
+) -> Result<String> {
+    #[derive(Serialize)]
+    struct ExternalDigest<'a> {
+        snapshot_root: &'a str,
+        manifest: &'a Inputs,
+    }
+    #[derive(Serialize)]
+    struct DigestInput<'a> {
+        manifest: &'a Inputs,
+        external_inputs: Vec<ExternalDigest<'a>>,
+        snapshot_roots: Vec<&'a str>,
+    }
+    let digest_input = DigestInput {
+        manifest,
+        external_inputs: external_inputs
+            .iter()
+            .map(|external| ExternalDigest {
+                snapshot_root: &external.snapshot_root,
+                manifest: &external.manifest,
+            })
+            .collect(),
+        snapshot_roots: path_relocations
+            .iter()
+            .map(|relocation| relocation.snapshot_root.as_str())
+            .collect(),
+    };
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&digest_input).context("serializing frozen inputs")?)
+    ))
 }
 
 impl CargoInputScope {
@@ -677,7 +1074,15 @@ mod tests {
         let frozen = Inputs::freeze_to(root.path(), &destination, 1).unwrap();
 
         assert_eq!(frozen.manifest, Inputs::scan(&destination).unwrap());
-        assert_eq!(frozen.input_hash, frozen.manifest.digest());
+        assert_eq!(
+            frozen.input_hash,
+            frozen_input_digest(
+                &frozen.manifest,
+                &frozen.external_inputs,
+                &frozen.path_relocations
+            )
+            .unwrap()
+        );
         assert_eq!(
             fs::read_to_string(destination.join("main.rs")).unwrap(),
             "fn main() {}\n"
@@ -690,6 +1095,66 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("main.rs"), "main\n").unwrap();
         let error = Inputs::freeze_to(root.path(), &root.path().join("snapshot"), 1).unwrap_err();
-        assert!(error.to_string().contains("outside the input root"));
+        assert!(error.to_string().contains("outside all input roots"));
+    }
+
+    #[test]
+    fn freeze_to_copies_external_package_and_relocates_cargo_path() {
+        let container = tempfile::tempdir().unwrap();
+        let workspace = container.path().join("workspace");
+        let external = container.path().join("external-lib");
+        let destination_parent = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.join("app/src")).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::write(
+            workspace.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nexternal-lib = { path = \"../../external-lib\" }\n",
+        )
+        .unwrap();
+        fs::write(workspace.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            external.join("Cargo.toml"),
+            "[package]\nname = \"external-lib\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(external.join("lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+
+        let external = fs::canonicalize(external).unwrap();
+        let scope = CargoInputScope {
+            workspace_root: fs::canonicalize(&workspace)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            external_path_dependencies: vec![ExternalPathDependency {
+                root: external.to_string_lossy().into_owned(),
+                manifest_path: external.join("Cargo.toml").to_string_lossy().into_owned(),
+                package_ids: vec!["external-lib".into()],
+            }],
+        };
+        let destination = destination_parent.path().join("snapshot");
+
+        let frozen =
+            Inputs::freeze_to_with_cargo_scope(&workspace, &destination, &scope, 1).unwrap();
+
+        assert_eq!(frozen.external_inputs.len(), 1);
+        assert_eq!(frozen.path_relocations[0].snapshot_root, "external/0000");
+        assert!(destination.join("external/0000/lib.rs").is_file());
+        let app_manifest: toml::Value =
+            toml::from_str(&fs::read_to_string(destination.join("app/Cargo.toml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            app_manifest["dependencies"]["external-lib"]["path"],
+            toml::Value::String("../external/0000".into())
+        );
+        assert!(
+            fs::read_to_string(workspace.join("app/Cargo.toml"))
+                .unwrap()
+                .contains("../../external-lib")
+        );
     }
 }
