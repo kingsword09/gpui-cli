@@ -380,7 +380,8 @@ sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化�
 [M04 input stability](../experiments/M04-input-stability-2026-09-27.md)。外部 root 尚未
 并入 FrozenInputs，path dependency relocation 和隔离构建目录仍未完成；
 `src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要的独立证据切片，但尚未接入
-构建缓存或执行器。
+构建缓存或执行器。`src/runner/output_layout.rs` 已补齐按 `(platform, BuildKey)` 隔离
+Cargo/native/Android JNI/iOS DerivedData 路径的独立证据切片，但尚未接入现有构建命令。
 
 ### S04 · 断言和 gpui check 执行器
 
