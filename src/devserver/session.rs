@@ -549,7 +549,9 @@ impl Session {
                         "node_ref".into(),
                         "enabled".into(),
                         "bounds".into(),
+                        "clip_bounds".into(),
                         "scrollable".into(),
+                        "obscured".into(),
                     ],
                     limit: 2,
                     ..Default::default()
