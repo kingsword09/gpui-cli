@@ -421,7 +421,10 @@ Rust 编译；记录见
 后续 iOS simulator 切片在相同锁与完整 app-bundle manifest 校验下跳过 Cargo/Xcode 构建；
 真机因签名输入尚未纳入 BuildKey 而继续重建，记录见
 [T06 iOS simulator manifest cache hit](../experiments/T06-ios-simulator-cache-hit-2026-09-28.md)。
-Android cache hit、真实在途任务共享和缓存清理仍未接入。
+Android default-debug 切片在 BuildKey 纳入 debug keystore 指纹并完整验证 JNI/APK 输出后
+允许命中；release/custom signing 仍 bypass，记录见
+[T06 Android debug manifest cache hit](../experiments/T06-android-debug-cache-hit-2026-09-28.md)。
+真实在途任务共享和缓存清理仍未接入。
 
 ### S04 · 断言和 gpui check 执行器
 

@@ -65,6 +65,7 @@ pub struct PathRelocation {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct NativeInputs {
     pub files: BTreeMap<String, String>,
+    pub external_hashes: BTreeMap<String, String>,
     pub untracked_directory_links: Vec<String>,
     pub excluded_sensitive_files: Vec<String>,
 }

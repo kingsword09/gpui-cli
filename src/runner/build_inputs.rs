@@ -71,6 +71,26 @@ pub struct AndroidBuildPlan {
     pub key: BuildKey,
     pub layout: BuildOutputLayout,
     pub snapshot: FrozenBuildRoot,
+    pub cache_hit_disabled_reason: Option<String>,
+    pub debug_keystore_identity: Option<AndroidDebugKeystoreIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AndroidDebugKeystoreIdentity {
+    path: PathBuf,
+    sha256: String,
+}
+
+impl AndroidDebugKeystoreIdentity {
+    /// Refuses to publish or reuse outputs if the key changed during planning/build.
+    pub fn verify_unchanged(&self) -> Result<()> {
+        let current = android_debug_keystore_hash_at(&self.path)?
+            .with_context(|| "Android debug keystore disappeared or became non-regular")?;
+        if current != self.sha256 {
+            bail!("Android debug keystore changed during the build");
+        }
+        Ok(())
+    }
 }
 
 /// Collects the current project's explicit desktop build dimensions and
@@ -184,6 +204,8 @@ pub fn android_output_layout(
 }
 
 pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<BuildKey> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving Android build root: {}", root.display()))?;
     let abis = normalize_android_abis(abis)?;
     let target_triple = abis
         .iter()
@@ -191,9 +213,14 @@ pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<
         .collect::<Result<Vec<_>>>()?
         .join("+");
     let abi_set = abis.join("+");
+    let manifest = Inputs::scan_stable(&root, 2)?;
+    let mut native = NativeInputs::scan(&root)?;
+    let _ = android_cache_signing_policy(&root, release, &mut native)?;
     let (_, toolchain_fingerprint) = rustc_identity()?;
-    build_key_for_target(
-        root,
+    build_key_from_inputs(
+        &manifest,
+        manifest.digest(),
+        &native,
         target_triple,
         release,
         toolchain_fingerprint,
@@ -220,7 +247,9 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     let abi_set = abis.join("+");
     let snapshot = FrozenBuildRoot::create(&root)?;
     let (_, toolchain_fingerprint) = rustc_identity()?;
-    let native = NativeInputs::scan(&snapshot.root)?;
+    let mut native = NativeInputs::scan(&snapshot.root)?;
+    let (cache_hit_disabled_reason, debug_keystore_identity) =
+        android_cache_signing_policy(&snapshot.root, release, &mut native)?;
     let key = build_key_from_inputs(
         &snapshot.manifest,
         snapshot.input_hash.clone(),
@@ -237,7 +266,132 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         key,
         layout,
         snapshot,
+        cache_hit_disabled_reason,
+        debug_keystore_identity,
     })
+}
+
+fn android_cache_signing_policy(
+    root: &Path,
+    release: bool,
+    native: &mut NativeInputs,
+) -> Result<(Option<String>, Option<AndroidDebugKeystoreIdentity>)> {
+    let has_custom_signing = !release
+        && native.excluded_sensitive_files.is_empty()
+        && has_custom_android_signing_config(root, native)?;
+    let identity = if !release && native.excluded_sensitive_files.is_empty() && !has_custom_signing
+    {
+        default_android_debug_keystore_identity()?
+    } else {
+        None
+    };
+    Ok(android_cache_hit_eligibility(
+        native,
+        release,
+        has_custom_signing,
+        identity,
+    ))
+}
+
+fn android_cache_hit_eligibility(
+    native: &mut NativeInputs,
+    release: bool,
+    has_custom_signing: bool,
+    identity: Option<AndroidDebugKeystoreIdentity>,
+) -> (Option<String>, Option<AndroidDebugKeystoreIdentity>) {
+    if release {
+        return (
+            Some("release APK cache reuse is disabled until signing inputs are modeled".into()),
+            None,
+        );
+    }
+    if !native.excluded_sensitive_files.is_empty() {
+        return (
+            Some("local sensitive Android configuration disables cache reuse".into()),
+            None,
+        );
+    }
+    if has_custom_signing {
+        return (
+            Some("custom Android signing configuration disables cache reuse".into()),
+            None,
+        );
+    }
+
+    match identity {
+        Some(identity) => {
+            native.external_hashes.insert(
+                "android.default-debug-keystore".into(),
+                identity.sha256.clone(),
+            );
+            (None, Some(identity))
+        }
+        None => {
+            native.external_hashes.insert(
+                "android.default-debug-keystore".into(),
+                "missing-or-non-regular".into(),
+            );
+            (
+                Some("default Android debug keystore is missing or non-regular".into()),
+                None,
+            )
+        }
+    }
+}
+
+fn has_custom_android_signing_config(root: &Path, native: &NativeInputs) -> Result<bool> {
+    const SIGNING_MARKERS: &[&str] = &[
+        "signingConfig",
+        "signingConfigs",
+        "storeFile",
+        "storePassword",
+        "keyAlias",
+        "keyPassword",
+    ];
+
+    for relative in native.files.keys().filter(|path| {
+        path.starts_with("mobile/android/gradle/")
+            && (path.ends_with(".gradle") || path.ends_with(".gradle.kts"))
+    }) {
+        let script = fs::read_to_string(root.join(relative))
+            .with_context(|| format!("reading Android Gradle script {}", relative))?;
+        if SIGNING_MARKERS.iter().any(|marker| script.contains(marker)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn default_android_debug_keystore_identity() -> Result<Option<AndroidDebugKeystoreIdentity>> {
+    let home = if cfg!(windows) {
+        env::var_os("USERPROFILE").or_else(|| env::var_os("HOME"))
+    } else {
+        env::var_os("HOME")
+    };
+    let Some(home) = home else {
+        return Ok(None);
+    };
+    android_debug_keystore_identity_in(&PathBuf::from(home))
+}
+
+fn android_debug_keystore_identity_in(home: &Path) -> Result<Option<AndroidDebugKeystoreIdentity>> {
+    let path = home.join(".android/debug.keystore");
+    let Some(sha256) = android_debug_keystore_hash_at(&path)? else {
+        return Ok(None);
+    };
+    Ok(Some(AndroidDebugKeystoreIdentity { path, sha256 }))
+}
+
+fn android_debug_keystore_hash_at(path: &Path) -> Result<Option<String>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Ok(None),
+        Ok(_) => {
+            let bytes = fs::read(path).context("reading Android debug keystore")?;
+            Ok(Some(format!("{:x}", Sha256::digest(bytes))))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("inspecting Android debug keystore"),
+    }
 }
 
 fn normalize_android_abis(abis: &[String]) -> Result<Vec<String>> {
@@ -518,6 +672,114 @@ mod tests {
                     .join("android")
             )
         );
+    }
+
+    #[test]
+    fn android_debug_keystore_is_hashed_and_revalidated() {
+        let home = tempfile::tempdir().unwrap();
+        let android_dir = home.path().join(".android");
+        fs::create_dir_all(&android_dir).unwrap();
+        let keystore = android_dir.join("debug.keystore");
+        fs::write(&keystore, b"debug signing key one").unwrap();
+
+        let first = android_debug_keystore_identity_in(home.path())
+            .unwrap()
+            .unwrap();
+        let mut native = NativeInputs::default();
+        let (disabled_reason, identity) =
+            android_cache_hit_eligibility(&mut native, false, false, Some(first.clone()));
+
+        assert!(disabled_reason.is_none());
+        assert_eq!(identity, Some(first.clone()));
+        assert_eq!(
+            native.external_hashes.get("android.default-debug-keystore"),
+            Some(&first.sha256)
+        );
+        let first_native_digest = native.digest();
+        assert!(first.verify_unchanged().is_ok());
+
+        fs::write(&keystore, b"debug signing key two").unwrap();
+        assert!(first.verify_unchanged().is_err());
+        let second = android_debug_keystore_identity_in(home.path())
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.sha256, second.sha256);
+        let mut second_native = NativeInputs::default();
+        let (second_disabled_reason, _) =
+            android_cache_hit_eligibility(&mut second_native, false, false, Some(second));
+        assert!(second_disabled_reason.is_none());
+        assert_ne!(first_native_digest, second_native.digest());
+    }
+
+    #[test]
+    fn android_cache_policy_bypasses_release_and_sensitive_signing_inputs() {
+        let mut release_native = NativeInputs::default();
+        let (release_reason, release_identity) =
+            android_cache_hit_eligibility(&mut release_native, true, false, None);
+        assert!(
+            release_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("release APK"))
+        );
+        assert!(release_identity.is_none());
+        assert!(release_native.external_hashes.is_empty());
+
+        let mut sensitive_native = NativeInputs::default();
+        sensitive_native
+            .excluded_sensitive_files
+            .push("mobile/android/gradle/keystore.properties".into());
+        let (sensitive_reason, sensitive_identity) =
+            android_cache_hit_eligibility(&mut sensitive_native, false, false, None);
+        assert!(
+            sensitive_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("sensitive Android configuration"))
+        );
+        assert!(sensitive_identity.is_none());
+        assert!(sensitive_native.external_hashes.is_empty());
+
+        let mut custom_native = NativeInputs::default();
+        let (custom_reason, custom_identity) =
+            android_cache_hit_eligibility(&mut custom_native, false, true, None);
+        assert!(
+            custom_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("custom Android signing"))
+        );
+        assert!(custom_identity.is_none());
+        assert!(custom_native.external_hashes.is_empty());
+
+        let mut missing_keystore_native = NativeInputs::default();
+        let (missing_reason, missing_identity) =
+            android_cache_hit_eligibility(&mut missing_keystore_native, false, false, None);
+        assert!(
+            missing_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("debug keystore is missing"))
+        );
+        assert!(missing_identity.is_none());
+        assert_eq!(
+            missing_keystore_native
+                .external_hashes
+                .get("android.default-debug-keystore")
+                .map(String::as_str),
+            Some("missing-or-non-regular")
+        );
+    }
+
+    #[test]
+    fn custom_android_gradle_signing_config_is_detected() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            "android { signingConfigs { create(\"release\") {} } }\n",
+        )
+        .unwrap();
+
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(has_custom_android_signing_config(root.path(), &native).unwrap());
     }
 
     #[test]

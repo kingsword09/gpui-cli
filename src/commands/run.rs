@@ -804,21 +804,120 @@ fn publish_android_build_manifest(
     Ok(manifest)
 }
 
-/// Compiles the Rust `cdylib` into `jniLibs`, then assembles the APK.
+enum AndroidBuildCacheLookup {
+    Hit {
+        manifest: BuildArtifactManifest,
+        apk: PathBuf,
+    },
+    Miss(String),
+}
+
+fn lookup_verified_android_apk(
+    project: &Project,
+    layout: &BuildOutputLayout,
+    key: &crate::runner::build_key::BuildKey,
+    release: bool,
+) -> AndroidBuildCacheLookup {
+    let Some(jni_libs_dir) = layout.android_jni_dir.as_deref() else {
+        return AndroidBuildCacheLookup::Miss(
+            "Android output layout did not provide a JNI staging path".into(),
+        );
+    };
+    let Some(gradle_build_dir) = layout.android_gradle_build_dir.as_deref() else {
+        return AndroidBuildCacheLookup::Miss(
+            "Android output layout did not provide a Gradle build path".into(),
+        );
+    };
+
+    match lookup_verified(layout, key) {
+        BuildCacheLookup::Miss(reason) => AndroidBuildCacheLookup::Miss(reason),
+        BuildCacheLookup::Hit(manifest) => {
+            let apk = match apk_path_at(project, release, Some(gradle_build_dir)) {
+                Ok(apk) => apk,
+                Err(error) => {
+                    return AndroidBuildCacheLookup::Miss(format!(
+                        "verified Android output has invalid APK metadata: {error:#}"
+                    ));
+                }
+            };
+            let Some(apk_output_dir) = apk.parent() else {
+                return AndroidBuildCacheLookup::Miss(
+                    "verified Android APK has no output directory".into(),
+                );
+            };
+            let Some(jni_root) = jni_libs_dir
+                .strip_prefix(&layout.root)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+            else {
+                return AndroidBuildCacheLookup::Miss(
+                    "Android JNI staging path is outside the BuildKey output root".into(),
+                );
+            };
+            let Some(apk_root) = apk_output_dir
+                .strip_prefix(&layout.root)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+            else {
+                return AndroidBuildCacheLookup::Miss(
+                    "Android APK output path is outside the BuildKey output root".into(),
+                );
+            };
+            let mut expected_roots = vec![jni_root, apk_root];
+            expected_roots.sort();
+            if manifest.roots != expected_roots {
+                return AndroidBuildCacheLookup::Miss(
+                    "verified Android manifest does not declare the expected JNI and APK outputs"
+                        .into(),
+                );
+            }
+            AndroidBuildCacheLookup::Hit { manifest, apk }
+        }
+    }
+}
+
+/// Builds Android outputs or reuses a verified default-debug APK and JNI tree.
 pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     if !project.android_gradle_dir().exists() {
         bail!("This project has no Android target. Add one with `gpui init --add`.");
     }
+    let abis = android_abis()?;
+    let plan = android_build_plan(&project.root, release, &abis)?;
+    let _output_lock = BuildOutputLock::acquire(&plan.layout)?;
+    let layout = &plan.layout;
+
+    let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
+        AndroidBuildCacheLookup::Miss(reason.clone())
+    } else {
+        if let Some(identity) = &plan.debug_keystore_identity {
+            identity.verify_unchanged()?;
+        }
+        lookup_verified_android_apk(project, layout, &plan.key, release)
+    };
+    match cache_lookup {
+        AndroidBuildCacheLookup::Hit { manifest, apk } => {
+            if let Some(identity) = &plan.debug_keystore_identity {
+                identity.verify_unchanged()?;
+            }
+            println!(
+                "  {} Android BuildKey cache hit: {} verified artifact(s)",
+                "✓".green(),
+                manifest.files.len()
+            );
+            return Ok(apk);
+        }
+        AndroidBuildCacheLookup::Miss(reason) => {
+            println!("  {} Android cache miss: {reason}", "→".blue());
+        }
+    }
+
     ensure_tool(
         "cargo-ndk",
         "Install it with `cargo install cargo-ndk`, then set ANDROID_NDK_HOME.",
     )?;
-    let abis = android_abis()?;
     for abi in &abis {
         ensure_rust_target(android_rust_target(abi)?)?;
     }
-    let plan = android_build_plan(&project.root, release, &abis)?;
-    let layout = &plan.layout;
     let snapshot_root = &plan.snapshot.root;
     let jni_libs_dir = layout
         .android_jni_dir
@@ -860,6 +959,9 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     )?;
 
     let apk = apk_path_at(project, release, Some(gradle_build_dir))?;
+    if let Some(identity) = &plan.debug_keystore_identity {
+        identity.verify_unchanged()?;
+    }
     publish_android_build_manifest(layout, &apk)?;
     println!(
         "  {} artifact manifest: {}",
@@ -1129,6 +1231,7 @@ mod tests {
 
         let apk = apk_output_dir.join("app-debug.apk");
         let manifest = publish_android_build_manifest(&layout, &apk).unwrap();
+        let project = project(base.path());
         let loaded = BuildArtifactManifest::read_verified(
             &layout.artifact_manifest_path(),
             &layout.root,
@@ -1151,8 +1254,13 @@ mod tests {
                 .iter()
                 .any(|file| file.path.ends_with("libprobe_app.so"))
         );
+        assert!(matches!(
+            lookup_verified_android_apk(&project, &layout, &key, false),
+            AndroidBuildCacheLookup::Hit { .. }
+        ));
 
-        fs::write(apk_output_dir.join("unexpected.apk"), b"extra output").unwrap();
+        let unexpected = apk_output_dir.join("unexpected.apk");
+        fs::write(&unexpected, b"extra output").unwrap();
         assert!(
             BuildArtifactManifest::read_verified(
                 &layout.artifact_manifest_path(),
@@ -1162,6 +1270,29 @@ mod tests {
             )
             .is_err()
         );
+        assert!(matches!(
+            lookup_verified_android_apk(&project, &layout, &key, false),
+            AndroidBuildCacheLookup::Miss(_)
+        ));
+
+        fs::remove_file(unexpected).unwrap();
+        let decoy_output_dir = gradle_build_dir.join("outputs/apk/other");
+        fs::create_dir_all(&decoy_output_dir).unwrap();
+        fs::write(decoy_output_dir.join("decoy.apk"), b"not the expected apk").unwrap();
+        let jni_root = jni_libs_dir.strip_prefix(&layout.root).unwrap().to_owned();
+        let decoy_root = decoy_output_dir
+            .strip_prefix(&layout.root)
+            .unwrap()
+            .to_owned();
+        BuildArtifactManifest::capture(&layout, &[jni_root, decoy_root])
+            .unwrap()
+            .write_atomic(&layout.artifact_manifest_path())
+            .unwrap();
+        assert!(matches!(
+            lookup_verified_android_apk(&project, &layout, &key, false),
+            AndroidBuildCacheLookup::Miss(reason)
+                if reason.contains("expected JNI and APK outputs")
+        ));
     }
 
     #[test]
