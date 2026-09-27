@@ -30,8 +30,9 @@ target 放入按 `(platform, BuildKey)` 隔离的输出目录；不宣称移动�
 
 ## 未覆盖
 
-- desktop 命令当前仍从工作目录构建；稳定扫描用于形成 key，但尚未把
-  `FrozenInputs` 副本作为 Cargo 的工作根，也没有在构建期间锁定/重核验快照；
+- desktop 非 live 命令已由后续 [desktop frozen build root](M04-desktop-frozen-build-root-2026-09-27.md)
+  切片改为从临时 `FrozenInputs` 副本构建；本文件仍只记录最初的 BuildKey/输出接入，
+  不重复声明快照编排已完成；
 - Android JNI、iOS DerivedData、移动 ABI/features、snapshot build orchestration 和
   同 key 在途任务合并尚未接入；
 - `build.rs`、Gradle、Xcode 可能读取的未声明文件仍不在自动发现范围内，不能据此宣称

@@ -7,8 +7,9 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::TempDir;
 
 const RELEVANT_ENVIRONMENT: &[&str] = &[
     "ANDROID_HOME",
@@ -26,6 +27,40 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "JAVA_HOME",
 ];
 
+/// A stable Cargo workspace copy whose lifetime is bound to a build command.
+/// The temporary parent is intentionally kept alive so Cargo cannot fall back
+/// to the mutable source workspace while the command is running.
+pub struct FrozenBuildRoot {
+    _temp_dir: TempDir,
+    pub root: PathBuf,
+    pub manifest: Inputs,
+    pub input_hash: String,
+}
+
+impl FrozenBuildRoot {
+    pub fn create(root: &Path) -> Result<Self> {
+        let root = fs::canonicalize(root)
+            .with_context(|| format!("resolving build root for freeze: {}", root.display()))?;
+        let scope = Inputs::cargo_input_scope(&root)?;
+        let temp_dir = tempfile::tempdir().context("creating frozen build root")?;
+        let destination = temp_dir.path().join("workspace");
+        let frozen = Inputs::freeze_to_with_cargo_scope(&root, &destination, &scope, 2)?;
+        let snapshot_path = PathBuf::from(&frozen.snapshot_path);
+        Ok(Self {
+            _temp_dir: temp_dir,
+            root: snapshot_path,
+            manifest: frozen.manifest,
+            input_hash: frozen.input_hash,
+        })
+    }
+}
+
+pub struct DesktopBuildPlan {
+    pub key: BuildKey,
+    pub layout: BuildOutputLayout,
+    pub snapshot: FrozenBuildRoot,
+}
+
 /// Collects the current project's explicit desktop build dimensions and
 /// returns the key-isolated output layout used by `gpui build/run desktop`.
 pub fn desktop_output_layout(root: &Path, release: bool) -> Result<BuildOutputLayout> {
@@ -39,6 +74,35 @@ pub fn desktop_build_key(root: &Path, release: bool) -> Result<BuildKey> {
     let (host, toolchain_fingerprint) = rustc_identity()?;
     let target_triple = env::var("CARGO_BUILD_TARGET").unwrap_or(host);
     build_key_for_target(root, target_triple, release, toolchain_fingerprint, None)
+}
+
+/// Freezes the desktop workspace before deriving its BuildKey and output
+/// layout. External Cargo path packages therefore participate in the key, and
+/// the returned Cargo root cannot be changed by later source edits.
+pub fn desktop_build_plan(root: &Path, release: bool) -> Result<DesktopBuildPlan> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving desktop build root: {}", root.display()))?;
+    let snapshot = FrozenBuildRoot::create(&root)?;
+    let (host, toolchain_fingerprint) = rustc_identity()?;
+    let target_triple = env::var("CARGO_BUILD_TARGET").unwrap_or(host);
+    let native = NativeInputs::scan(&snapshot.root)?;
+    let key = build_key_from_inputs(
+        &snapshot.manifest,
+        snapshot.input_hash.clone(),
+        &native,
+        target_triple,
+        release,
+        toolchain_fingerprint,
+        None,
+    )?;
+    let layout =
+        BuildOutputLayout::for_key(&root.join(".gpui/builds"), &key, BuildPlatform::Desktop)?;
+    layout.prepare()?;
+    Ok(DesktopBuildPlan {
+        key,
+        layout,
+        snapshot,
+    })
 }
 
 /// Collects the BuildKey and isolated output layout used by a non-live iOS
@@ -116,6 +180,26 @@ fn build_key_for_target(
 ) -> Result<BuildKey> {
     let manifest = Inputs::scan_stable(root, 2)?;
     let native = NativeInputs::scan(root)?;
+    build_key_from_inputs(
+        &manifest,
+        manifest.digest(),
+        &native,
+        target_triple,
+        release,
+        toolchain_fingerprint,
+        abi,
+    )
+}
+
+fn build_key_from_inputs(
+    manifest: &Inputs,
+    source_manifest_hash: String,
+    native: &NativeInputs,
+    target_triple: String,
+    release: bool,
+    toolchain_fingerprint: String,
+    abi: Option<String>,
+) -> Result<BuildKey> {
     let relevant_environment =
         hash_relevant_environment(RELEVANT_ENVIRONMENT.iter().map(|name| {
             (
@@ -124,7 +208,7 @@ fn build_key_for_target(
             )
         }))?;
     BuildKey::new(BuildKeyMaterial {
-        source_manifest_hash: manifest.digest(),
+        source_manifest_hash,
         cargo_lock_hash: manifest
             .sources
             .get("Cargo.lock")
@@ -259,5 +343,50 @@ mod tests {
                 .is_some_and(|path| path.ends_with("gradle-build"))
         );
         assert_eq!(first.key_hash.len(), 64);
+    }
+
+    #[test]
+    fn desktop_build_plan_uses_a_frozen_workspace_root_and_hash() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/src")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        let status = Command::new("cargo")
+            .current_dir(root.path())
+            .args(["generate-lockfile"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let plan = desktop_build_plan(root.path(), false).unwrap();
+
+        assert_ne!(plan.snapshot.root, fs::canonicalize(root.path()).unwrap());
+        assert!(plan.snapshot.root.join("Cargo.toml").is_file());
+        assert_eq!(
+            plan.key.material().source_manifest_hash,
+            plan.snapshot.input_hash
+        );
+        assert!(
+            plan.layout.cargo_target_dir.starts_with(
+                fs::canonicalize(root.path())
+                    .unwrap()
+                    .join(".gpui")
+                    .join("builds")
+                    .join("desktop")
+            )
+        );
     }
 }
