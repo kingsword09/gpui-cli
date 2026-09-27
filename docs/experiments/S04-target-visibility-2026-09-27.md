@@ -22,6 +22,8 @@ overlay、系统遮挡和人工输入污染仍未运行。
 
 ## 未覆盖
 
-尚未在真实 macOS GPUI 窗口创建透明阻挡层、测量系统窗口遮挡、注入人工输入或采集截图/树
-同步证据。`clip_bounds`/`obscured` 只是 provider 到 admission 的契约，不能替代原生
-hit-test 或屏幕 capture 证明。
+尚未在真实 macOS GPUI 窗口创建透明阻挡层、测量系统窗口遮挡或注入人工输入。真实
+macOS window capture 的独立证据见
+[S04 macOS window evidence](S04-macos-window-evidence-2026-09-27.md)；其中语义树和动作
+仍因 `a11y_inactive`/缺少 scene epoch 而明确不可用。`clip_bounds`/`obscured` 只是
+provider 到 admission 的契约，不能替代原生 hit-test 或屏幕 capture 证明。
