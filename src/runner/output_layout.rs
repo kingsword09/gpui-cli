@@ -53,31 +53,28 @@ impl BuildOutputLayout {
         let root = base.join(platform.label()).join(key.key_hash());
         let cargo_target_dir = root.join("cargo-target");
         let native_staging_dir = root.join("native-staging");
-        let android_jni_dir;
-        let ios_derived_data_dir;
-        match platform {
-            BuildPlatform::Desktop => {
-                android_jni_dir = None;
-                ios_derived_data_dir = None;
-            }
+        let (android_jni_dir, ios_derived_data_dir) = match platform {
+            BuildPlatform::Desktop => (None, None),
             BuildPlatform::Android => {
                 let abi = key.material().abi.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("Android output layout requires a BuildKey ABI")
                 })?;
                 validate_segment("ABI", abi)?;
-                android_jni_dir = Some(
-                    native_staging_dir
-                        .join("android")
-                        .join("jni-libs")
-                        .join(abi),
-                );
-                ios_derived_data_dir = None;
+                (
+                    Some(
+                        native_staging_dir
+                            .join("android")
+                            .join("jni-libs")
+                            .join(abi),
+                    ),
+                    None,
+                )
             }
-            BuildPlatform::Ios => {
-                android_jni_dir = None;
-                ios_derived_data_dir = Some(native_staging_dir.join("ios").join("derived-data"));
-            }
-        }
+            BuildPlatform::Ios => (
+                None,
+                Some(native_staging_dir.join("ios").join("derived-data")),
+            ),
+        };
 
         Ok(Self {
             platform,
