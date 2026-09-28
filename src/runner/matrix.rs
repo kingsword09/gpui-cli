@@ -1,9 +1,9 @@
 //! Deterministic local matrix scheduling and result aggregation.
 //!
-//! This module deliberately does not launch a platform runner yet. It owns the
-//! bounded plan, cell lifecycle, cancellation/deadline semantics and the rule
-//! that unavailable or uncertain required cells can never become a passing
-//! matrix by omission.
+//! This module owns the bounded plan, cell lifecycle, cancellation/deadline
+//! semantics and the rule that unavailable or uncertain required cells can
+//! never become a passing matrix by omission. Runner creation and platform
+//! side effects remain in the execution adapters.
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 pub const MAX_MATRIX_CELLS: usize = 1024;
 pub const MAX_MATRIX_PARALLEL: u16 = 64;
 pub const MAX_MATRIX_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+pub const MAX_MATRIX_RESOURCES_PER_CELL: usize = 16;
+pub const MAX_MATRIX_RESOURCE_ID_BYTES: usize = 128;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MatrixConfig {
@@ -29,6 +31,8 @@ pub struct MatrixCellSpec {
     pub required: bool,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub resource_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -70,6 +74,31 @@ impl MatrixPlan {
             }
             if let Some(timeout_ms) = cell.timeout_ms {
                 validate_timeout(timeout_ms, "matrix cell timeout_ms")?;
+            }
+            if cell.resource_ids.len() > MAX_MATRIX_RESOURCES_PER_CELL {
+                bail!(
+                    "matrix cell '{}' exceeds the {} resource limit",
+                    cell.cell_id,
+                    MAX_MATRIX_RESOURCES_PER_CELL
+                );
+            }
+            let mut resource_ids = BTreeSet::new();
+            for resource_id in &cell.resource_ids {
+                if resource_id.is_empty()
+                    || resource_id.len() > MAX_MATRIX_RESOURCE_ID_BYTES
+                    || !resource_id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':')
+                    })
+                {
+                    bail!("matrix cell '{}' has an invalid resource id", cell.cell_id);
+                }
+                if !resource_ids.insert(resource_id) {
+                    bail!(
+                        "matrix cell '{}' contains duplicate resource id '{}'",
+                        cell.cell_id,
+                        resource_id
+                    );
+                }
             }
         }
         Ok(())
@@ -506,6 +535,7 @@ mod tests {
                     scenario_id: "smoke".into(),
                     required: true,
                     timeout_ms: None,
+                    resource_ids: Vec::new(),
                 },
                 MatrixCellSpec {
                     cell_id: "optional-b".into(),
@@ -513,6 +543,7 @@ mod tests {
                     scenario_id: "smoke".into(),
                     required: false,
                     timeout_ms: Some(100),
+                    resource_ids: Vec::new(),
                 },
             ],
         }
@@ -622,5 +653,26 @@ mod tests {
         assert_eq!(report.status, MatrixStatus::Partial);
         assert_eq!(report.required_passed, 1);
         assert_eq!(report.optional_non_passed, 1);
+    }
+
+    #[test]
+    fn resource_ids_are_bounded_and_unique_before_dispatch() {
+        let mut matrix = plan(1, false);
+        matrix.cells[0].resource_ids = vec!["device:serial".into(), "device:serial".into()];
+        assert!(
+            matrix
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+        matrix.cells[0].resource_ids = vec!["../device".into()];
+        assert!(
+            matrix
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("invalid")
+        );
     }
 }
