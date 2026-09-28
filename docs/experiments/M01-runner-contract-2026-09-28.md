@@ -28,8 +28,9 @@ run identity、lease fencing 边界和结构化证据类型；iOS simulator 与 
 
 ## 尚未覆盖
 
-真实 iOS 前台/进程身份、旋转/后台切换和 simulator/emulator 故障矩阵尚未完成；当前纯
-Rust 与无设备 CI 测试不宣称有完整 L2 移动设备证据。平台边界见
+真实 iOS 前台状态/进程启动身份、旋转/后台切换和 simulator/emulator 故障矩阵尚未完成；
+当前纯 Rust 与无设备 CI 测试不宣称有完整 L2 移动设备证据。平台边界见
 [M01 iOS simulator](M01-ios-simulator-2026-09-28.md) 与
 [M01 Android runner](M01-android-runner-2026-09-28.md)；Android process identity 记录见
-[M01 Android process identity](M01-android-process-identity-2026-09-28.md)。
+[M01 Android process identity](M01-android-process-identity-2026-09-28.md)，iOS PID probe 记录见
+[M01 iOS process probe](M01-ios-process-probe-2026-09-28.md)。

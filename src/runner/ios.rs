@@ -156,13 +156,17 @@ impl MobileRunner for IosSimulatorRunner {
         let udid = self.udid.clone();
         let bundle_id = self.bundle_id.clone();
         let env = self.env.clone();
+        let mut observed_process = None;
         let result = run_leased_workload(&prepared.identity, lease, "ios.launch", || {
             ios::launch_simulator_with_env(&udid, &bundle_id, &env)?;
+            let process = ios::wait_for_simulator_process(&udid, &bundle_id)?;
+            let pid = process.as_ref().map(|process| process.pid);
+            observed_process = process.clone();
             Ok(LaunchEvidence {
                 run_id: prepared.identity.run_id.clone(),
                 installed: true,
                 process: ProcessEvidence {
-                    pid: None,
+                    pid,
                     start_token_sha256: None,
                     exited: false,
                     exit_code: None,
@@ -175,7 +179,12 @@ impl MobileRunner for IosSimulatorRunner {
             &prepared.identity,
             EvidenceStage::Launch,
             &result,
-            json!({"udid": self.udid, "bundle_id": self.bundle_id}),
+            json!({
+                "udid": self.udid,
+                "bundle_id": self.bundle_id,
+                "process": process_details(observed_process.as_ref()),
+                "foreground": "not_probed",
+            }),
         );
         result
     }
@@ -208,27 +217,36 @@ impl MobileRunner for IosSimulatorRunner {
         identity.verify_lease(lease)?;
         let output = self.log_path(identity);
         let udid = self.udid.clone();
+        let bundle_id = self.bundle_id.clone();
+        let mut observed_process = None;
         let result = run_leased_workload(identity, lease, "ios.native_logs", || {
-            let (bytes, truncated) = ios::collect_simulator_logs(&udid, &output)?;
+            let process = ios::simulator_process_identity(&udid, &bundle_id)?;
+            let pid = process.as_ref().map(|process| process.pid);
+            observed_process = process.clone();
+            let (bytes, truncated) = ios::collect_simulator_logs(&udid, &output, pid)?;
             Ok(LogEvidence {
                 run_id: identity.run_id.clone(),
                 source: "simctl.log.show".into(),
                 path: output.clone(),
                 bytes,
                 truncated,
-                pid: None,
+                pid,
                 process_start_token_sha256: None,
-                assigned_to_run: false,
-                unassigned_reason: Some(
-                    "simulator log snapshot has no verified process identity".into(),
-                ),
+                assigned_to_run: process.is_some(),
+                unassigned_reason: process.is_none().then(|| {
+                    "simulator log snapshot has no verified process PID at collection time".into()
+                }),
             })
         });
         self.record(
             identity,
             EvidenceStage::NativeLogs,
             &result,
-            json!({"source": "simctl.log.show", "assigned_to_run": false}),
+            json!({
+                "source": "simctl.log.show",
+                "assigned_to_run": observed_process.is_some(),
+                "process": process_details(observed_process.as_ref()),
+            }),
         );
         result
     }
@@ -257,6 +275,21 @@ impl MobileRunner for IosSimulatorRunner {
             json!({"udid": self.udid, "bundle_id": self.bundle_id}),
         );
         result
+    }
+}
+
+fn process_details(process: Option<&ios::SimulatorProcessIdentity>) -> serde_json::Value {
+    match process {
+        Some(process) => json!({
+            "verified": true,
+            "pid": process.pid,
+            "launchd_domain": process.launchd_domain,
+            "start_identity": "unavailable",
+        }),
+        None => json!({
+            "verified": false,
+            "reason": "process_pid_unavailable",
+        }),
     }
 }
 
