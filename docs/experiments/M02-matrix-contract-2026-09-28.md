@@ -15,6 +15,9 @@ required/optional 汇总和 artifact 保留接口；尚未把真实 iOS/Android 
 - `MatrixCellRunner` execution boundary 已接入：runner error 变成 failed cell，cleanup error
   覆盖原本的 passed，cell deadline 传入 adapter；当前 harness 仍按序执行，保留后续并行
   executor 的相同 report contract。
+- executor 会在 cleanup 后再次检查 deadline；即使 adapter 迟到地返回 passed，cell 仍记为
+  cancelled，已有 artifact id 保留供诊断。Windows CI 曾暴露一项既有 heartbeat/semantics
+  socket 测试的帧顺序假设，测试现会有界地应答 heartbeat 并继续等目标 semantics query。
 
 ## 尚未覆盖
 

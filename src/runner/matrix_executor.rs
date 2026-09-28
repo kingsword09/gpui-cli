@@ -100,6 +100,14 @@ pub fn execute_matrix<R: MatrixCellRunner>(
                         message: format!("{cleanup_error:#}"),
                     }),
                 )
+            } else if Instant::now() >= deadline {
+                (
+                    MatrixCellState::Cancelled,
+                    Some(MatrixCellError {
+                        code: "cell_deadline_exceeded".into(),
+                        message: "cell runner returned after its deadline".into(),
+                    }),
+                )
             } else {
                 (execution.status, execution.error)
             };
@@ -139,6 +147,7 @@ mod tests {
     use super::*;
     use crate::runner::matrix::{MatrixCellSpec, MatrixConfig, MatrixStatus};
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     struct FakeRunner {
         outcomes: BTreeMap<String, MatrixCellExecution>,
@@ -289,5 +298,39 @@ mod tests {
         one_cell_plan.config.timeout_ms = 1000;
         let report = execute_matrix(one_cell_plan, &mut runner, Instant::now()).unwrap();
         assert_eq!(report.status, MatrixStatus::Passed);
+    }
+
+    #[test]
+    fn late_runner_success_is_cancelled_after_cleanup() {
+        struct LateRunner {
+            cleaned: bool,
+        }
+        impl MatrixCellRunner for LateRunner {
+            fn run_cell(
+                &mut self,
+                _cell: &MatrixCellSpec,
+                _deadline: Instant,
+            ) -> Result<MatrixCellExecution> {
+                std::thread::sleep(Duration::from_millis(20));
+                Ok(MatrixCellExecution::passed(vec!["late-capture".into()]))
+            }
+
+            fn cleanup_cell(&mut self, _cell: &MatrixCellSpec, _deadline: Instant) -> Result<()> {
+                self.cleaned = true;
+                Ok(())
+            }
+        }
+        let mut runner = LateRunner { cleaned: false };
+        let mut one_cell_plan = plan();
+        one_cell_plan.cells.truncate(1);
+        one_cell_plan.cells[0].timeout_ms = Some(1);
+        let report = execute_matrix(one_cell_plan, &mut runner, Instant::now()).unwrap();
+        assert!(runner.cleaned);
+        assert_eq!(report.status, MatrixStatus::Cancelled);
+        assert_eq!(
+            report.cells[0].error.as_ref().unwrap().code,
+            "cell_deadline_exceeded"
+        );
+        assert_eq!(report.cells[0].artifact_ids, vec!["late-capture"]);
     }
 }
