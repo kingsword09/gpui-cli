@@ -549,7 +549,8 @@ artifact 接线和报告证据见
 3. 将安装/launch/进程证据分离；断线不等于退出，设备截图不等于 scene capture。
 4. 分别跑完整 GPUI Android emulator/iOS simulator 应用，包含键盘、系统弹窗、旋转和后台切换。
 
-PR 拆分：runner trait/契约（已交付）→ iOS simulator adapter（已交付基础路径）→ Android adapter（当前已交付基础路径）→ 真模拟器故障矩阵。验收
+PR 拆分：runner trait/契约（已交付）→ iOS simulator adapter（已交付基础路径）→ Android adapter
+（已交付基础路径）→ Android process identity（当前切片）→ 真模拟器故障矩阵。验收
 M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 desktop；不以宿主 APK 打包
 测试宣称运行通过。契约记录见
 [M01 runner contract](../experiments/M01-runner-contract-2026-09-28.md)。

@@ -216,6 +216,8 @@ impl MobileRunner for IosSimulatorRunner {
                 path: output.clone(),
                 bytes,
                 truncated,
+                pid: None,
+                process_start_token_sha256: None,
                 assigned_to_run: false,
                 unassigned_reason: Some(
                     "simulator log snapshot has no verified process identity".into(),

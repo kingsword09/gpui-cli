@@ -10,12 +10,15 @@
   `run_leased_workload` 的前后 fencing 校验。
 - `adb -s <serial> exec-out screencap -p` 通过共享 `CaptureArtifact` 校验 PNG、尺寸、hash、
   系统 UI 和 run id；不经文本管道。
-- `adb -s <serial> logcat -d -v threadtime` 有 8 MiB 上限；能取得包 PID 时按 PID 过滤，
-  否则保存为 unassigned 并记录原因。
+- `adb -s <serial> logcat -d -v threadtime` 有 8 MiB 上限；能取得经 `/proc` 验证的包进程
+  身份时按 PID 过滤并记录 start token hash，否则保存为 unassigned 并记录原因。
 - stop 只 force-stop 本 runner 的 bundle，保留用户 emulator/device 本身。
+
+Android 进程身份的 probe 细节与边界见
+[M01 Android process identity](M01-android-process-identity-2026-09-28.md)。
 
 ## 尚未覆盖
 
-PID start identity、ANR/native crash 关联、ABI 不匹配预检、多设备并行/误选、旋转/键盘/后台
-切换和完整 M-02 故障矩阵属于后续切片。无真实 Android emulator 时，CI 只验证契约和命令
+ANR/native crash 关联、ABI 不匹配预检、多设备并行/误选、旋转/键盘/后台切换和完整 M-02
+故障矩阵属于后续切片。无真实 Android emulator 时，CI 只验证契约和命令
 边界，不记为 L2 通过。
