@@ -190,6 +190,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: commands::cache::CacheCommands,
     },
+    /// Review and explicitly approve visual baselines
+    Baseline {
+        #[command(subcommand)]
+        command: commands::baseline::BaselineCommands,
+    },
     /// Discover, create and manage simulators, emulators and devices
     Device {
         #[command(subcommand)]
@@ -263,6 +268,7 @@ fn main() -> anyhow::Result<()> {
             device,
         }) => commands::build::handle_build(Some(target), release, device.into())?,
         Some(Commands::Cache { command }) => commands::cache::handle_cache(command)?,
+        Some(Commands::Baseline { command }) => commands::baseline::handle_baseline(command)?,
         Some(Commands::Device { command }) => commands::device::handle_device(command)?,
         Some(Commands::Dev(args)) => commands::dev::handle_dev(args)?,
         Some(Commands::Scenario(args)) => commands::scenario::handle_scenario(args)?,

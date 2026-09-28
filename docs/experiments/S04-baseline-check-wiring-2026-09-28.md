@@ -24,8 +24,9 @@ artifact；它不创建、批准、更新或放宽任何 baseline。
 
 生成模板能报告 OS、theme 和 locale；backend 与 font fingerprint 通过显式
 GPUI_PREVIEW_BACKEND / GPUI_PREVIEW_FONT_FINGERPRINT 环境值传入。未提供这两个真实
-值时，不会把截图 hash 当成严格 baseline 通过。当前不支持 tolerance、mask、动态区域
-配置、baseline approval/update、移动端 provider 或矩阵调度。
+值时，不会把截图 hash 当成严格 baseline 通过。baseline approval 已移到独立的
+gpui baseline approve 命令；当前仍不支持 tolerance、mask、动态区域配置、移动端
+provider 或矩阵调度。
 
 ## 验证
 

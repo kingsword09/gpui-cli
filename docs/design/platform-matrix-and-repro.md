@@ -137,6 +137,14 @@ Android 的 JNI 库必须按 ABI、profile 和 BuildKey 隔离，不能让 relea
 - 基线更新是独立 review 操作，PR 展示旧/新/diff 和原因；修复流程不能用更新基线自动消除失败。
 - 跨平台布局可比较“不裁剪”“按钮可见”“安全区内”等约束，不要求系统字体逐像素一致。
 
+本地的显式批准入口为：
+
+    gpui baseline approve --target <target> --baseline-id <id> +      --key <baseline-key.json> --image <image.png> --reason <text> [--diff <diff.png>]
+
+它只接受用户明确选择的 key/image/reason；重复 id 默认拒绝，使用 replace 时旧目录移入
+target 下的 history 并在 approval record 中保留旧 manifest、路径和新 manifest。check
+不会调用该命令，也不会因为 diff 或修复失败自动更新 baseline。
+
 ## 7. 复现包格式与工作流
 
 拟议命令：

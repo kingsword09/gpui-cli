@@ -477,7 +477,8 @@ backend/font fingerprint、baseline 缺失或不可比仍保持 `inconclusive`�
 `dev/baselines/<target>/<baseline_id>/manifest.json`，拒绝越界/符号链接/超限文件，校验
 BaselineKey、PNG 尺寸和 `sha256:`；缺失、损坏、key/DPI/locale/scope 不一致分别报告
 `baseline_missing`、invalid 或 not comparable。当前算法固定为 `exact-sha256-v1`，只返回
-matched/different/not_comparable，不创建或更新基线；记录见
+matched/different/not_comparable；check 不创建或更新基线，显式 review 入口及 history
+记录见
 [S04 visual baseline contract](../experiments/S04-visual-baseline-2026-09-28.md)；desktop
 artifact 接线和报告证据见
 [S04 baseline check wiring](../experiments/S04-baseline-check-wiring-2026-09-28.md)。
