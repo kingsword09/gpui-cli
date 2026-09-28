@@ -12,4 +12,5 @@ pub mod matrix_admission;
 pub mod matrix_executor;
 pub mod matrix_resources;
 pub mod mobile;
+pub mod mobile_matrix;
 pub mod output_layout;

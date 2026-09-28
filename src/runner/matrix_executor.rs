@@ -214,7 +214,7 @@ where
                         status: MatrixCellState::Failed,
                         error: Some(MatrixCellError {
                             code: "cell_runner_panicked".into(),
-                            message: "matrix runner panicked; cell cleanup was not available"
+                            message: "matrix worker panicked before it could report cell cleanup"
                                 .into(),
                         }),
                         artifact_ids: Vec::new(),
@@ -293,9 +293,9 @@ where
             };
         }
     };
-    let execution = match runner.run_cell(cell, deadline) {
-        Ok(execution) => execution,
-        Err(error) => MatrixCellExecution {
+    let execution = match catch_unwind(AssertUnwindSafe(|| runner.run_cell(cell, deadline))) {
+        Ok(Ok(execution)) => execution,
+        Ok(Err(error)) => MatrixCellExecution {
             status: MatrixCellState::Failed,
             error: Some(MatrixCellError {
                 code: "cell_runner_error".into(),
@@ -303,8 +303,20 @@ where
             }),
             artifact_ids: Vec::new(),
         },
+        Err(_) => MatrixCellExecution {
+            status: MatrixCellState::Failed,
+            error: Some(MatrixCellError {
+                code: "cell_runner_panicked".into(),
+                message: "matrix runner panicked; cleanup will still be attempted".into(),
+            }),
+            artifact_ids: Vec::new(),
+        },
     };
-    let cleanup_error = runner.cleanup_cell(cell, deadline).err();
+    let cleanup_error = match catch_unwind(AssertUnwindSafe(|| runner.cleanup_cell(cell, deadline)))
+    {
+        Ok(result) => result.err(),
+        Err(_) => Some(anyhow!("matrix runner cleanup panicked")),
+    };
     let (status, error) = if let Some(cleanup_error) = cleanup_error {
         (
             MatrixCellState::Failed,
