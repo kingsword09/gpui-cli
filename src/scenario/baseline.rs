@@ -301,6 +301,75 @@ pub fn compare_png(baseline: &LoadedBaseline, actual: &[u8]) -> BaselineComparis
     }
 }
 
+/// Construct a strict manifest for an explicitly approved PNG.
+///
+/// This helper does not write anything. Callers must perform the separate
+/// review/approval operation and persist the returned manifest atomically.
+pub fn manifest_for_image(
+    baseline_id: &str,
+    key: BaselineKey,
+    bytes: &[u8],
+) -> Result<BaselineManifest, String> {
+    if safe_identifier(baseline_id).is_none() {
+        return Err("baseline_id is not a safe identifier".into());
+    }
+    validate_baseline_key(&key)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err("baseline image exceeds its size limit".into());
+    }
+    let Some((pixel_width, pixel_height)) = png_dimensions(bytes) else {
+        return Err("baseline image is not a bounded PNG".into());
+    };
+    let (decoded_width, decoded_height, _) =
+        decode_rgba(bytes).map_err(|error| format!("baseline_image_decode_failed:{error}"))?;
+    if (decoded_width, decoded_height) != (pixel_width, pixel_height) {
+        return Err("baseline image decoded dimensions do not match its header".into());
+    }
+    Ok(BaselineManifest {
+        schema_version: SCHEMA_VERSION,
+        baseline_id: baseline_id.into(),
+        key,
+        image: BaselineImage {
+            path: "image.png".into(),
+            sha256: hash_bytes(bytes),
+            bytes: bytes.len() as u64,
+            pixel_width,
+            pixel_height,
+        },
+        algorithm: BaselineAlgorithm {
+            id: EXACT_ALGORITHM.into(),
+            version: 1,
+            tolerance_milli: 0,
+        },
+    })
+}
+
+pub fn validate_baseline_key(key: &BaselineKey) -> Result<(), String> {
+    for (field, value) in [
+        ("scenario", &key.scenario),
+        ("fixture_hash", &key.fixture_hash),
+        ("target", &key.target),
+        ("backend", &key.backend),
+        ("os", &key.os),
+        ("theme", &key.theme),
+        ("locale", &key.locale),
+        ("font_fingerprint", &key.font_fingerprint),
+        ("scope", &key.scope),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("baseline key field {field} must be non-empty"));
+        }
+    }
+    if key.viewport_width == 0 || key.viewport_height == 0 || key.scale_milli == 0 {
+        return Err("baseline key viewport and scale must be positive".into());
+    }
+    Ok(())
+}
+
+pub fn is_safe_identifier(value: &str) -> bool {
+    safe_identifier(value).is_some()
+}
+
 /// Build a bounded red-on-transparent diff image for two same-sized PNGs.
 ///
 /// This is diagnostic output only: it never changes the comparison result,
@@ -513,7 +582,7 @@ fn safe_identifier(value: &str) -> Option<&str> {
     Some(value)
 }
 
-fn hash_bytes(bytes: &[u8]) -> String {
+pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 

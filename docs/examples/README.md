@@ -43,6 +43,8 @@ List fixture 的 count/prefix/digits 表示由组件的确定性 fixture factory
 - scenario 的 requires 使用 screenshot/semantics 别名及明确能力；input/bounds 缺失会阻止对应步骤，不能仅有图片就假设可点击。
 - 每次动作由执行器重新建立/确认观察，TOML 不硬编码过期 observation_id 或可重复点击 request_id。
 - LoginForm 中的文本仅为测试数据。允许 invalid_credentials 日志不表示可以忽略其他 runtime error 或 panic。
+- baseline approval 是显式 review 操作：先选择 PNG、完整 key 和 reason，再运行
+  gpui baseline approve；check 不会自动接受当前截图或替换失败基线。
 - perf 的数字只是初始预算例子，不是已测性能。没有实际环境/配对证据时相对规则应 inconclusive。
 - 无源码 repro 默认 requires_source；显式提供可信且 hash匹配的源码之前，inspect 不执行程序。
 

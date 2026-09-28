@@ -1,3 +1,4 @@
+pub mod baseline;
 pub mod build;
 pub mod cache;
 pub mod check;
