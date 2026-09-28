@@ -42,12 +42,18 @@ gpui run ios
 gpui run android
 gpui build all
 gpui build android --release
+gpui cache clean --max-bytes 10737418240 --dry-run
 ```
 
 Android release builds use Gradle's output metadata to locate the APK. The
 default template produces an unsigned release APK; configure a release
 `signingConfig` in `mobile/android/gradle/app/build.gradle.kts` before using
 `gpui run android --release`, or sign the build artifact separately.
+
+`gpui cache clean` evicts old completed BuildKey output contents under the current
+project's `.gpui/builds` until the requested byte budget is met. It skips active
+locked keys; use `--dry-run` to inspect cleanup without changing files. Key roots
+and lock files remain so a later build can safely recreate its staging directories.
 
 Use `gpui run --live` to keep the loop open: sources are watched, every save
 triggers an incremental rebuild and relaunch (desktop, iOS simulator or Android
