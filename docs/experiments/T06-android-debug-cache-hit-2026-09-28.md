@@ -10,6 +10,10 @@ manifest cache hit；release/custom signing、live Android 和真实任务共享
 - 发现 release variant、本地敏感 Android 配置、自定义 signing DSL，或默认 debug keystore
   缺失/不是普通文件时，不读取缓存，按正常路径重建；缺失 keystore 的首次 Gradle build
   可能生成该文件，后续调用因新指纹得到新 BuildKey，需再构建一次后才可稳定命中；
+- local.properties/keystore.properties 内容不会进入 FrozenBuildRoot；Android SDK/NDK 需由
+  ANDROID_HOME/ANDROID_NDK_HOME 提供，依赖 keystore.properties 的自定义 release signing
+  当前不可用，详见
+  [M04 frozen sensitive input filter](M04-frozen-sensitive-input-filter-2026-09-28.md)；
 - Android 请求按 BuildKey 获取 OS 文件锁，锁覆盖 manifest lookup、miss 后的 cargo-ndk/
   Gradle 构建和 manifest 发布；
 - 命中要求 read_verified 校验 Android platform、BuildKey 和全部已登记文件，并要求 roots

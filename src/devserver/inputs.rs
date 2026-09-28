@@ -19,6 +19,7 @@ const IGNORED: &[&str] = &[
     "node_modules",
     "Pods",
 ];
+const SENSITIVE_INPUT_FILE_NAMES: &[&str] = &["local.properties", "keystore.properties"];
 
 pub fn should_trigger(path: &Path) -> bool {
     path.components().all(|part| {
@@ -33,6 +34,8 @@ pub struct Inputs {
     pub assets: BTreeMap<String, String>,
     // Directory symlinks are not traversed; the manifest advertises this scope.
     pub untracked_directory_links: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_sensitive_files: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -77,8 +80,6 @@ const NATIVE_ROOTS: &[&str] = &[
     ".cargo/config.toml",
     "gpui.toml",
 ];
-
-const NATIVE_EXCLUDED_FILE_NAMES: &[&str] = &["local.properties", "keystore.properties"];
 
 /// The local filesystem roots that Cargo reports for a project workspace.
 ///
@@ -215,14 +216,16 @@ fn native_should_trigger(path: &Path) -> bool {
     })
 }
 
+fn is_sensitive_input_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| SENSITIVE_INPUT_FILE_NAMES.contains(&name))
+}
+
 fn collect_native_file(root: &Path, path: &Path, result: &mut NativeInputs) -> Result<()> {
     let relative = path.strip_prefix(root)?;
     let name = relative.to_string_lossy().replace('\\', "/");
-    let file_name = relative
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    if NATIVE_EXCLUDED_FILE_NAMES.contains(&file_name) {
+    if is_sensitive_input_file(relative) {
         result.excluded_sensitive_files.push(name);
         return Ok(());
     }
@@ -320,7 +323,7 @@ impl Inputs {
         let copy_result = (|| -> Result<()> {
             copy_manifest_files(&root, &destination, &manifest)?;
             let copied = Self::scan(&destination)?;
-            if copied != manifest {
+            if !snapshot_copy_matches(&manifest, &copied) {
                 bail!("frozen workspace copy does not match its manifest");
             }
 
@@ -329,7 +332,7 @@ impl Inputs {
                 fs::create_dir_all(&target)?;
                 copy_manifest_files(&external.source_root, &target, manifest)?;
                 let copied = Self::scan(&target)?;
-                if copied != *manifest {
+                if !snapshot_copy_matches(manifest, &copied) {
                     bail!(
                         "frozen external package copy does not match its manifest: {}",
                         external.source_root.display()
@@ -450,6 +453,10 @@ impl Inputs {
                 if !kind.is_file() && !kind.is_symlink() {
                     continue;
                 }
+                if is_sensitive_input_file(&path) {
+                    result.excluded_sensitive_files.push(name);
+                    continue;
+                }
                 let mut file = match fs::File::open(&path) {
                     Ok(file) => file,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -474,6 +481,7 @@ impl Inputs {
             }
         }
         result.untracked_directory_links.sort();
+        result.excluded_sensitive_files.sort();
         Ok(result)
     }
 
@@ -600,6 +608,13 @@ fn reject_untracked_links(label: &str, manifest: &Inputs) -> Result<()> {
         "cannot freeze {label} with untracked directory links: {:?}",
         manifest.untracked_directory_links
     )
+}
+
+fn snapshot_copy_matches(expected: &Inputs, copied: &Inputs) -> bool {
+    expected.sources == copied.sources
+        && expected.assets == copied.assets
+        && expected.untracked_directory_links == copied.untracked_directory_links
+        && copied.excluded_sensitive_files.is_empty()
 }
 
 fn copy_manifest_files(root: &Path, destination: &Path, manifest: &Inputs) -> Result<()> {
@@ -976,6 +991,62 @@ mod tests {
         let delta = AssetDelta::between(&after.assets, &deleted.assets);
         assert_eq!(delta.changed, Vec::<String>::new());
         assert_eq!(delta.removed, vec!["assets/icon"]);
+    }
+
+    #[test]
+    fn sensitive_native_config_is_recorded_but_never_hashed_or_frozen() {
+        let root = tempfile::tempdir().unwrap();
+        let destination_parent = tempfile::tempdir().unwrap();
+        let gradle = root.path().join("mobile/android/gradle");
+        fs::create_dir_all(&gradle).unwrap();
+        fs::write(gradle.join("local.properties"), "sdk.dir=/private/sdk\n").unwrap();
+        fs::write(
+            gradle.join("keystore.properties"),
+            "storePassword=secret-value\n",
+        )
+        .unwrap();
+
+        let first = Inputs::scan(root.path()).unwrap();
+        assert!(first.sources.is_empty());
+        assert_eq!(
+            first.excluded_sensitive_files,
+            vec![
+                "mobile/android/gradle/keystore.properties",
+                "mobile/android/gradle/local.properties",
+            ]
+        );
+        fs::write(
+            gradle.join("keystore.properties"),
+            "storePassword=rotated-secret\n",
+        )
+        .unwrap();
+        assert_eq!(first, Inputs::scan(root.path()).unwrap());
+
+        let destination = destination_parent.path().join("snapshot");
+        let frozen = Inputs::freeze_to(root.path(), &destination, 1).unwrap();
+
+        assert_eq!(
+            frozen.manifest.excluded_sensitive_files,
+            first.excluded_sensitive_files
+        );
+        assert!(snapshot_copy_matches(
+            &frozen.manifest,
+            &Inputs::scan(&destination).unwrap()
+        ));
+        assert!(
+            !destination
+                .join("mobile/android/gradle/local.properties")
+                .exists()
+        );
+        assert!(
+            !destination
+                .join("mobile/android/gradle/keystore.properties")
+                .exists()
+        );
+        let serialized = serde_json::to_string(&frozen.manifest).unwrap();
+        assert!(serialized.contains("keystore.properties"));
+        assert!(!serialized.contains("rotated-secret"));
+        assert!(!serialized.contains("private/sdk"));
     }
 
     #[test]
