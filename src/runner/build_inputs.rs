@@ -967,6 +967,7 @@ mod tests {
 
     #[test]
     fn android_toolchain_fingerprint_reads_a_complete_active_environment() {
+        let fingerprint = android_toolchain_fingerprint();
         let sdk_root = consistent_environment_directory(&["ANDROID_HOME", "ANDROID_SDK_ROOT"]);
         let ndk_home = consistent_environment_directory(&["ANDROID_NDK_HOME"]);
         let ndk_alias_matches = env::var_os("NDK_HOME").is_none()
@@ -982,8 +983,13 @@ mod tests {
                 .and_then(|home| android_package_revision(&home.join("source.properties")))
                 .is_some();
 
-        if ndk_alias_matches && probes_available && package_metadata_available {
-            assert!(android_toolchain_fingerprint().is_some());
+        if env::var_os("GPUI_REQUIRE_ANDROID_TOOLCHAIN_FINGERPRINT").is_some() {
+            assert!(
+                fingerprint.is_some(),
+                "Android toolchain fingerprint was required but SDK/NDK/JDK/cargo-ndk identity is unavailable"
+            );
+        } else if ndk_alias_matches && probes_available && package_metadata_available {
+            assert!(fingerprint.is_some());
         }
     }
 
