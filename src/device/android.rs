@@ -12,6 +12,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use super::{Device, Kind, Platform, State, adb, emulator_binary, try_capture};
 
@@ -632,6 +633,101 @@ pub fn app_pid(serial: &str, bundle_id: &str) -> Result<Option<u32>> {
         .and_then(|value| value.parse::<u32>().ok()))
 }
 
+/// Identity for one observed package process. A PID alone is not stable: the
+/// kernel may reuse it after an early crash. The proc start tick is stable for
+/// a process lifetime, while boot_id prevents the same tick value from being
+/// reused after a device reboot.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AppProcessIdentity {
+    pub pid: u32,
+    pub start_time_ticks: u64,
+    pub boot_id: Option<String>,
+}
+
+impl AppProcessIdentity {
+    /// Returns an internal, non-serialized identity input for evidence hashing.
+    pub fn start_token(&self) -> String {
+        format!(
+            "android-process|pid={}|start_time_ticks={}|boot_id={}",
+            self.pid,
+            self.start_time_ticks,
+            self.boot_id.as_deref().unwrap_or("unknown")
+        )
+    }
+}
+
+/// Maximum time spent waiting for the process created by `am start` to appear.
+pub const APP_PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Reads a package PID and its kernel process-start identity from one serial.
+/// A process that exits between the PID and `/proc` reads is reported as
+/// unavailable, so early native crashes remain observable without turning the
+/// launch command itself into a false failure.
+pub fn app_process_identity(serial: &str, bundle_id: &str) -> Result<Option<AppProcessIdentity>> {
+    let Some(pid) = app_pid(serial, bundle_id)? else {
+        return Ok(None);
+    };
+    let adb = adb().context("`adb` was not found")?;
+    let stat_path = format!("/proc/{pid}/stat");
+    let Some(stat) = try_capture(&adb, &["-s", serial, "shell", "cat", &stat_path]) else {
+        return Ok(None);
+    };
+    let start_time_ticks = parse_proc_stat_start_time(&stat)
+        .with_context(|| format!("parsing Android process stat for pid {pid}"))?;
+    let boot_id = try_capture(
+        &adb,
+        &[
+            "-s",
+            serial,
+            "shell",
+            "cat",
+            "/proc/sys/kernel/random/boot_id",
+        ],
+    )
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty());
+    Ok(Some(AppProcessIdentity {
+        pid,
+        start_time_ticks,
+        boot_id,
+    }))
+}
+
+/// Waits briefly for the process spawned by `am start`, then returns its
+/// identity. The bounded wait covers normal launch scheduling without hiding
+/// an early crash or a channel that never establishes.
+pub fn wait_for_app_process(serial: &str, bundle_id: &str) -> Result<Option<AppProcessIdentity>> {
+    let deadline = Instant::now() + APP_PROCESS_PROBE_TIMEOUT;
+    loop {
+        if let Some(identity) = app_process_identity(serial, bundle_id)? {
+            return Ok(Some(identity));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn parse_proc_stat_start_time(stat: &str) -> Result<u64> {
+    let open = stat.find('(').context("process stat has no command name")?;
+    let close = stat
+        .rfind(')')
+        .filter(|close| *close > open)
+        .context("process stat has no command terminator")?;
+    stat[..open]
+        .trim()
+        .parse::<u32>()
+        .context("process stat has an invalid pid")?;
+    let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    let start_time = fields
+        .get(19)
+        .context("process stat has no start-time field")?;
+    start_time
+        .parse::<u64>()
+        .context("process stat has an invalid start-time field")
+}
+
 /// Captures the device framebuffer as a binary PNG. `exec-out` avoids the
 /// shell and never subjects the image bytes to text framing or line endings.
 pub fn capture_screenshot(serial: &str, output: &Path) -> Result<()> {
@@ -913,6 +1009,33 @@ mod tests {
         assert!(validate_device_file_name("assets/../outside").is_err());
         assert!(validate_device_file_name("/absolute").is_err());
         assert!(validate_device_file_name("assets\\logo.png").is_err());
+    }
+
+    #[test]
+    fn proc_stat_parser_handles_parentheses_in_the_command_name() {
+        let mut fields = vec!["0".to_string(); 20];
+        fields[0] = "S".into();
+        fields[19] = "987654".into();
+        let stat = format!("123 (gpui app (debug)) {}", fields.join(" "));
+        assert_eq!(parse_proc_stat_start_time(&stat).unwrap(), 987654);
+    }
+
+    #[test]
+    fn process_start_token_binds_pid_boot_and_start_time() {
+        let process = AppProcessIdentity {
+            pid: 123,
+            start_time_ticks: 987654,
+            boot_id: Some("boot-a".into()),
+        };
+        assert!(process.start_token().contains("pid=123"));
+        assert!(process.start_token().contains("start_time_ticks=987654"));
+        assert!(process.start_token().contains("boot_id=boot-a"));
+
+        let reused_pid = AppProcessIdentity {
+            start_time_ticks: 987655,
+            ..process.clone()
+        };
+        assert_ne!(process.start_token(), reused_pid.start_token());
     }
 
     #[test]

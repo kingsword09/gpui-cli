@@ -242,6 +242,12 @@ pub struct LogEvidence {
     pub path: PathBuf,
     pub bytes: u64,
     pub truncated: bool,
+    /// PID observed at collection time, when the platform could verify one.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// Hash of the platform process start identity, never the raw token.
+    #[serde(default)]
+    pub process_start_token_sha256: Option<String>,
     pub assigned_to_run: bool,
     pub unassigned_reason: Option<String>,
 }

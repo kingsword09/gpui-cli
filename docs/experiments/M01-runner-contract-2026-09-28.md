@@ -16,7 +16,8 @@ run identity、lease fencing 边界和结构化证据类型；iOS simulator 与 
   前台应用声明；截图不是 scene capture。
 - `EvidenceLog` 以单调序号记录 prepare/install/launch/capture/log/channel/process/stop，
   channel disconnect 可以是 `unknown`，不会被推断成 process exited。
-- `LogEvidence` 明确 `assigned_to_run`；无法归属的原生日志必须保存为 unassigned。
+- `LogEvidence` 明确 `assigned_to_run`，并在平台可验证时保存 PID 与 process start
+  token hash；无法归属的原生日志必须保存为 unassigned。
 
 ## 验证
 
@@ -27,7 +28,8 @@ run identity、lease fencing 边界和结构化证据类型；iOS simulator 与 
 
 ## 尚未覆盖
 
-真实 iOS 前台/进程身份、旋转/后台切换、Android PID start identity 和 simulator/emulator
-故障矩阵尚未完成；当前纯 Rust 与无设备 CI 测试不宣称有完整 L2 移动设备证据。平台边界见
+真实 iOS 前台/进程身份、旋转/后台切换和 simulator/emulator 故障矩阵尚未完成；当前纯
+Rust 与无设备 CI 测试不宣称有完整 L2 移动设备证据。平台边界见
 [M01 iOS simulator](M01-ios-simulator-2026-09-28.md) 与
-[M01 Android runner](M01-android-runner-2026-09-28.md)。
+[M01 Android runner](M01-android-runner-2026-09-28.md)；Android process identity 记录见
+[M01 Android process identity](M01-android-process-identity-2026-09-28.md)。

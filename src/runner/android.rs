@@ -2,6 +2,7 @@
 
 use anyhow::{Result, bail};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -148,16 +149,20 @@ impl MobileRunner for AndroidRunner {
         prepared.identity.verify_lease(lease)?;
         let serial = self.serial.clone();
         let bundle_id = self.bundle_id.clone();
+        let mut observed_process = None;
         let result = run_leased_workload(&prepared.identity, lease, "android.launch", || {
             android::force_stop(&serial, &bundle_id)?;
             android::launch_app(&serial, &bundle_id)?;
-            let pid = android::app_pid(&serial, &bundle_id)?;
+            let process = android::wait_for_app_process(&serial, &bundle_id)?;
+            let pid = process.as_ref().map(|process| process.pid);
+            let start_token_sha256 = process.as_ref().map(process_start_token_sha256);
+            observed_process = process.clone();
             Ok(LaunchEvidence {
                 run_id: prepared.identity.run_id.clone(),
                 installed: true,
                 process: ProcessEvidence {
                     pid,
-                    start_token_sha256: None,
+                    start_token_sha256,
                     exited: false,
                     exit_code: None,
                 },
@@ -169,7 +174,11 @@ impl MobileRunner for AndroidRunner {
             &prepared.identity,
             EvidenceStage::Launch,
             &result,
-            json!({"serial": self.serial, "bundle_id": self.bundle_id}),
+            json!({
+                "serial": self.serial,
+                "bundle_id": self.bundle_id,
+                "process": process_details(observed_process.as_ref()),
+            }),
         );
         result
     }
@@ -203,8 +212,12 @@ impl MobileRunner for AndroidRunner {
         let output = self.log_path(identity);
         let serial = self.serial.clone();
         let bundle_id = self.bundle_id.clone();
+        let mut observed_process = None;
         let result = run_leased_workload(identity, lease, "android.native_logs", || {
-            let pid = android::app_pid(&serial, &bundle_id)?;
+            let process = android::app_process_identity(&serial, &bundle_id)?;
+            let pid = process.as_ref().map(|process| process.pid);
+            let start_token_sha256 = process.as_ref().map(process_start_token_sha256);
+            observed_process = process.clone();
             let (bytes, truncated) = android::collect_logcat(&serial, &output, pid)?;
             Ok(LogEvidence {
                 run_id: identity.run_id.clone(),
@@ -212,17 +225,23 @@ impl MobileRunner for AndroidRunner {
                 path: output.clone(),
                 bytes,
                 truncated,
-                assigned_to_run: pid.is_some(),
-                unassigned_reason: pid
+                pid,
+                process_start_token_sha256: start_token_sha256,
+                assigned_to_run: process.is_some(),
+                unassigned_reason: process
                     .is_none()
-                    .then(|| "no verified package PID at log collection time".into()),
+                    .then(|| "no verified package process identity at log collection time".into()),
             })
         });
         self.record(
             identity,
             EvidenceStage::NativeLogs,
             &result,
-            json!({"source": "adb.logcat", "serial": self.serial}),
+            json!({
+                "source": "adb.logcat",
+                "serial": self.serial,
+                "process": process_details(observed_process.as_ref()),
+            }),
         );
         result
     }
@@ -251,6 +270,25 @@ impl MobileRunner for AndroidRunner {
             json!({"serial": self.serial, "bundle_id": self.bundle_id}),
         );
         result
+    }
+}
+
+fn process_start_token_sha256(process: &android::AppProcessIdentity) -> String {
+    format!("{:x}", Sha256::digest(process.start_token().as_bytes()))
+}
+
+fn process_details(process: Option<&android::AppProcessIdentity>) -> serde_json::Value {
+    match process {
+        Some(process) => json!({
+            "verified": true,
+            "pid": process.pid,
+            "start_token_sha256": process_start_token_sha256(process),
+            "boot_id_available": process.boot_id.is_some(),
+        }),
+        None => json!({
+            "verified": false,
+            "reason": "process_identity_unavailable",
+        }),
     }
 }
 
@@ -315,5 +353,21 @@ mod tests {
             fencing_token_sha256: "hash".into(),
         };
         assert!(runner.log_path(&identity).starts_with(root.path()));
+    }
+
+    #[test]
+    fn evidence_details_hash_process_identity_without_exposing_raw_boot_id() {
+        let process = android::AppProcessIdentity {
+            pid: 42,
+            start_time_ticks: 99,
+            boot_id: Some("private-boot-id".into()),
+        };
+        let details = process_details(Some(&process));
+        let rendered = details.to_string();
+        assert_eq!(details["pid"], 42);
+        assert_eq!(details["verified"], true);
+        assert_eq!(details["boot_id_available"], true);
+        assert!(!rendered.contains("private-boot-id"));
+        assert_eq!(details["start_token_sha256"].as_str().unwrap().len(), 64);
     }
 }
