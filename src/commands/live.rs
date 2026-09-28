@@ -23,7 +23,7 @@ use super::error;
 use super::run::{
     IosTarget, Project, android_abis, android_rust_target, apk_path, bundle_id_of,
     bundle_id_of_android, check_android_libraries, ensure_tool, gradle_command, gradle_task,
-    resolve_ios_target, xcode_app_path, xcode_destination,
+    leased_device_step, resolve_ios_target, xcode_app_path, xcode_destination,
 };
 use crate::device::{self, DeviceFlags, android, inventory, ios};
 use crate::devserver::control::ControlServer;
@@ -34,6 +34,7 @@ use crate::devserver::protocol::{self, AssetManifestEntry, ServerMessage};
 use crate::devserver::session::{Build, Session};
 use crate::devserver::timing;
 use crate::devserver::{AssetReconciliation, DevServer};
+use crate::runner::lease::DeviceLeaseSession;
 use serde_json::json;
 
 /// Source files watch out for asset-only changes under this directory; they
@@ -282,6 +283,7 @@ fn run_iteration(
     server: &DevServer,
     child: &mut Option<AppProcess>,
     build: &Build,
+    device_lease: Option<&DeviceLeaseSession>,
 ) -> Result<Iteration> {
     match plan {
         Plan::Desktop => {
@@ -342,12 +344,18 @@ fn run_iteration(
             }
             prepare_launch(channel, server, build)?;
             if *physical {
-                observed_step(build, "ios.install", || ios::install_device(id, &app))?;
-                observed_step(build, "ios.launch", || ios::launch_device(id, &bundle_id))?;
+                observed_device_step(build, device_lease, "ios.install", || {
+                    ios::install_device(id, &app)
+                })?;
+                observed_device_step(build, device_lease, "ios.launch", || {
+                    ios::launch_device(id, &bundle_id)
+                })?;
             } else {
-                observed_step(build, "ios.install", || ios::install_simulator(id, &app))?;
+                observed_device_step(build, device_lease, "ios.install", || {
+                    ios::install_simulator(id, &app)
+                })?;
                 let env = channel.env(project);
-                observed_step(build, "ios.launch", || {
+                observed_device_step(build, device_lease, "ios.launch", || {
                     ios::launch_simulator_with_env(id, &bundle_id, &env)
                 })?;
             }
@@ -372,16 +380,24 @@ fn run_iteration(
                 return Ok(Iteration::Superseded);
             }
             prepare_launch(channel, server, build)?;
-            observed_step(build, "android.install", || {
+            observed_device_step(build, device_lease, "android.install", || {
                 android::install_apk(serial, &apk)
             })?;
-            push_android_assets(project, serial, &bundle_id, &all_asset_paths(project));
+            push_android_assets(
+                project,
+                serial,
+                &bundle_id,
+                &all_asset_paths(project),
+                device_lease,
+            );
             if let Some(session) = &channel.session {
                 let state = Channel::sessions_dir(project).join(format!("{session}.state"));
                 match fs::read(&state)
                     .map_err(anyhow::Error::from)
                     .and_then(|bytes| {
-                        android::write_device_config(serial, &bundle_id, "gpui_state", &bytes)
+                        leased_device_step(device_lease, "android.restore", || {
+                            android::write_device_config(serial, &bundle_id, "gpui_state", &bytes)
+                        })
                     }) {
                     Ok(()) => {}
                     Err(error) => {
@@ -390,7 +406,7 @@ fn run_iteration(
                     }
                 }
             }
-            observed_step(build, "android.configure", || {
+            observed_device_step(build, device_lease, "android.configure", || {
                 android::write_device_config(
                     serial,
                     &bundle_id,
@@ -400,7 +416,7 @@ fn run_iteration(
                 android::force_stop(serial, &bundle_id)?;
                 android::reverse_port(serial, channel.port)
             })?;
-            observed_step(build, "android.launch", || {
+            observed_device_step(build, device_lease, "android.launch", || {
                 android::launch_app(serial, &bundle_id)
             })?;
             channel.live.emit(
@@ -444,6 +460,15 @@ fn observed_step<T>(build: &Build, stage: &str, f: impl FnOnce() -> Result<T>) -
         span.finish("ok", None);
     }
     result
+}
+
+fn observed_device_step<T>(
+    build: &Build,
+    lease: Option<&DeviceLeaseSession>,
+    stage: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    observed_step(build, stage, || leased_device_step(lease, stage, operation))
 }
 
 /// Asks the running app to save its snapshot for the next session and stores
@@ -568,8 +593,17 @@ fn push_ios_assets(
     server: &DevServer,
     transfer_id: &str,
     asset_revision: u64,
+    lease: Option<&DeviceLeaseSession>,
 ) -> Vec<String> {
-    push_ios_assets_to(project, paths, server, None, transfer_id, asset_revision)
+    push_ios_assets_to(
+        project,
+        paths,
+        server,
+        None,
+        transfer_id,
+        asset_revision,
+        lease,
+    )
 }
 
 fn push_ios_assets_to(
@@ -579,6 +613,7 @@ fn push_ios_assets_to(
     connection_id: Option<u64>,
     transfer_id: &str,
     asset_revision: u64,
+    lease: Option<&DeviceLeaseSession>,
 ) -> Vec<String> {
     let mut pushed = Vec::new();
     for rel in paths {
@@ -602,12 +637,18 @@ fn push_ios_assets_to(
                     data: protocol::b64::encode(&bytes),
                     asset_revision,
                 };
-                let sent = if let Some(connection_id) = connection_id {
-                    server.send_to(connection_id, &message)
-                } else {
-                    server.broadcast(&message);
-                    true
-                };
+                let sent = leased_device_step(lease, "ios.asset.transfer", || {
+                    Ok(if let Some(connection_id) = connection_id {
+                        server.send_to(connection_id, &message)
+                    } else {
+                        server.broadcast(&message);
+                        true
+                    })
+                })
+                .unwrap_or_else(|error| {
+                    println!("{}", format!("⚠ failed to sync {rel}: {error:#}").yellow());
+                    false
+                });
                 if sent {
                     pushed.push(rel);
                 }
@@ -635,13 +676,17 @@ fn push_android_assets(
     serial: &str,
     package: &str,
     paths: &[String],
+    lease: Option<&DeviceLeaseSession>,
 ) -> Vec<String> {
     let mut pushed = Vec::new();
     for rel in paths {
         let source = project.root.join(rel);
         match fs::read(&source) {
             Ok(bytes) => {
-                if let Err(err) = android::write_device_config(serial, package, rel, &bytes) {
+                let result = leased_device_step(lease, "android.asset.write", || {
+                    android::write_device_config(serial, package, rel, &bytes)
+                });
+                if let Err(err) = result {
                     println!(
                         "{}",
                         format!("⚠ failed to sync asset {rel}: {err:#}").yellow()
@@ -660,10 +705,17 @@ fn push_android_assets(
 
 /// Removes deleted assets from the app's private files dir. `rm -f` makes a
 /// reconnect/retry idempotent when the file was already absent on the device.
-fn remove_android_assets(serial: &str, package: &str, paths: &[String]) -> Vec<String> {
+fn remove_android_assets(
+    serial: &str,
+    package: &str,
+    paths: &[String],
+    lease: Option<&DeviceLeaseSession>,
+) -> Vec<String> {
     let mut removed = Vec::new();
     for path in paths {
-        match android::remove_device_file(serial, package, path) {
+        match leased_device_step(lease, "android.asset.remove", || {
+            android::remove_device_file(serial, package, path)
+        }) {
             Ok(()) => removed.push(path.clone()),
             Err(err) => println!(
                 "{}",
@@ -808,6 +860,7 @@ fn run_tool(label: &str, cmd: &mut Command, build: &Build) -> Result<()> {
 
 /// One build cycle plus coalescing of everything that arrived during it.
 /// Returns `true` when the user asked to quit.
+#[allow(clippy::too_many_arguments)]
 fn run_cycles(
     project: &Project,
     plan: &Plan,
@@ -816,10 +869,17 @@ fn run_cycles(
     child: &mut Option<AppProcess>,
     rx: &mpsc::Receiver<Event>,
     last_failed: &mut bool,
+    device_lease: Option<&DeviceLeaseSession>,
 ) -> Result<bool> {
     loop {
         if channel.live.stopping.load(Ordering::SeqCst) {
             return Ok(true);
+        }
+        if let Some(lease) = device_lease {
+            lease
+                .assert_owned()
+                .map_err(anyhow::Error::new)
+                .context("mobile device lease is no longer owned")?;
         }
         let build = channel.live.begin_build()?;
         if !server.set_asset_manifest(
@@ -833,40 +893,41 @@ fn run_cycles(
             bail!("asset manifest exceeds the dev-channel frame limit");
         }
         let mut again = false;
-        let failed = match run_iteration(project, plan, channel, server, child, &build) {
-            Ok(Iteration::Rebuilt) => {
-                build.finish(true, None);
-                if *last_failed {
-                    println!("{}", "✓ build recovered".green());
+        let failed =
+            match run_iteration(project, plan, channel, server, child, &build, device_lease) {
+                Ok(Iteration::Rebuilt) => {
+                    build.finish(true, None);
+                    if *last_failed {
+                        println!("{}", "✓ build recovered".green());
+                    }
+                    false
                 }
-                false
-            }
-            Ok(Iteration::BuildFailed) => {
-                build.finish(false, None);
-                println!(
-                    "{}",
-                    "✗ build failed — keeping the current app running".yellow()
-                );
-                true
-            }
-            Ok(Iteration::Superseded) => {
-                build.superseded();
-                again = true;
-                *last_failed
-            }
-            Err(error) => {
-                build.finish(false, Some(format!("{error:#}")));
-                if channel.scope.build_id == build.scope.build_id {
-                    channel.live.emit(
-                        Kind::AppLaunchFailed,
-                        &channel.scope,
-                        json!({"error": format!("{error:#}")}),
+                Ok(Iteration::BuildFailed) => {
+                    build.finish(false, None);
+                    println!(
+                        "{}",
+                        "✗ build failed — keeping the current app running".yellow()
                     );
+                    true
                 }
-                println!("{}", format!("✗ {error:#}").red());
-                true
-            }
-        };
+                Ok(Iteration::Superseded) => {
+                    build.superseded();
+                    again = true;
+                    *last_failed
+                }
+                Err(error) => {
+                    build.finish(false, Some(format!("{error:#}")));
+                    if channel.scope.build_id == build.scope.build_id {
+                        channel.live.emit(
+                            Kind::AppLaunchFailed,
+                            &channel.scope,
+                            json!({"error": format!("{error:#}")}),
+                        );
+                    }
+                    println!("{}", format!("✗ {error:#}").red());
+                    true
+                }
+            };
         *last_failed = failed;
         let latest = channel.live.sync_inputs()?;
         again |= latest != build.scope.revision || channel.overflow.swap(false, Ordering::SeqCst);
@@ -898,6 +959,7 @@ fn reload_assets(
     delta: &AssetDelta,
     transfer_id: &str,
     asset_revision: u64,
+    device_lease: Option<&DeviceLeaseSession>,
 ) -> bool {
     if !(server.has_clients() && server.all_clients_support_asset_reload()) {
         return false;
@@ -937,8 +999,8 @@ fn reload_assets(
         Plan::Android { serial, .. } => {
             let package = bundle_id_of_android(project);
             (
-                push_android_assets(project, serial, &package, &delta.changed),
-                remove_android_assets(serial, &package, &delta.removed),
+                push_android_assets(project, serial, &package, &delta.changed, device_lease),
+                remove_android_assets(serial, &package, &delta.removed, device_lease),
             )
         }
         Plan::Ios {
@@ -950,6 +1012,7 @@ fn reload_assets(
                 server,
                 transfer_id,
                 asset_revision,
+                device_lease,
             ),
             delta.removed.clone(),
         ),
@@ -1036,6 +1099,7 @@ fn apply_asset_reconciliation(
     server: &DevServer,
     reconciliation: &AssetReconciliation,
     manifest: &BTreeMap<String, String>,
+    device_lease: Option<&DeviceLeaseSession>,
 ) -> bool {
     let mut changed = reconciliation.missing.clone();
     changed.extend(reconciliation.stale.iter().cloned());
@@ -1102,11 +1166,12 @@ fn apply_asset_reconciliation(
             Some(connection_id),
             &reconciliation.transfer_id,
             revision,
+            device_lease,
         )
         .len(),
         Plan::Android { serial, .. } => {
             let package = bundle_id_of_android(project);
-            let pushed = push_android_assets(project, serial, &package, &changed);
+            let pushed = push_android_assets(project, serial, &package, &changed, device_lease);
             for path in &pushed {
                 let _ = server.send_to(
                     connection_id,
@@ -1128,7 +1193,8 @@ fn apply_asset_reconciliation(
     let removed = match plan {
         Plan::Android { serial, .. } => {
             let package = bundle_id_of_android(project);
-            let removed = remove_android_assets(serial, &package, &reconciliation.removed);
+            let removed =
+                remove_android_assets(serial, &package, &reconciliation.removed, device_lease);
             removed
                 .iter()
                 .filter(|path| {
@@ -1173,6 +1239,7 @@ fn drain_asset_reconciliations(
     plan: &Plan,
     server: &DevServer,
     session: &Arc<Session>,
+    device_lease: Option<&DeviceLeaseSession>,
 ) -> bool {
     let reconciliations = server.take_asset_reconciliations();
     if reconciliations.is_empty() {
@@ -1188,7 +1255,14 @@ fn drain_asset_reconciliations(
         if reconciliation.asset_revision != session.store.state().desired.asset_revision {
             continue;
         }
-        let applied = apply_asset_reconciliation(project, plan, server, &reconciliation, &manifest);
+        let applied = apply_asset_reconciliation(
+            project,
+            plan,
+            server,
+            &reconciliation,
+            &manifest,
+            device_lease,
+        );
         session.emit(
             Kind::AssetsSent,
             &reconciliation.scope,
@@ -1328,7 +1402,15 @@ pub fn handle_preview(project: &Project, target: &str, preview: PreviewLaunch) -
         .unwrap_or_default();
     let build = session.begin_build()?;
     let mut child = None;
-    let iteration = run_iteration(project, &plan, &mut channel, &server, &mut child, &build);
+    let iteration = run_iteration(
+        project,
+        &plan,
+        &mut channel,
+        &server,
+        &mut child,
+        &build,
+        None,
+    );
     match iteration {
         Ok(Iteration::Rebuilt) => build.finish(true, None),
         Ok(Iteration::BuildFailed) => {
@@ -1391,6 +1473,17 @@ pub fn handle_preview(project: &Project, target: &str, preview: PreviewLaunch) -
 
 pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Result<()> {
     let plan = resolve_plan(project, target, flags)?;
+    let device_lease = match &plan {
+        Plan::Desktop => None,
+        Plan::Ios { id, .. } => Some(
+            DeviceLeaseSession::acquire(&project.root, id)
+                .context("acquiring the iOS live device lease")?,
+        ),
+        Plan::Android { serial, .. } => Some(
+            DeviceLeaseSession::acquire(&project.root, serial)
+                .context("acquiring the Android live device lease")?,
+        ),
+    };
     let target_id = match &plan {
         Plan::Desktop => format!("desktop:{}", std::env::consts::OS),
         Plan::Ios { physical, id, .. } => format!(
@@ -1548,8 +1641,15 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         &mut child,
         &rx,
         &mut last_failed,
+        device_lease.as_ref(),
     )?;
     while !quit && !session.stopping.load(Ordering::SeqCst) {
+        if let Some(lease) = device_lease.as_ref() {
+            lease
+                .assert_owned()
+                .map_err(anyhow::Error::new)
+                .context("mobile device lease is no longer owned")?;
+        }
         session.advance_observe_requests();
         if session.take_build_request().is_some() {
             quit = run_cycles(
@@ -1560,10 +1660,11 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                 &mut child,
                 &rx,
                 &mut last_failed,
+                device_lease.as_ref(),
             )?;
             continue;
         }
-        if drain_asset_reconciliations(project, &plan, &server, &session) {
+        if drain_asset_reconciliations(project, &plan, &server, &session, device_lease.as_ref()) {
             quit = run_cycles(
                 project,
                 &plan,
@@ -1572,6 +1673,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                 &mut child,
                 &rx,
                 &mut last_failed,
+                device_lease.as_ref(),
             )?;
             continue;
         }
@@ -1585,6 +1687,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                 &mut child,
                 &rx,
                 &mut last_failed,
+                device_lease.as_ref(),
             )?;
             continue;
         }
@@ -1599,6 +1702,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     &mut child,
                     &rx,
                     &mut last_failed,
+                    device_lease.as_ref(),
                 )?;
             }
             Ok(Event::Assets(delta)) => {
@@ -1614,6 +1718,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                         &mut child,
                         &rx,
                         &mut last_failed,
+                        device_lease.as_ref(),
                     )?;
                     continue;
                 }
@@ -1626,6 +1731,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                         &mut child,
                         &rx,
                         &mut last_failed,
+                        device_lease.as_ref(),
                     )?;
                     continue;
                 };
@@ -1639,6 +1745,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     &delta,
                     &transfer_id,
                     session.store.state().desired.asset_revision,
+                    device_lease.as_ref(),
                 );
                 asset_span.finish(if sent { "sent" } else { "fallback" }, None);
                 session.emit(
@@ -1657,6 +1764,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                         &mut child,
                         &rx,
                         &mut last_failed,
+                        device_lease.as_ref(),
                     )?;
                 }
             }
@@ -1668,6 +1776,12 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     drop(child);
     server.shutdown();
     session.end();
+    if let Some(lease) = device_lease {
+        lease
+            .release()
+            .map_err(anyhow::Error::new)
+            .context("releasing the mobile live device lease")?;
+    }
     println!("{}", "\n[live] stopped".dimmed());
     Ok(())
 }

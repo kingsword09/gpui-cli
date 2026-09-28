@@ -361,9 +361,11 @@ scroll（当前已交付）→ 通用滚动容器显式声明契约（当前已�
 验收 M-04/M-05/M-06；必须用不同项目目录和至少两个真实进程竞争，不只用同进程 mutex 模拟。回退：无法取得锁就 device_busy/unavailable，不回到无锁执行。
 
 当前已交付 src/runner/lease.rs 的 host-level OS file lock、durable owner/fencing token、
-heartbeat 和 owner mismatch 防护；路径 symlink、同设备争用和 fencing lost 已有纯 Rust
-验证。它还没有接入 iOS/Android runner、安装/启动/截图或矩阵调度，不能把原语测试写成
-真实设备验收。记录见
+后台 heartbeat 和 owner mismatch 防护；路径 symlink、跨项目同设备争用、Android TCP serial
+文件名和 fencing lost 已有纯 Rust 验证。`commands/run.rs` 与 `commands/live.rs` 已将
+iOS/Android 的安装、启动、Android 配置/资源写入包进 lease fencing；iOS/Android 原生 PNG
+截图命令及 `gpui device capture` 也已通过同一 lease 接入，但 scenario check、设备重连状态机、
+截图 artifact manifest 和矩阵调度仍未接入，不能把当前测试写成 M01/M02 的真实设备验收。记录见
 [M03 device lease](../experiments/M03-device-lease-2026-09-28.md)。
 
 ### M04 · 冻结源码与确定构建键

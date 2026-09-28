@@ -4,15 +4,25 @@
 //! diagnostic and carries the fencing identity used by later device runners.
 //! A heartbeat or release never accepts a different owner token.
 
+use anyhow::Context;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_IDENTIFIER_BYTES: usize = 128;
+const HOST_LEASE_DIR_ENV: &str = "GPUI_DEVICE_LEASE_DIR";
+
+/// Lease metadata is refreshed often enough that a 30 second stale-owner
+/// observation is diagnostic only. It never authorizes taking the OS lock.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+pub const SUSPECT_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LeaseOwner {
@@ -38,6 +48,7 @@ pub enum LeaseError {
         context: String,
         source: io::Error,
     },
+    HeartbeatFailed(String),
     Serialization(String),
 }
 
@@ -63,6 +74,9 @@ impl fmt::Display for LeaseError {
                 write!(formatter, "invalid_device_lease_owner: {message}")
             }
             Self::Io { context, source } => write!(formatter, "{context}: {source}"),
+            Self::HeartbeatFailed(message) => {
+                write!(formatter, "device_lease_heartbeat_failed: {message}")
+            }
             Self::Serialization(message) => {
                 write!(formatter, "device_lease_serialization: {message}")
             }
@@ -71,6 +85,42 @@ impl fmt::Display for LeaseError {
 }
 
 impl Error for LeaseError {}
+
+/// Returns the host-shared lease directory.
+///
+/// The environment override is intentionally explicit so tests and isolated
+/// supervisors can use a private directory. Normal runners use a per-user
+/// host directory, which makes two different project roots contend for the
+/// same physical simulator/emulator.
+pub fn host_lease_directory(project_root: &Path) -> Result<PathBuf, LeaseError> {
+    if let Some(path) = std::env::var_os(HOST_LEASE_DIR_ENV) {
+        let path = PathBuf::from(path);
+        return if path.is_absolute() {
+            Ok(path)
+        } else {
+            Ok(project_root.join(path))
+        };
+    }
+
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        home_directory().map(|home| home.join("Library/Caches"))
+    } else {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .or_else(|| std::env::var_os("XDG_STATE_HOME"))
+            .map(PathBuf::from)
+            .or_else(|| home_directory().map(|home| home.join(".cache")))
+    };
+
+    Ok(base
+        .unwrap_or_else(|| project_root.join(".gpui"))
+        .join("gpui/leases"))
+}
+
+fn home_directory() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
 
 #[derive(Debug)]
 pub struct DeviceLease {
@@ -81,6 +131,7 @@ pub struct DeviceLease {
 }
 
 impl DeviceLease {
+    /// Acquires a host-shared lease for a stable device identifier.
     pub fn acquire(
         project_root: &Path,
         device_id: &str,
@@ -89,20 +140,62 @@ impl DeviceLease {
         process_start_token: &str,
         now_ms: u64,
     ) -> Result<Self, LeaseError> {
-        validate_identifier(device_id)?;
+        validate_device_identifier(device_id)?;
         validate_identifier(session_id)?;
         validate_identifier(process_start_token)?;
         let root = project_root
             .canonicalize()
             .map_err(|source| io_error("resolving lease project root", source))?;
-        let leases_dir = root.join(".gpui").join("leases");
-        reject_symlink_components(&root, &leases_dir)?;
+        let leases_dir = host_lease_directory(&root)?;
+        reject_symlink_path(&leases_dir)?;
         fs::create_dir_all(&leases_dir)
             .map_err(|source| io_error("creating device lease directory", source))?;
-        reject_symlink_components(&root, &leases_dir)?;
+        reject_symlink_path(&leases_dir)?;
 
-        let lock_path = leases_dir.join(format!("{device_id}.lock"));
-        let owner_path = leases_dir.join(format!("{device_id}.owner.json"));
+        Self::acquire_in_directory(
+            &leases_dir,
+            device_id,
+            session_id,
+            pid,
+            process_start_token,
+            now_ms,
+        )
+    }
+
+    /// Creates an owner using this process's generated session/start identity.
+    pub fn acquire_for_process(project_root: &Path, device_id: &str) -> Result<Self, LeaseError> {
+        let pid = std::process::id();
+        let process_start_token = current_process_start_token()?;
+        let session_id = format!("gpui-{pid}-{}", random_token()?);
+        Self::acquire(
+            project_root,
+            device_id,
+            &session_id,
+            pid,
+            &process_start_token,
+            epoch_ms(),
+        )
+    }
+
+    fn acquire_in_directory(
+        leases_dir: &Path,
+        device_id: &str,
+        session_id: &str,
+        pid: u32,
+        process_start_token: &str,
+        now_ms: u64,
+    ) -> Result<Self, LeaseError> {
+        validate_device_identifier(device_id)?;
+        validate_identifier(session_id)?;
+        validate_identifier(process_start_token)?;
+        reject_symlink_path(leases_dir)?;
+        fs::create_dir_all(leases_dir)
+            .map_err(|source| io_error("creating device lease directory", source))?;
+        reject_symlink_path(leases_dir)?;
+
+        let path_id = path_identifier(device_id);
+        let lock_path = leases_dir.join(format!("{path_id}.lock"));
+        let owner_path = leases_dir.join(format!("{path_id}.owner.json"));
         reject_existing_symlink(&lock_path)?;
         reject_existing_symlink(&owner_path)?;
         let file = OpenOptions::new()
@@ -161,6 +254,10 @@ impl DeviceLease {
         write_owner(&self.owner_path, &self.owner)
     }
 
+    pub fn assert_owned(&self) -> Result<(), LeaseError> {
+        self.assert_owner()
+    }
+
     pub fn release(mut self) -> Result<(), LeaseError> {
         self.release_inner()
     }
@@ -191,6 +288,188 @@ impl DeviceLease {
                 .map_err(|error| io_error("unlocking device lease", error))?;
         }
         owner_result
+    }
+}
+
+/// A lease held for the lifetime of a mobile runner session.
+///
+/// The background heartbeat means a long install, launch, asset transfer or
+/// capture cannot silently look abandoned. Every device operation still calls
+/// [`Self::execute`], which fences both before and after the external command.
+#[derive(Debug)]
+pub struct DeviceLeaseSession {
+    shared: Arc<Mutex<Option<DeviceLease>>>,
+    heartbeat_error: Arc<Mutex<Option<String>>>,
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    owner: LeaseOwner,
+    heartbeat_thread: Option<JoinHandle<()>>,
+}
+
+impl DeviceLeaseSession {
+    pub fn acquire(project_root: &Path, device_id: &str) -> Result<Self, LeaseError> {
+        let lease = DeviceLease::acquire_for_process(project_root, device_id)?;
+        Self::start(lease)
+    }
+
+    fn start(lease: DeviceLease) -> Result<Self, LeaseError> {
+        let owner = lease.owner().clone();
+        let shared = Arc::new(Mutex::new(Some(lease)));
+        let heartbeat_error = Arc::new(Mutex::new(None));
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+
+        let thread_shared = Arc::clone(&shared);
+        let thread_error = Arc::clone(&heartbeat_error);
+        let thread_stop = Arc::clone(&stop);
+        let heartbeat_thread = thread::Builder::new()
+            .name(format!("gpui-lease-{}", owner.device_id))
+            .spawn(move || heartbeat_loop(thread_shared, thread_error, thread_stop))
+            .map_err(|source| io_error("starting device lease heartbeat", source))?;
+
+        Ok(Self {
+            shared,
+            heartbeat_error,
+            stop,
+            owner,
+            heartbeat_thread: Some(heartbeat_thread),
+        })
+    }
+
+    pub fn owner(&self) -> &LeaseOwner {
+        &self.owner
+    }
+
+    pub fn fencing_token(&self) -> &str {
+        &self.owner.fencing_token
+    }
+
+    pub fn assert_owned(&self) -> Result<(), LeaseError> {
+        if let Some(message) = self
+            .heartbeat_error
+            .lock()
+            .map_err(|_| LeaseError::HeartbeatFailed("heartbeat state was poisoned".into()))?
+            .as_ref()
+        {
+            return Err(LeaseError::HeartbeatFailed(message.clone()));
+        }
+        let lease = self
+            .shared
+            .lock()
+            .map_err(|_| LeaseError::HeartbeatFailed("lease state was poisoned".into()))?;
+        lease
+            .as_ref()
+            .ok_or(LeaseError::FencingLost)?
+            .assert_owned()
+    }
+
+    /// Performs an immediate metadata heartbeat and fencing check.
+    pub fn heartbeat_now(&self) -> Result<(), LeaseError> {
+        let mut lease = self
+            .shared
+            .lock()
+            .map_err(|_| LeaseError::HeartbeatFailed("lease state was poisoned".into()))?;
+        lease
+            .as_mut()
+            .ok_or(LeaseError::FencingLost)?
+            .heartbeat(epoch_ms())
+    }
+
+    /// Runs one external device workload under fencing checks.
+    pub fn execute<T>(
+        &self,
+        stage: &str,
+        operation: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.assert_owned()
+            .map_err(anyhow::Error::new)
+            .with_context(|| format!("device lease lost before {stage}"))?;
+        let result = operation().with_context(|| format!("{stage} failed"));
+        self.assert_owned()
+            .map_err(anyhow::Error::new)
+            .with_context(|| format!("device lease lost after {stage}"))?;
+        result
+    }
+
+    pub fn release(mut self) -> Result<(), LeaseError> {
+        self.request_stop();
+        if let Some(thread) = self.heartbeat_thread.take() {
+            thread
+                .join()
+                .map_err(|_| LeaseError::HeartbeatFailed("heartbeat thread panicked".into()))?;
+        }
+        let lease = self
+            .shared
+            .lock()
+            .map_err(|_| LeaseError::HeartbeatFailed("lease state was poisoned".into()))?
+            .take()
+            .ok_or(LeaseError::FencingLost)?;
+        lease.release()
+    }
+
+    fn request_stop(&self) {
+        let (lock, condition) = &*self.stop;
+        if let Ok(mut stop) = lock.lock() {
+            *stop = true;
+            condition.notify_all();
+        }
+    }
+}
+
+impl Drop for DeviceLeaseSession {
+    fn drop(&mut self) {
+        self.request_stop();
+        if let Some(thread) = self.heartbeat_thread.take() {
+            let _ = thread.join();
+        }
+        // Dropping the remaining DeviceLease releases the OS lock and only
+        // removes owner metadata if our fencing token still matches.
+    }
+}
+
+fn heartbeat_loop(
+    shared: Arc<Mutex<Option<DeviceLease>>>,
+    heartbeat_error: Arc<Mutex<Option<String>>>,
+    stop: Arc<(Mutex<bool>, Condvar)>,
+) {
+    loop {
+        let (lock, condition) = &*stop;
+        let guard = match lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                record_heartbeat_error(&heartbeat_error, "heartbeat stop state was poisoned");
+                return;
+            }
+        };
+        let (guard, _) = match condition.wait_timeout(guard, HEARTBEAT_INTERVAL) {
+            Ok(result) => result,
+            Err(_) => {
+                record_heartbeat_error(&heartbeat_error, "heartbeat stop state was poisoned");
+                return;
+            }
+        };
+        if *guard {
+            return;
+        }
+        drop(guard);
+
+        let result = match shared.lock() {
+            Ok(mut lease) => lease
+                .as_mut()
+                .ok_or(LeaseError::FencingLost)
+                .and_then(|lease| lease.heartbeat(epoch_ms())),
+            Err(_) => Err(LeaseError::HeartbeatFailed(
+                "lease state was poisoned".into(),
+            )),
+        };
+        if let Err(error) = result {
+            record_heartbeat_error(&heartbeat_error, &error.to_string());
+            return;
+        }
+    }
+}
+
+fn record_heartbeat_error(target: &Mutex<Option<String>>, message: &str) {
+    if let Ok(mut error) = target.lock() {
+        *error = Some(message.to_string());
     }
 }
 
@@ -245,6 +524,23 @@ fn random_token() -> Result<String, LeaseError> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+fn current_process_start_token() -> Result<String, LeaseError> {
+    // The fencing token is the authorization primitive. This separate opaque
+    // token prevents diagnostics from treating a reused PID as the same
+    // process, including on hosts where querying native process start times is
+    // not portable.
+    Ok(format!("pid-{}-{}", std::process::id(), random_token()?))
+}
+
+fn epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 fn validate_identifier(value: &str) -> Result<(), LeaseError> {
     if value.is_empty()
         || value.len() > MAX_IDENTIFIER_BYTES
@@ -255,6 +551,30 @@ fn validate_identifier(value: &str) -> Result<(), LeaseError> {
         return Err(LeaseError::InvalidIdentifier(value.into()));
     }
     Ok(())
+}
+
+fn validate_device_identifier(value: &str) -> Result<(), LeaseError> {
+    if value.is_empty()
+        || value.len() > MAX_IDENTIFIER_BYTES
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\'))
+    {
+        return Err(LeaseError::InvalidIdentifier(value.into()));
+    }
+    Ok(())
+}
+
+fn path_identifier(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("_{byte:02x}"));
+        }
+    }
+    encoded
 }
 
 fn reject_existing_symlink(path: &Path) -> Result<(), LeaseError> {
@@ -268,16 +588,17 @@ fn reject_existing_symlink(path: &Path) -> Result<(), LeaseError> {
     }
 }
 
-fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), LeaseError> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| LeaseError::InvalidOwner("lease path escapes project root".into()))?;
-    let mut current = root.to_owned();
-    for component in relative.components() {
+fn reject_symlink_path(path: &Path) -> Result<(), LeaseError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
         if matches!(
             component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
         ) {
+            current.push(component.as_os_str());
+            continue;
+        }
+        if matches!(component, std::path::Component::ParentDir) {
             return Err(LeaseError::InvalidOwner(
                 "unsafe lease path component".into(),
             ));
@@ -310,10 +631,13 @@ mod tests {
     #[test]
     fn lease_is_exclusive_and_releases_for_the_next_owner() {
         let root = tempdir().unwrap();
+        let leases = root.path().canonicalize().unwrap().join("leases");
         let first =
-            DeviceLease::acquire(root.path(), "sim-1", "session-a", 10, "start-a", 100).unwrap();
-        let busy = DeviceLease::acquire(root.path(), "sim-1", "session-b", 11, "start-b", 101)
-            .unwrap_err();
+            DeviceLease::acquire_in_directory(&leases, "sim-1", "session-a", 10, "start-a", 100)
+                .unwrap();
+        let busy =
+            DeviceLease::acquire_in_directory(&leases, "sim-1", "session-b", 11, "start-b", 101)
+                .unwrap_err();
         match busy {
             LeaseError::Busy { owner, .. } => {
                 assert_eq!(owner.unwrap().session_id, "session-a");
@@ -322,15 +646,18 @@ mod tests {
         }
         first.release().unwrap();
         let second =
-            DeviceLease::acquire(root.path(), "sim-1", "session-b", 11, "start-b", 102).unwrap();
+            DeviceLease::acquire_in_directory(&leases, "sim-1", "session-b", 11, "start-b", 102)
+                .unwrap();
         assert_eq!(second.owner().fencing_token.len(), 32);
     }
 
     #[test]
     fn heartbeat_and_release_reject_a_replaced_fencing_owner() {
         let root = tempdir().unwrap();
+        let leases = root.path().canonicalize().unwrap().join("leases");
         let mut lease =
-            DeviceLease::acquire(root.path(), "sim-1", "session-a", 10, "start-a", 100).unwrap();
+            DeviceLease::acquire_in_directory(&leases, "sim-1", "session-a", 10, "start-a", 100)
+                .unwrap();
         lease.heartbeat(200).unwrap();
         let mut replaced = lease.owner().clone();
         replaced.fencing_token = "other".into();
@@ -342,8 +669,78 @@ mod tests {
         assert!(matches!(lease.heartbeat(300), Err(LeaseError::FencingLost)));
         assert!(matches!(lease.release(), Err(LeaseError::FencingLost)));
         let next =
-            DeviceLease::acquire(root.path(), "sim-1", "session-b", 11, "start-b", 400).unwrap();
+            DeviceLease::acquire_in_directory(&leases, "sim-1", "session-b", 11, "start-b", 400)
+                .unwrap();
         next.release().unwrap();
+    }
+
+    #[test]
+    fn session_fences_an_external_workload_before_it_runs() {
+        let root = tempdir().unwrap();
+        let leases = root.path().canonicalize().unwrap().join("leases");
+        let lease = DeviceLease::acquire_in_directory(
+            &leases,
+            "emulator-5554",
+            "session-a",
+            10,
+            "start-a",
+            100,
+        )
+        .unwrap();
+        let owner_path = lease.owner_path().to_owned();
+        let session = DeviceLeaseSession::start(lease).unwrap();
+        let mut replaced = session.owner().clone();
+        replaced.fencing_token = "new-owner".into();
+        fs::write(&owner_path, serde_json::to_vec_pretty(&replaced).unwrap()).unwrap();
+
+        let mut ran = false;
+        let error = session
+            .execute("android.install", || {
+                ran = true;
+                Ok::<_, anyhow::Error>(())
+            })
+            .unwrap_err();
+        assert!(!ran);
+        assert!(error.to_string().contains("device lease lost"));
+        drop(session);
+    }
+
+    #[test]
+    fn host_lease_directory_can_be_shared_by_different_project_roots() {
+        let project_a = tempdir().unwrap();
+        let project_b = tempdir().unwrap();
+        let directory_a = host_lease_directory(project_a.path()).unwrap();
+        let directory_b = host_lease_directory(project_b.path()).unwrap();
+        assert_eq!(directory_a, directory_b);
+
+        let first = DeviceLease::acquire_in_directory(
+            &directory_a,
+            "serial:5555",
+            "session-a",
+            10,
+            "start-a",
+            100,
+        )
+        .unwrap();
+        assert!(
+            !first
+                .lock_path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(':')
+        );
+        let busy = DeviceLease::acquire_in_directory(
+            &directory_b,
+            "serial:5555",
+            "session-b",
+            11,
+            "start-b",
+            101,
+        )
+        .unwrap_err();
+        assert!(matches!(busy, LeaseError::Busy { .. }));
+        first.release().unwrap();
     }
 
     #[cfg(unix)]
@@ -354,7 +751,7 @@ mod tests {
         fs::create_dir_all(&leases).unwrap();
         std::os::unix::fs::symlink(root.path(), leases.join("sim-1.lock")).unwrap();
         assert!(matches!(
-            DeviceLease::acquire(root.path(), "sim-1", "session-a", 10, "start-a", 100),
+            DeviceLease::acquire_in_directory(&leases, "sim-1", "session-a", 10, "start-a", 100,),
             Err(LeaseError::InvalidOwner(_))
         ));
     }

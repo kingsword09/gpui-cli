@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result, bail};
 use colored::*;
+use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -617,6 +618,39 @@ pub fn launch_app(serial: &str, bundle_id: &str) -> Result<()> {
             &format!("{bundle_id}/dev.gpui.mobile.GpuiActivity"),
         ],
     )
+}
+
+/// Captures the device framebuffer as a binary PNG. `exec-out` avoids the
+/// shell and never subjects the image bytes to text framing or line endings.
+pub fn capture_screenshot(serial: &str, output: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "refusing to write screenshot through symbolic link: {}",
+                output.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let adb = adb().context("`adb` was not found")?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(output)
+        .with_context(|| format!("opening screenshot output {}", output.display()))?;
+    let status = Command::new(&adb)
+        .args(["-s", serial, "exec-out", "screencap", "-p"])
+        .stdout(Stdio::from(file))
+        .status()
+        .with_context(|| format!("failed to run `adb -s {serial} exec-out screencap -p`"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(output);
+        bail!("`adb -s {serial} exec-out screencap -p` failed");
+    }
+    Ok(())
 }
 
 /// Maps a device-side port onto the same host port over adb, so the app can

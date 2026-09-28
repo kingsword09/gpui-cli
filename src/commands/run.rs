@@ -11,6 +11,7 @@ use crate::runner::build_inputs::{
     DesktopBuildPlan, android_build_plan, desktop_build_plan, ios_build_plan,
 };
 use crate::runner::build_manifest::BuildArtifactManifest;
+use crate::runner::lease::DeviceLeaseSession;
 use crate::runner::output_layout::BuildOutputLayout;
 use crate::template::Platform;
 
@@ -340,6 +341,20 @@ impl IosTarget {
     }
 }
 
+/// Wraps one platform workload with a fencing check. Desktop callers do not
+/// need a device lease, while iOS/Android install, launch, input and capture
+/// callers pass their session through this helper.
+pub(crate) fn leased_device_step<T>(
+    lease: Option<&DeviceLeaseSession>,
+    stage: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    match lease {
+        Some(lease) => lease.execute(stage, operation),
+        None => operation(),
+    }
+}
+
 /// Resolves the iOS destination: a physical device (`--device-only`,
 /// `GPUI_IOS_DEVICE_ID`, or a `--device` naming one), otherwise a simulator.
 pub fn resolve_ios_target(project: &Project, flags: &DeviceFlags) -> Result<IosTarget> {
@@ -569,7 +584,19 @@ pub fn run_ios(project: &Project, flags: &DeviceFlags, release: bool) -> Result<
         IosTarget::Physical(device) => {
             println!("  {} targeting {}", "→".blue(), device.label());
             let app = build_ios_app(project, &IosTarget::Physical(device.clone()), release)?;
-            ios::install_and_launch_device(&device.id, &app, &bundle_id_of(project))?;
+            let lease = DeviceLeaseSession::acquire(&project.root, &device.id)
+                .context("acquiring the iOS device lease")?;
+            let bundle_id = bundle_id_of(project);
+            leased_device_step(Some(&lease), "ios.install", || {
+                ios::install_device(&device.id, &app)
+            })?;
+            leased_device_step(Some(&lease), "ios.launch", || {
+                ios::launch_device(&device.id, &bundle_id)
+            })?;
+            lease
+                .release()
+                .map_err(anyhow::Error::new)
+                .context("releasing the iOS device lease")?;
             println!(
                 "\n{}",
                 format!("🚀 Launched on {}.", device.label()).green()
@@ -581,8 +608,20 @@ pub fn run_ios(project: &Project, flags: &DeviceFlags, release: bool) -> Result<
             // install onto, and this keeps failures early.
             let ready = device::inventory::ensure_running(device)?;
             let app = build_ios_app(project, &IosTarget::Simulator(ready.clone()), release)?;
+            let lease = DeviceLeaseSession::acquire(&project.root, &ready.id)
+                .context("acquiring the iOS simulator lease")?;
+            let bundle_id = bundle_id_of(project);
             println!("  {} installing on {}", "→".blue(), ready.label());
-            ios::install_and_launch(&ready.id, &app, &bundle_id_of(project))?;
+            leased_device_step(Some(&lease), "ios.install", || {
+                ios::install_simulator(&ready.id, &app)
+            })?;
+            leased_device_step(Some(&lease), "ios.launch", || {
+                ios::launch_simulator_with_env(&ready.id, &bundle_id, &[])
+            })?;
+            lease
+                .release()
+                .map_err(anyhow::Error::new)
+                .context("releasing the iOS simulator lease")?;
             println!("\n{}", format!("🚀 Launched on {}.", ready.label()).green());
             Ok(())
         }
@@ -992,11 +1031,22 @@ pub fn run_android(project: &Project, flags: &DeviceFlags, release: bool) -> Res
     let serial = target.serial().context(
         "The selected Android device has no adb serial; re-run `gpui device list` to check it.",
     )?;
+    let lease = DeviceLeaseSession::acquire(&project.root, serial)
+        .context("acquiring the Android device lease")?;
 
     let bundle_id = bundle_id_of_android(project);
 
     println!("  {} installing on {}", "→".blue(), target.label());
-    android::install_and_launch(serial, &apk, &bundle_id)?;
+    leased_device_step(Some(&lease), "android.install", || {
+        android::install_apk(serial, &apk)
+    })?;
+    leased_device_step(Some(&lease), "android.launch", || {
+        android::launch_app(serial, &bundle_id)
+    })?;
+    lease
+        .release()
+        .map_err(anyhow::Error::new)
+        .context("releasing the Android device lease")?;
     println!(
         "\n{}",
         format!("🚀 Launched on {}.", target.label()).green()
