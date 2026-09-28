@@ -7,8 +7,10 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use super::{Device, Kind, Platform, State, capture, try_capture};
 
@@ -493,6 +495,12 @@ pub fn launch_simulator_with_env(
     Ok(())
 }
 
+/// Terminates only the named app on the selected simulator.
+pub fn terminate_simulator(udid: &str, bundle_id: &str) -> Result<()> {
+    let xcrun = xcrun()?;
+    super::run(&xcrun, &["simctl", "terminate", udid, bundle_id])
+}
+
 /// Installs and launches an app bundle on a physical device.
 pub fn install_and_launch_device(udid: &str, app: &std::path::Path, bundle_id: &str) -> Result<()> {
     install_device(udid, app)?;
@@ -557,6 +565,71 @@ pub fn capture_device_screenshot(udid: &str, output: &Path) -> Result<()> {
             &output,
         ],
     )
+}
+
+pub const MAX_SIMULATOR_LOG_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Collects a bounded, finite simulator log snapshot. This intentionally uses
+/// `log show` instead of an unbounded `log stream`: a later runner session can
+/// always collect another snapshot, while a runaway stream must not outlive a
+/// cancelled check. Until process identity is available, callers should mark
+/// the resulting evidence as unassigned.
+pub fn collect_simulator_logs(udid: &str, output: &Path) -> Result<(u64, bool)> {
+    reject_capture_target(output)?;
+    let parent = output
+        .parent()
+        .context("simulator log output has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating simulator log directory {}", parent.display()))?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(output)
+        .with_context(|| format!("opening simulator log output {}", output.display()))?;
+    let xcrun = xcrun()?;
+    let mut child = Command::new(&xcrun)
+        .args([
+            "simctl", "spawn", udid, "log", "show", "--style", "json", "--last", "1m",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("starting simulator log collection for {udid}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("capturing simulator log output")?;
+    let mut file = file;
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut written = 0_u64;
+    let mut truncated = false;
+    loop {
+        let read = stdout
+            .read(&mut buffer)
+            .context("reading simulator log output")?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_SIMULATOR_LOG_BYTES.saturating_sub(written);
+        let to_write = (read as u64).min(remaining) as usize;
+        if to_write > 0 {
+            file.write_all(&buffer[..to_write])
+                .context("writing simulator log output")?;
+            written += to_write as u64;
+        }
+        if to_write < read {
+            truncated = true;
+        }
+    }
+    let status = child
+        .wait()
+        .context("waiting for simulator log collection")?;
+    if !status.success() {
+        let _ = std::fs::remove_file(output);
+        bail!("simulator log collection failed for {udid}");
+    }
+    Ok((written, truncated))
 }
 
 fn reject_capture_target(path: &Path) -> Result<()> {
