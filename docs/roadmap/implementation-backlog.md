@@ -433,7 +433,10 @@ Rust 编译；记录见
 Android default-debug 切片在 BuildKey 纳入 debug keystore 指纹并完整验证 JNI/APK 输出后
 允许命中；release/custom signing 仍 bypass，记录见
 [T06 Android debug manifest cache hit](../experiments/T06-android-debug-cache-hit-2026-09-28.md)。
-真实在途任务共享和缓存清理仍未接入。
+Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次，验证 Android CLI
+第一次 miss、第二次同 key hit 和 APK ABI；它不包含完整 GPUI app 或设备运行，记录见
+[T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。真实在途
+任务共享和缓存清理仍未接入。
 
 ### S04 · 断言和 gpui check 执行器
 
