@@ -30,10 +30,16 @@ required/optional 汇总和 artifact 保留接口；当前已加入配置展开�
 - 新的 parallel executor 为每个 cell 创建独立 runner，按 max_parallel 收集结果，保留
   runner error、迟到成功、cleanup failure 和 artifact ownership 语义；旧的顺序 adapter
   继续作为测试/兼容入口。
+- mobile matrix adapter 已把现有 iOS simulator/Android runner 接到统一 cell 生命周期：
+  prepare 前建立可 fencing 的 run identity，随后执行 launch、设备 PNG capture 和 native
+  logs；process identity/log assignment 不确定时为 inconclusive，capture artifact 仍保留。
+- mobile cleanup 即使 prepare/launch/capture 中途失败也会尝试 stop_owned，随后释放本次
+  host lease；它不关闭用户启动的 simulator/emulator，也不把 lease 丢失当作成功。
 
 ## 尚未覆盖
 
-真实 platform runner dispatch、同一冻结快照构建和 matrix CLI 入口属于后续 M02 子 PR。
+真实 matrix runner factory、scenario step execution、同一冻结快照构建和 matrix CLI 入口
+属于后续 M02 子 PR。
 当前 resource pool 只负责单一 supervisor 的调度互斥，不替代 host-shared
 DeviceLeaseSession；真实设备竞争仍必须经过 OS lease、fencing 和 runner cleanup。当前还
 没有完整 macOS+iOS simulator+Android emulator 运行证据。
