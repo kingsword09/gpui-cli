@@ -1,8 +1,8 @@
 # M01：移动端 runner 契约与证据模型（2026-09-28）
 
 状态：in_progress。本切片交付 iOS simulator / Android emulator 共用的 runner trait、
-run identity、lease fencing 边界和结构化证据类型；iOS simulator adapter 已在后续子 PR
-接入，Android adapter 和完整故障矩阵仍待完成。
+run identity、lease fencing 边界和结构化证据类型；iOS simulator 与 Android adapter 已在
+后续子 PR 接入，完整故障矩阵仍待完成。
 
 ## 契约
 
@@ -27,6 +27,7 @@ run identity、lease fencing 边界和结构化证据类型；iOS simulator adap
 
 ## 尚未覆盖
 
-真实 Android `adb` 安装/启动、iOS 前台/进程身份、旋转/后台切换和 simulator/emulator
-故障矩阵尚未完成；当前纯 Rust 与无设备 CI 测试不宣称有完整 L2 移动设备证据。iOS adapter
-边界与未覆盖项见 [M01 iOS simulator](M01-ios-simulator-2026-09-28.md)。
+真实 iOS 前台/进程身份、旋转/后台切换、Android PID start identity 和 simulator/emulator
+故障矩阵尚未完成；当前纯 Rust 与无设备 CI 测试不宣称有完整 L2 移动设备证据。平台边界见
+[M01 iOS simulator](M01-ios-simulator-2026-09-28.md) 与
+[M01 Android runner](M01-android-runner-2026-09-28.md)。
