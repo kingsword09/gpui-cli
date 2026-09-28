@@ -292,7 +292,7 @@ fn is_busy_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
-    )
+    ) || matches!(error.raw_os_error(), Some(32 | 33))
 }
 
 fn io_error(context: &str, source: io::Error) -> LeaseError {
