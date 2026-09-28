@@ -186,6 +186,10 @@ impl MobileRunner for IosSimulatorRunner {
                 "foreground": "not_probed",
             }),
         );
+        if let Ok(launch) = &result {
+            self.evidence
+                .record_launch_boundaries(&prepared.identity, launch, now_ms());
+        }
         result
     }
 

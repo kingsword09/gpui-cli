@@ -16,6 +16,8 @@ run identity、lease fencing 边界和结构化证据类型；iOS simulator 与 
   前台应用声明；截图不是 scene capture。
 - `EvidenceLog` 以单调序号记录 prepare/install/launch/capture/log/channel/process/stop，
   channel disconnect 可以是 `unknown`，不会被推断成 process exited。
+- launch 成功后会追加 process/channel boundary events：PID 缺失或 channel 未建立/断开为
+  `unknown`；明确的非零 process exit 才是 `failed`。
 - `LogEvidence` 明确 `assigned_to_run`，并在平台可验证时保存 PID 与 process start
   token hash；无法归属的原生日志必须保存为 unassigned。
 
@@ -24,6 +26,8 @@ run identity、lease fencing 边界和结构化证据类型；iOS simulator 与 
 - 预置 identity 的 fencing token 不会出现在 JSON 证据中。
 - identity 不匹配时，外部 workload closure 在执行前不会被调用。
 - channel disconnect 的证据保持 `unknown`，事件序号稳定递增。
+- process exit 没有 exit code 时保持 `unknown`；非零 exit code 才记录 `failed`，且不会把
+  channel 状态改写成 process exit。
 - 非 PNG 被拒绝；PNG header、尺寸、hash、系统 UI 和前台 app 元数据被记录。
 
 ## 尚未覆盖
@@ -33,4 +37,5 @@ run identity、lease fencing 边界和结构化证据类型；iOS simulator 与 
 [M01 iOS simulator](M01-ios-simulator-2026-09-28.md) 与
 [M01 Android runner](M01-android-runner-2026-09-28.md)；Android process identity 记录见
 [M01 Android process identity](M01-android-process-identity-2026-09-28.md)，iOS PID probe 记录见
-[M01 iOS process probe](M01-ios-process-probe-2026-09-28.md)。
+[M01 iOS process probe](M01-ios-process-probe-2026-09-28.md)；fault evidence boundary 记录见
+[M01 mobile fault evidence](M01-fault-evidence-2026-09-28.md)。
