@@ -141,6 +141,14 @@ pub enum DeviceCommands {
         #[arg(long)]
         yes: bool,
     },
+    /// Capture a device screenshot under a host device lease
+    Capture {
+        /// Device id, name or serial
+        id: String,
+        /// PNG output path
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]

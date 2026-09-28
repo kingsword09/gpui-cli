@@ -1,8 +1,11 @@
 use anyhow::{Context, Result, bail};
 use colored::*;
+use std::path::PathBuf;
 
 use crate::DeviceCommands;
+use crate::commands::run::Project;
 use crate::device::{self, Device, Kind, Platform, android, ios};
+use crate::runner::lease::DeviceLeaseSession;
 
 pub fn handle_device(command: DeviceCommands) -> Result<()> {
     match command {
@@ -23,6 +26,7 @@ pub fn handle_device(command: DeviceCommands) -> Result<()> {
         DeviceCommands::Boot { id, last } => boot(id, last),
         DeviceCommands::Shutdown { id, all } => shutdown(id, all),
         DeviceCommands::Remove { id, yes } => remove(id, yes),
+        DeviceCommands::Capture { id, output } => capture(id, output),
     }
 }
 
@@ -384,5 +388,54 @@ fn remove(id: String, yes: bool) -> Result<()> {
         Platform::Android => bail!("Refusing to remove a physical device."),
     }
     println!("\n{}", format!("✓ Removed '{}'.", device.label()).green());
+    Ok(())
+}
+
+fn capture(id: String, output: PathBuf) -> Result<()> {
+    let project = Project::load(None)
+        .context("device capture must run inside a gpui project so its lease is scoped")?;
+    let device = find_any(&id)?;
+    if !device.launchable() {
+        bail!(
+            "`{}` cannot be captured: {}",
+            device.label(),
+            device.state_label()
+        );
+    }
+    let device = device::inventory::ensure_running(device)?;
+    let output = if output.is_absolute() {
+        output
+    } else {
+        project.root.join(output)
+    };
+    let lease_device_id = match device.platform {
+        Platform::Android => device.serial().unwrap_or(&device.id).to_owned(),
+        Platform::Ios => device.id.clone(),
+    };
+    let lease = DeviceLeaseSession::acquire(&project.root, &lease_device_id)
+        .context("acquiring the device lease for capture")?;
+    let result = match device.platform {
+        Platform::Ios if device.kind == Kind::Emulator => lease.execute("ios.capture", || {
+            ios::capture_simulator_screenshot(&device.id, &output)
+        }),
+        Platform::Ios => lease.execute("ios.capture", || {
+            ios::capture_device_screenshot(&device.id, &output)
+        }),
+        Platform::Android => {
+            let serial = device.serial().unwrap_or(&device.id);
+            lease.execute("android.capture", || {
+                android::capture_screenshot(serial, &output)
+            })
+        }
+    };
+    result?;
+    lease
+        .release()
+        .map_err(anyhow::Error::new)
+        .context("releasing the device lease after capture")?;
+    println!(
+        "{}",
+        format!("✓ Captured {} to {}.", device.label(), output.display()).green()
+    );
     Ok(())
 }

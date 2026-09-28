@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{Device, Kind, Platform, State, capture, try_capture};
@@ -530,6 +530,47 @@ pub fn launch_device(udid: &str, bundle_id: &str) -> Result<()> {
             bundle_id,
         ],
     )
+}
+
+/// Captures the simulator's current framebuffer as a PNG without routing the
+/// bytes through stdout or text conversion.
+pub fn capture_simulator_screenshot(udid: &str, output: &Path) -> Result<()> {
+    reject_capture_target(output)?;
+    let xcrun = xcrun()?;
+    let output = output.to_string_lossy().into_owned();
+    super::run(&xcrun, &["simctl", "io", udid, "screenshot", &output])
+}
+
+/// Captures a physical iOS device screenshot through CoreDevice.
+pub fn capture_device_screenshot(udid: &str, output: &Path) -> Result<()> {
+    reject_capture_target(output)?;
+    let xcrun = xcrun()?;
+    let output = output.to_string_lossy().into_owned();
+    super::run(
+        &xcrun,
+        &[
+            "devicectl",
+            "device",
+            "screenshot",
+            "--device",
+            udid,
+            &output,
+        ],
+    )
+}
+
+fn reject_capture_target(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "refusing to write screenshot through symbolic link: {}",
+                path.display()
+            )
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
