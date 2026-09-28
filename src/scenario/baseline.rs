@@ -319,10 +319,10 @@ pub fn diff_png(baseline: &LoadedBaseline, actual: &[u8]) -> Result<DiffPng, Str
         .ok_or_else(|| "image_pixel_count_overflow".to_owned())?;
     let mut diff = vec![0_u8; actual_rgba.len()];
     let mut changed_pixels = 0_u64;
-    for (index, (baseline_pixel, actual_pixel)) in baseline_rgba
-        .chunks_exact(4)
-        .zip(actual_rgba.chunks_exact(4))
-        .enumerate()
+    let (baseline_pixels, _) = baseline_rgba.as_chunks::<4>();
+    let (actual_pixels, _) = actual_rgba.as_chunks::<4>();
+    for (index, (baseline_pixel, actual_pixel)) in
+        baseline_pixels.iter().zip(actual_pixels.iter()).enumerate()
     {
         if baseline_pixel != actual_pixel {
             changed_pixels = changed_pixels.saturating_add(1);
@@ -375,7 +375,8 @@ fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     match info.color_type {
         ColorType::Rgba => rgba.extend_from_slice(data),
         ColorType::Rgb => {
-            for pixel in data.chunks_exact(3) {
+            let (pixels, _) = data.as_chunks::<3>();
+            for pixel in pixels {
                 rgba.extend_from_slice(pixel);
                 rgba.push(255);
             }
@@ -386,7 +387,8 @@ fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             }
         }
         ColorType::GrayscaleAlpha => {
-            for pixel in data.chunks_exact(2) {
+            let (pixels, _) = data.as_chunks::<2>();
+            for pixel in pixels {
                 rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
             }
         }
