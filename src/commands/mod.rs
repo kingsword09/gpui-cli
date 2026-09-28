@@ -1,5 +1,6 @@
 pub mod build;
 pub mod cache;
+pub mod check;
 pub mod completions;
 pub mod dev;
 pub mod device;
