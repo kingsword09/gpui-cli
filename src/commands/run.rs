@@ -458,7 +458,12 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         .context("iOS output layout did not provide a DerivedData path")?;
     let app_path = xcode_app_path(derived_dir, &scheme, device, release);
 
-    match lookup_ios_app_for_target(layout, &plan.key, &app_path, device) {
+    let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
+        BuildCacheLookup::Miss(reason.clone())
+    } else {
+        lookup_ios_app_for_target(layout, &plan.key, &app_path, device)
+    };
+    match cache_lookup {
         BuildCacheLookup::Hit(manifest) => {
             println!(
                 "  {} iOS BuildKey cache hit: {} verified artifact(s)",

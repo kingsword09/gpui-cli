@@ -21,9 +21,17 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "CARGO_PROFILE_RELEASE_OPT_LEVEL",
     "CC",
     "CXX",
+    "CODE_SIGNING_ALLOWED",
+    "CODE_SIGN_IDENTITY",
+    "CODE_SIGNING_REQUIRED",
+    "DEVELOPER_DIR",
+    "DEVELOPMENT_TEAM",
+    "IPHONEOS_DEPLOYMENT_TARGET",
     "MACOSX_DEPLOYMENT_TARGET",
+    "PROVISIONING_PROFILE_SPECIFIER",
     "RUSTC_WRAPPER",
     "RUSTFLAGS",
+    "SDKROOT",
     "JAVA_HOME",
 ];
 
@@ -65,6 +73,7 @@ pub struct IosBuildPlan {
     pub key: BuildKey,
     pub layout: BuildOutputLayout,
     pub snapshot: FrozenBuildRoot,
+    pub cache_hit_disabled_reason: Option<String>,
 }
 
 pub struct AndroidBuildPlan {
@@ -158,8 +167,11 @@ pub fn ios_build_plan(root: &Path, release: bool, rust_target: &str) -> Result<I
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving iOS build root for freeze: {}", root.display()))?;
     let snapshot = FrozenBuildRoot::create(&root)?;
-    let (_, toolchain_fingerprint) = rustc_identity()?;
-    let native = NativeInputs::scan(&snapshot.root)?;
+    let (_, rustc_fingerprint) = rustc_identity()?;
+    let mut native = NativeInputs::scan(&snapshot.root)?;
+    let xcode_fingerprint = ios_xcode_sdk_fingerprint(rust_target);
+    let (toolchain_fingerprint, cache_hit_disabled_reason) =
+        bind_ios_toolchain_identity(&mut native, &rustc_fingerprint, xcode_fingerprint);
     let key = build_key_from_inputs(
         &snapshot.manifest,
         snapshot.input_hash.clone(),
@@ -175,17 +187,75 @@ pub fn ios_build_plan(root: &Path, release: bool, rust_target: &str) -> Result<I
         key,
         layout,
         snapshot,
+        cache_hit_disabled_reason,
     })
 }
 
 pub fn ios_build_key(root: &Path, release: bool, rust_target: &str) -> Result<BuildKey> {
-    let (_, toolchain_fingerprint) = rustc_identity()?;
-    build_key_for_target(
-        root,
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving iOS build root: {}", root.display()))?;
+    let manifest = Inputs::scan_stable(&root, 2)?;
+    let mut native = NativeInputs::scan(&root)?;
+    let (_, rustc_fingerprint) = rustc_identity()?;
+    let xcode_fingerprint = ios_xcode_sdk_fingerprint(rust_target);
+    let (toolchain_fingerprint, _) =
+        bind_ios_toolchain_identity(&mut native, &rustc_fingerprint, xcode_fingerprint);
+    build_key_from_inputs(
+        &manifest,
+        manifest.digest(),
+        &native,
         rust_target.to_string(),
         release,
         toolchain_fingerprint,
         None,
+    )
+}
+
+fn ios_xcode_sdk_fingerprint(rust_target: &str) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let sdk = match rust_target {
+        "aarch64-apple-ios" => "iphoneos",
+        "aarch64-apple-ios-sim" => "iphonesimulator",
+        _ => return None,
+    };
+    let xcode_version = command_stdout("xcodebuild", &["-version"])?;
+    let sdk_version = command_stdout("xcrun", &["--sdk", sdk, "--show-sdk-version"])?;
+    let sdk_build = command_stdout("xcrun", &["--sdk", sdk, "--show-sdk-build-version"])?;
+    let identity =
+        format!("xcode={xcode_version}\nsdk={sdk}\nversion={sdk_version}\nbuild={sdk_build}");
+    Some(format!("{:x}", Sha256::digest(identity.as_bytes())))
+}
+
+fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn bind_ios_toolchain_identity(
+    native: &mut NativeInputs,
+    rustc_fingerprint: &str,
+    xcode_fingerprint: Option<String>,
+) -> (String, Option<String>) {
+    let (xcode_identity, disabled_reason) = match xcode_fingerprint {
+        Some(fingerprint) => (fingerprint, None),
+        None => (
+            "unavailable".into(),
+            Some("Xcode/SDK toolchain identity is unavailable; iOS cache reuse is disabled".into()),
+        ),
+    };
+    native
+        .external_hashes
+        .insert("ios.xcode-sdk-toolchain".into(), xcode_identity.clone());
+    let combined = format!("rustc={rustc_fingerprint}\nxcode-sdk={xcode_identity}");
+    (
+        format!("{:x}", Sha256::digest(combined.as_bytes())),
+        disabled_reason,
     )
 }
 
@@ -560,6 +630,57 @@ mod tests {
                 .as_ref()
                 .is_some_and(|path| path.ends_with("derived-data"))
         );
+    }
+
+    #[test]
+    fn ios_xcode_sdk_fingerprint_changes_the_toolchain_key_and_missing_identity_disables_cache() {
+        let mut first_native = NativeInputs::default();
+        let (first, first_disabled) = bind_ios_toolchain_identity(
+            &mut first_native,
+            "rustc-hash",
+            Some("xcode-sdk-a".into()),
+        );
+        assert!(first_disabled.is_none());
+        assert_eq!(
+            first_native
+                .external_hashes
+                .get("ios.xcode-sdk-toolchain")
+                .map(String::as_str),
+            Some("xcode-sdk-a")
+        );
+
+        let mut second_native = NativeInputs::default();
+        let (second, second_disabled) = bind_ios_toolchain_identity(
+            &mut second_native,
+            "rustc-hash",
+            Some("xcode-sdk-b".into()),
+        );
+        assert!(second_disabled.is_none());
+        assert_ne!(first, second);
+
+        let mut unavailable_native = NativeInputs::default();
+        let (unavailable, disabled_reason) =
+            bind_ios_toolchain_identity(&mut unavailable_native, "rustc-hash", None);
+        assert!(
+            disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("identity is unavailable"))
+        );
+        assert_ne!(first, unavailable);
+        assert_eq!(
+            unavailable_native
+                .external_hashes
+                .get("ios.xcode-sdk-toolchain")
+                .map(String::as_str),
+            Some("unavailable")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ios_xcode_sdk_fingerprint_reads_the_active_simulator_toolchain() {
+        assert!(ios_xcode_sdk_fingerprint("aarch64-apple-ios-sim").is_some());
+        assert!(ios_xcode_sdk_fingerprint("aarch64-apple-ios").is_some());
     }
 
     #[test]
