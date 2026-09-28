@@ -5,9 +5,11 @@
 //! tolerance/mask algorithms can be added later without treating an unknown
 //! or incomparable image as a pass.
 
+use png::{BitDepth, ColorType, Decoder, Encoder, Transformations};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -67,6 +69,15 @@ pub struct LoadedBaseline {
     pub image_path: PathBuf,
     pub manifest: BaselineManifest,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiffPng {
+    pub bytes: Vec<u8>,
+    pub changed_pixels: u64,
+    pub total_pixels: u64,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -290,6 +301,105 @@ pub fn compare_png(baseline: &LoadedBaseline, actual: &[u8]) -> BaselineComparis
     }
 }
 
+/// Build a bounded red-on-transparent diff image for two same-sized PNGs.
+///
+/// This is diagnostic output only: it never changes the comparison result,
+/// manifest, tolerance, or approval state. A decode failure is reported to
+/// the caller instead of producing a misleading placeholder image.
+pub fn diff_png(baseline: &LoadedBaseline, actual: &[u8]) -> Result<DiffPng, String> {
+    let (baseline_width, baseline_height, baseline_rgba) =
+        decode_rgba(&baseline.bytes).map_err(|error| format!("baseline_decode_failed:{error}"))?;
+    let (actual_width, actual_height, actual_rgba) =
+        decode_rgba(actual).map_err(|error| format!("actual_decode_failed:{error}"))?;
+    if (baseline_width, baseline_height) != (actual_width, actual_height) {
+        return Err("image_dimensions_mismatch".into());
+    }
+    let total_pixels = u64::from(actual_width)
+        .checked_mul(u64::from(actual_height))
+        .ok_or_else(|| "image_pixel_count_overflow".to_owned())?;
+    let mut diff = vec![0_u8; actual_rgba.len()];
+    let mut changed_pixels = 0_u64;
+    for (index, (baseline_pixel, actual_pixel)) in baseline_rgba
+        .chunks_exact(4)
+        .zip(actual_rgba.chunks_exact(4))
+        .enumerate()
+    {
+        if baseline_pixel != actual_pixel {
+            changed_pixels = changed_pixels.saturating_add(1);
+            let offset = index * 4;
+            diff[offset..offset + 4].copy_from_slice(&[255, 0, 0, 255]);
+        }
+    }
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = Encoder::new(&mut bytes, actual_width, actual_height);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|error| format!("diff_encode_failed:{error}"))?;
+        writer
+            .write_image_data(&diff)
+            .map_err(|error| format!("diff_encode_failed:{error}"))?;
+    }
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err("diff_image_too_large".into());
+    }
+    Ok(DiffPng {
+        bytes,
+        changed_pixels,
+        total_pixels,
+        pixel_width: actual_width,
+        pixel_height: actual_height,
+    })
+}
+
+fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut decoder = Decoder::new(Cursor::new(bytes));
+    decoder.set_transformations(Transformations::EXPAND | Transformations::STRIP_16);
+    let mut reader = decoder.read_info().map_err(|error| error.to_string())?;
+    let output_size = reader.output_buffer_size();
+    let mut buffer = vec![0_u8; output_size];
+    let info = reader
+        .next_frame(&mut buffer)
+        .map_err(|error| error.to_string())?;
+    let data = &buffer[..info.buffer_size()];
+    let pixels = u64::from(info.width)
+        .checked_mul(u64::from(info.height))
+        .ok_or_else(|| "image_pixel_count_overflow".to_owned())?;
+    let expected_rgba = pixels
+        .checked_mul(4)
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or_else(|| "decoded_image_too_large".to_owned())?;
+    let mut rgba = Vec::with_capacity(expected_rgba);
+    match info.color_type {
+        ColorType::Rgba => rgba.extend_from_slice(data),
+        ColorType::Rgb => {
+            for pixel in data.chunks_exact(3) {
+                rgba.extend_from_slice(pixel);
+                rgba.push(255);
+            }
+        }
+        ColorType::Grayscale => {
+            for &value in data {
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        ColorType::GrayscaleAlpha => {
+            for pixel in data.chunks_exact(2) {
+                rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
+            }
+        }
+        ColorType::Indexed => {
+            return Err("indexed_color_not_expanded".into());
+        }
+    }
+    if rgba.len() != expected_rgba {
+        return Err("decoded_image_size_mismatch".into());
+    }
+    Ok((info.width, info.height, rgba))
+}
+
 fn validate_manifest(manifest: &BaselineManifest, baseline_id: &str) -> Result<(), String> {
     if manifest.schema_version != SCHEMA_VERSION {
         return Err(format!(
@@ -463,6 +573,21 @@ mod tests {
         bytes
     }
 
+    fn valid_png(first_red: u8) -> Vec<u8> {
+        let mut pixels = vec![[0_u8, 0, 0, 255]; 6];
+        pixels[0][0] = first_red;
+        let data = pixels.into_iter().flatten().collect::<Vec<_>>();
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut bytes, 2, 3);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&data).unwrap();
+        }
+        bytes
+    }
+
     fn write_manifest(root: &Path, image: &[u8], baseline_key: BaselineKey) {
         let dir = root.join("dev/baselines/macos/counter-baseline");
         fs::create_dir_all(&dir).unwrap();
@@ -536,6 +661,36 @@ mod tests {
             compare_png(&baseline, &png(3, 3, 1)),
             BaselineComparison::NotComparable { code, .. } if code == "image_dimensions_mismatch"
         ));
+    }
+
+    #[test]
+    fn diff_png_marks_changed_pixels_without_changing_comparison_contract() {
+        let root = tempdir().unwrap();
+        let image = valid_png(1);
+        write_manifest(root.path(), &image, key());
+        let (status, loaded) = load_baseline(root.path(), "macos", "counter-baseline", &key());
+        assert_eq!(status, BaselineLoad::Loaded);
+        let diff = diff_png(&loaded.unwrap(), &valid_png(2)).unwrap();
+        assert_eq!(diff.changed_pixels, 1);
+        assert_eq!(diff.total_pixels, 6);
+        assert_eq!((diff.pixel_width, diff.pixel_height), (2, 3));
+        let (_, _, rgba) = decode_rgba(&diff.bytes).unwrap();
+        assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
+        assert_eq!(&rgba[4..8], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn diff_png_rejects_an_undecodable_capture() {
+        let root = tempdir().unwrap();
+        let image = valid_png(1);
+        write_manifest(root.path(), &image, key());
+        let (status, loaded) = load_baseline(root.path(), "macos", "counter-baseline", &key());
+        assert_eq!(status, BaselineLoad::Loaded);
+        assert!(
+            diff_png(&loaded.unwrap(), &png(2, 3, 2))
+                .unwrap_err()
+                .starts_with("actual_decode_failed:")
+        );
     }
 
     #[test]

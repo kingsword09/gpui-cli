@@ -14,15 +14,18 @@ artifact；它不创建、批准、更新或放宽任何 baseline。
   kind、size、offset/EOF、base64 和 SHA-256；不会读取任意宿主路径。
 - 使用 exact-sha256-v1 comparator，结果区分 matched、different 和 not_comparable。缺失、
   损坏、key 不可比和环境字段缺失都保持 inconclusive。
+- different 在两张 PNG 能可靠解码且尺寸相同的情况下生成红色差异图，原子写入项目
+  .gpui/checks/，报告保存相对路径、字节数、SHA-256、变化像素数和尺寸。diff 写入失败
+  只影响诊断引用，不把视觉失败变成通过或 inconclusive。
 - 断言 actual 保存 artifact_id、baseline_id、key、capture scope/provider、逻辑/像素
-  尺寸、scale、comparable/matches/reason，便于复核结果所使用的输入。
+  尺寸、scale、comparable/matches/reason 及可选 diff 引用，便于复核结果所使用的输入。
 
 ## 当前限制
 
 生成模板能报告 OS、theme 和 locale；backend 与 font fingerprint 通过显式
 GPUI_PREVIEW_BACKEND / GPUI_PREVIEW_FONT_FINGERPRINT 环境值传入。未提供这两个真实
-值时，不会把截图 hash 当成严格 baseline 通过。当前不支持 tolerance、mask、diff artifact、
-baseline approval/update、移动端 provider 或矩阵调度。
+值时，不会把截图 hash 当成严格 baseline 通过。当前不支持 tolerance、mask、动态区域
+配置、baseline approval/update、移动端 provider 或矩阵调度。
 
 ## 验证
 

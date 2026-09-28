@@ -33,7 +33,7 @@
   通过、批准或更新。
 - check 当前只支持 desktop；移动端设备租约、真实模拟器 runner、矩阵调度和 20 次证据尚未
   接入。
-- capture step report 目前仍只保留 capture kind；screenshot_matches 断言已经保留其 PNG
-  artifact/key 引用，视觉 diff 仍由后续切片补齐。
+- capture step report 目前仍只保留 capture kind；screenshot_matches 断言保留其 PNG
+  artifact/key 引用，视觉 mismatch 在可解码时另生成 .gpui/checks/*.diff.png。
 - 本地没有真实 macOS 图形会话时，observe 会明确返回 unavailable/inconclusive；不以模板
   编译通过替代窗口运行证据。
