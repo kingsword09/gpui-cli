@@ -185,6 +185,11 @@ pub enum Commands {
         #[command(flatten)]
         device: DeviceArgs,
     },
+    /// Inspect and clean local BuildKey outputs
+    Cache {
+        #[command(subcommand)]
+        command: commands::cache::CacheCommands,
+    },
     /// Discover, create and manage simulators, emulators and devices
     Device {
         #[command(subcommand)]
@@ -255,6 +260,7 @@ fn main() -> anyhow::Result<()> {
             release,
             device,
         }) => commands::build::handle_build(Some(target), release, device.into())?,
+        Some(Commands::Cache { command }) => commands::cache::handle_cache(command)?,
         Some(Commands::Device { command }) => commands::device::handle_device(command)?,
         Some(Commands::Dev(args)) => commands::dev::handle_dev(args)?,
         Some(Commands::Scenario(args)) => commands::scenario::handle_scenario(args)?,
