@@ -11,6 +11,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use super::{Device, Kind, Platform, State, capture, try_capture};
 
@@ -495,6 +496,87 @@ pub fn launch_simulator_with_env(
     Ok(())
 }
 
+/// Process identity available from the simulator's launchd service table.
+/// This is intentionally PID-only until a simulator-supported start-time
+/// source is verified; callers must not present it as a start token.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SimulatorProcessIdentity {
+    pub pid: u32,
+    pub launchd_domain: String,
+}
+
+/// Maximum time spent waiting for the launchd service entry after launch.
+pub const SIMULATOR_PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Finds a running simulator app through its launchd service entry. The user
+/// domain is discovered from the simulator instead of assuming UID 501, with
+/// a system-domain fallback for platform-managed app services.
+pub fn simulator_process_identity(
+    udid: &str,
+    bundle_id: &str,
+) -> Result<Option<SimulatorProcessIdentity>> {
+    let xcrun = xcrun()?;
+    let uid = try_capture(&xcrun, &["simctl", "spawn", udid, "id", "-u"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let mut domains = Vec::with_capacity(2);
+    if let Some(uid) = uid {
+        domains.push(format!("gui/{uid}/{bundle_id}"));
+    }
+    domains.push(format!("system/{bundle_id}"));
+
+    for domain in domains {
+        let Some(output) = try_capture(
+            &xcrun,
+            &[
+                "simctl",
+                "spawn",
+                udid,
+                "launchctl",
+                "print",
+                domain.as_str(),
+            ],
+        ) else {
+            continue;
+        };
+        if let Some(pid) = parse_launchctl_pid(&output) {
+            return Ok(Some(SimulatorProcessIdentity {
+                pid,
+                launchd_domain: domain,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Waits briefly for launchd to publish the app process after `simctl launch`.
+pub fn wait_for_simulator_process(
+    udid: &str,
+    bundle_id: &str,
+) -> Result<Option<SimulatorProcessIdentity>> {
+    let deadline = Instant::now() + SIMULATOR_PROCESS_PROBE_TIMEOUT;
+    loop {
+        if let Some(identity) = simulator_process_identity(udid, bundle_id)? {
+            return Ok(Some(identity));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn parse_launchctl_pid(output: &str) -> Option<u32> {
+    output.lines().find_map(|line| {
+        let value = line
+            .trim()
+            .strip_prefix("pid")?
+            .trim_start()
+            .strip_prefix('=')?;
+        value.trim().parse::<u32>().ok()
+    })
+}
+
 /// Terminates only the named app on the selected simulator.
 pub fn terminate_simulator(udid: &str, bundle_id: &str) -> Result<()> {
     let xcrun = xcrun()?;
@@ -574,7 +656,7 @@ pub const MAX_SIMULATOR_LOG_BYTES: u64 = 8 * 1024 * 1024;
 /// always collect another snapshot, while a runaway stream must not outlive a
 /// cancelled check. Until process identity is available, callers should mark
 /// the resulting evidence as unassigned.
-pub fn collect_simulator_logs(udid: &str, output: &Path) -> Result<(u64, bool)> {
+pub fn collect_simulator_logs(udid: &str, output: &Path, pid: Option<u32>) -> Result<(u64, bool)> {
     reject_capture_target(output)?;
     let parent = output
         .parent()
@@ -588,10 +670,15 @@ pub fn collect_simulator_logs(udid: &str, output: &Path) -> Result<(u64, bool)> 
         .open(output)
         .with_context(|| format!("opening simulator log output {}", output.display()))?;
     let xcrun = xcrun()?;
+    let predicate = pid.map(|pid| format!("processID == {pid}"));
+    let mut args = vec![
+        "simctl", "spawn", udid, "log", "show", "--style", "json", "--last", "1m",
+    ];
+    if let Some(predicate) = predicate.as_deref() {
+        args.extend(["--predicate", predicate]);
+    }
     let mut child = Command::new(&xcrun)
-        .args([
-            "simctl", "spawn", udid, "log", "show", "--style", "json", "--last", "1m",
-        ])
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -648,4 +735,25 @@ fn reject_capture_target(path: &Path) -> Result<()> {
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_launchctl_pid;
+
+    #[test]
+    fn parses_a_launchctl_pid_without_matching_unrelated_fields() {
+        let output = "state = running\npid = 4242\nlast exit code = 0\n";
+        assert_eq!(parse_launchctl_pid(output), Some(4242));
+        assert_eq!(
+            parse_launchctl_pid("state = running\nlast exit code = 0\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_non_numeric_launchctl_pid() {
+        assert_eq!(parse_launchctl_pid("pid = -\n"), None);
+        assert_eq!(parse_launchctl_pid("pid = not-a-pid\n"), None);
+    }
 }
