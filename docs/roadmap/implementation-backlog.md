@@ -398,8 +398,12 @@ Xcode DerivedData 放入 `.gpui/builds/ios/<key>`；见
 [M04 iOS BuildKey](../experiments/M04-ios-build-key-2026-09-27.md)。Android 多 ABI 的
 非 live `build`/`run` 也已使用 ABI 集合对应的 BuildKey，将 Cargo target、JNI staging
 和 Gradle app build 放入 `.gpui/builds/android/<key>`；见
-[M04 Android BuildKey](../experiments/M04-android-build-key-2026-09-27.md)。iOS key 另纳入当前
-Xcode build 与目标 SDK version/build 指纹；身份不可读时关闭 simulator cache hit，记录见
+[M04 Android BuildKey](../experiments/M04-android-build-key-2026-09-27.md)。Android key 另纳入
+SDK platforms/build-tools package revision、NDK revision、cargo-ndk 与 Java 版本摘要；身份
+不可读或 SDK/NDK 环境冲突时关闭 Android cache hit，记录见
+[M04 Android toolchain fingerprint](../experiments/M04-android-toolchain-fingerprint-2026-09-28.md)。
+iOS key 另纳入当前 Xcode build 与目标 SDK version/build 指纹；身份不可读时关闭 simulator
+cache hit，记录见
 [M04 iOS Xcode/SDK fingerprint](../experiments/M04-ios-xcode-sdk-fingerprint-2026-09-28.md)。
 live builder、snapshot build orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
 尚未接入。非 live 命令也已接入各自的临时 `FrozenInputs` 工作根；desktop 的切片见

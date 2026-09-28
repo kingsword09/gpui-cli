@@ -16,6 +16,10 @@ manifest cache hit；release/custom signing、live Android 和真实任务共享
   [M04 frozen sensitive input filter](M04-frozen-sensitive-input-filter-2026-09-28.md)；
 - Android 请求按 BuildKey 获取 OS 文件锁，锁覆盖 manifest lookup、miss 后的 cargo-ndk/
   Gradle 构建和 manifest 发布；
+- Android BuildKey 纳入 SDK 已安装 platform/build-tools revision、`ANDROID_NDK_HOME` 的 NDK
+  revision、`cargo ndk --version` 与 Gradle launcher Java 版本摘要；未能唯一确认 SDK/NDK 路径或读取
+  工具版本时 cache hit bypass，细节见
+  [M04 Android toolchain fingerprint](M04-android-toolchain-fingerprint-2026-09-28.md)；
 - 命中要求 read_verified 校验 Android platform、BuildKey 和全部已登记文件，并要求 roots
   精确等于当前 JNI staging 目录和 APK variant 输出目录；APK metadata 还须能解析出唯一、
   存在的 APK；
@@ -34,7 +38,8 @@ manifest cache hit；release/custom signing、live Android 和真实任务共享
 ## 未覆盖
 
 - Gradle 脚本的 signing 检测基于显式配置标记，无法静态证明任意第三方插件没有隐藏签名输入；
-- NDK/Gradle/JDK 的实际安装版本、未声明 build-script I/O、release signing 和复杂 keystore
-  来源仍未完整纳入 BuildKey；相关构建不能宣称跨环境完全可复现；
+- SDK/NDK package 内容与相同 revision 的文件替换、Gradle wrapper 下载 distribution、AGP/
+  Gradle plugin 隐藏读取和任意 build-script I/O 未完整纳入 BuildKey，不能宣称跨环境完全
+  可复现；release signing 和复杂 keystore 来源也仍未建模；
 - Android custom/release cache hit、iOS 真机 cache hit、live builder、在途任务取消引用、
   缓存清理与容量预算仍未接入。

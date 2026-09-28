@@ -6,6 +6,7 @@ use crate::devserver::inputs::{Inputs, NativeInputs};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +15,7 @@ use tempfile::TempDir;
 const RELEVANT_ENVIRONMENT: &[&str] = &[
     "ANDROID_HOME",
     "ANDROID_NDK_HOME",
+    "ANDROID_SDK_ROOT",
     "CARGO_BUILD_TARGET",
     "CARGO_INCREMENTAL",
     "CARGO_PROFILE_DEV_OPT_LEVEL",
@@ -28,6 +30,7 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "DEVELOPMENT_TEAM",
     "IPHONEOS_DEPLOYMENT_TARGET",
     "MACOSX_DEPLOYMENT_TARGET",
+    "NDK_HOME",
     "PROVISIONING_PROFILE_SPECIFIER",
     "RUSTC_WRAPPER",
     "RUSTFLAGS",
@@ -286,7 +289,12 @@ pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<
     let manifest = Inputs::scan_stable(&root, 2)?;
     let mut native = NativeInputs::scan(&root)?;
     let _ = android_cache_signing_policy(&root, release, &mut native)?;
-    let (_, toolchain_fingerprint) = rustc_identity()?;
+    let (_, rustc_fingerprint) = rustc_identity()?;
+    let (toolchain_fingerprint, _) = bind_android_toolchain_identity(
+        &mut native,
+        &rustc_fingerprint,
+        android_toolchain_fingerprint(),
+    );
     build_key_from_inputs(
         &manifest,
         manifest.digest(),
@@ -316,15 +324,22 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         .join("+");
     let abi_set = abis.join("+");
     let snapshot = FrozenBuildRoot::create(&root)?;
-    let (_, toolchain_fingerprint) = rustc_identity()?;
+    let (_, rustc_fingerprint) = rustc_identity()?;
     let mut native = NativeInputs::scan(&snapshot.root)?;
     native
         .excluded_sensitive_files
         .extend(snapshot.manifest.excluded_sensitive_files.iter().cloned());
     native.excluded_sensitive_files.sort();
     native.excluded_sensitive_files.dedup();
-    let (cache_hit_disabled_reason, debug_keystore_identity) =
+    let (signing_disabled_reason, debug_keystore_identity) =
         android_cache_signing_policy(&snapshot.root, release, &mut native)?;
+    let (toolchain_fingerprint, toolchain_disabled_reason) = bind_android_toolchain_identity(
+        &mut native,
+        &rustc_fingerprint,
+        android_toolchain_fingerprint(),
+    );
+    let cache_hit_disabled_reason =
+        combine_cache_hit_disabled_reasons([toolchain_disabled_reason, signing_disabled_reason]);
     let key = build_key_from_inputs(
         &snapshot.manifest,
         snapshot.input_hash.clone(),
@@ -344,6 +359,154 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         cache_hit_disabled_reason,
         debug_keystore_identity,
     })
+}
+
+fn android_toolchain_fingerprint() -> Option<String> {
+    let sdk_root = consistent_environment_directory(&["ANDROID_HOME", "ANDROID_SDK_ROOT"])?;
+    let ndk_home = consistent_environment_directory(&["ANDROID_NDK_HOME"])?;
+    if env::var_os("NDK_HOME").is_some()
+        && consistent_environment_directory(&["NDK_HOME"]).as_ref() != Some(&ndk_home)
+    {
+        return None;
+    }
+    let sdk_packages = android_sdk_package_fingerprint(&sdk_root)?;
+    let ndk_revision = android_package_revision(&ndk_home.join("source.properties"))?;
+    let cargo_ndk = command_version("cargo", &["ndk", "--version"], false)?;
+    let java = java_version()?;
+    let identity = format!(
+        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\ncargo-ndk={cargo_ndk}\njava={java}"
+    );
+    Some(format!("{:x}", Sha256::digest(identity.as_bytes())))
+}
+
+fn consistent_environment_directory(names: &[&str]) -> Option<PathBuf> {
+    let mut paths = Vec::new();
+    for name in names {
+        let Some(value) = env::var_os(name) else {
+            continue;
+        };
+        if value.is_empty() {
+            return None;
+        }
+        paths.push(Some(PathBuf::from(value)));
+    }
+    consistent_directories(paths)
+}
+
+fn consistent_directories(paths: impl IntoIterator<Item = Option<PathBuf>>) -> Option<PathBuf> {
+    let mut selected: Option<PathBuf> = None;
+    for path in paths.into_iter().flatten() {
+        let path = fs::canonicalize(path).ok()?;
+        if !path.is_dir() || selected.as_ref().is_some_and(|current| current != &path) {
+            return None;
+        }
+        selected = Some(path);
+    }
+    selected
+}
+
+fn android_sdk_package_fingerprint(sdk_root: &Path) -> Option<String> {
+    let mut packages = Vec::new();
+    for category in ["platforms", "build-tools"] {
+        let category_path = sdk_root.join(category);
+        let category_metadata = fs::symlink_metadata(&category_path).ok()?;
+        if category_metadata.file_type().is_symlink() || !category_metadata.is_dir() {
+            return None;
+        }
+        let mut category_count = 0usize;
+        for entry in fs::read_dir(&category_path).ok()? {
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            if name.starts_with('.') {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(entry.path()).ok()?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return None;
+            }
+            let revision = android_package_revision(&entry.path().join("source.properties"))?;
+            packages.push(format!("{category}/{name}={revision}"));
+            category_count += 1;
+        }
+        if category_count == 0 {
+            return None;
+        }
+    }
+    packages.sort();
+    Some(packages.join("\n"))
+}
+
+fn android_package_revision(source_properties: &Path) -> Option<String> {
+    let metadata = fs::symlink_metadata(source_properties).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let contents = fs::read_to_string(source_properties).ok()?;
+    contents.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "Pkg.Revision" && !value.trim().is_empty()).then(|| value.trim().to_string())
+    })
+}
+
+fn java_version() -> Option<String> {
+    match env::var_os("JAVA_HOME") {
+        Some(home) if !home.is_empty() => {
+            let executable = PathBuf::from(home).join("bin").join(if cfg!(windows) {
+                "java.exe"
+            } else {
+                "java"
+            });
+            command_version(executable.as_os_str(), &["-version"], true)
+        }
+        Some(_) => None,
+        None => command_version(OsStr::new("java"), &["-version"], true),
+    }
+}
+
+fn command_version(
+    program: impl AsRef<OsStr>,
+    args: &[&str],
+    include_stderr: bool,
+) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut bytes = output.stdout;
+    if include_stderr {
+        bytes.extend_from_slice(&output.stderr);
+    }
+    let version = String::from_utf8_lossy(&bytes).trim().to_string();
+    (!version.is_empty()).then_some(version)
+}
+
+fn bind_android_toolchain_identity(
+    native: &mut NativeInputs,
+    rustc_fingerprint: &str,
+    android_fingerprint: Option<String>,
+) -> (String, Option<String>) {
+    let (android_identity, disabled_reason) = match android_fingerprint {
+        Some(fingerprint) => (fingerprint, None),
+        None => (
+            "unavailable".into(),
+            Some("Android SDK/NDK/cargo-ndk/JDK identity is unavailable or ambiguous; Android cache reuse is disabled".into()),
+        ),
+    };
+    native
+        .external_hashes
+        .insert("android.sdk-ndk-toolchain".into(), android_identity.clone());
+    let combined = format!("rustc={rustc_fingerprint}\nandroid={android_identity}");
+    (
+        format!("{:x}", Sha256::digest(combined.as_bytes())),
+        disabled_reason,
+    )
+}
+
+fn combine_cache_hit_disabled_reasons(
+    reasons: impl IntoIterator<Item = Option<String>>,
+) -> Option<String> {
+    let combined = reasons.into_iter().flatten().collect::<Vec<_>>().join("; ");
+    (!combined.is_empty()).then_some(combined)
 }
 
 fn android_cache_signing_policy(
@@ -681,6 +844,147 @@ mod tests {
     fn ios_xcode_sdk_fingerprint_reads_the_active_simulator_toolchain() {
         assert!(ios_xcode_sdk_fingerprint("aarch64-apple-ios-sim").is_some());
         assert!(ios_xcode_sdk_fingerprint("aarch64-apple-ios").is_some());
+    }
+
+    #[test]
+    fn android_toolchain_fingerprint_changes_the_key_and_missing_identity_disables_cache() {
+        let mut first_native = NativeInputs::default();
+        let (first, first_disabled) = bind_android_toolchain_identity(
+            &mut first_native,
+            "rustc-hash",
+            Some("android-toolchain-a".into()),
+        );
+        assert!(first_disabled.is_none());
+        assert_eq!(
+            first_native
+                .external_hashes
+                .get("android.sdk-ndk-toolchain")
+                .map(String::as_str),
+            Some("android-toolchain-a")
+        );
+
+        let mut second_native = NativeInputs::default();
+        let (second, second_disabled) = bind_android_toolchain_identity(
+            &mut second_native,
+            "rustc-hash",
+            Some("android-toolchain-b".into()),
+        );
+        assert!(second_disabled.is_none());
+        assert_ne!(first, second);
+
+        let mut unavailable_native = NativeInputs::default();
+        let (unavailable, disabled_reason) =
+            bind_android_toolchain_identity(&mut unavailable_native, "rustc-hash", None);
+        assert!(
+            disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("identity is unavailable"))
+        );
+        assert_ne!(first, unavailable);
+        assert_eq!(
+            unavailable_native
+                .external_hashes
+                .get("android.sdk-ndk-toolchain")
+                .map(String::as_str),
+            Some("unavailable")
+        );
+    }
+
+    #[test]
+    fn android_sdk_fingerprint_tracks_installed_platform_and_build_tools_revisions() {
+        let sdk = tempfile::tempdir().unwrap();
+        let platform = sdk.path().join("platforms/android-34");
+        let build_tools = sdk.path().join("build-tools/34.0.0");
+        fs::create_dir_all(&platform).unwrap();
+        fs::create_dir_all(&build_tools).unwrap();
+        fs::write(platform.join("source.properties"), "Pkg.Revision=3\n").unwrap();
+        fs::write(
+            build_tools.join("source.properties"),
+            "Pkg.Revision=34.0.0\n",
+        )
+        .unwrap();
+
+        let first = android_sdk_package_fingerprint(sdk.path()).unwrap();
+        assert!(first.contains("platforms/android-34=3"));
+        assert!(first.contains("build-tools/34.0.0=34.0.0"));
+        assert!(!first.contains(&sdk.path().display().to_string()));
+
+        fs::write(
+            build_tools.join("source.properties"),
+            "Pkg.Revision=34.0.1\n",
+        )
+        .unwrap();
+        let second = android_sdk_package_fingerprint(sdk.path()).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn android_sdk_fingerprint_rejects_incomplete_or_symlinked_packages() {
+        let sdk = tempfile::tempdir().unwrap();
+        let platform = sdk.path().join("platforms/android-34");
+        let build_tools = sdk.path().join("build-tools/34.0.0");
+        fs::create_dir_all(&platform).unwrap();
+        fs::create_dir_all(&build_tools).unwrap();
+        fs::write(platform.join("source.properties"), "Pkg.Revision=3\n").unwrap();
+        assert!(android_sdk_package_fingerprint(sdk.path()).is_none());
+
+        fs::write(
+            build_tools.join("source.properties"),
+            "Pkg.Revision=34.0.0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let linked_sdk = tempfile::tempdir().unwrap();
+            symlink(
+                sdk.path().join("platforms"),
+                linked_sdk.path().join("platforms"),
+            )
+            .unwrap();
+            fs::create_dir_all(linked_sdk.path().join("build-tools")).unwrap();
+            assert!(android_sdk_package_fingerprint(linked_sdk.path()).is_none());
+        }
+    }
+
+    #[test]
+    fn android_toolchain_directory_selection_rejects_conflicting_environment_roots() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        assert_eq!(
+            consistent_directories([Some(first.path().to_owned()), Some(first.path().to_owned()),]),
+            Some(fs::canonicalize(first.path()).unwrap())
+        );
+        assert!(
+            consistent_directories([
+                Some(first.path().to_owned()),
+                Some(second.path().to_owned()),
+            ])
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn android_toolchain_fingerprint_reads_a_complete_active_environment() {
+        let sdk_root = consistent_environment_directory(&["ANDROID_HOME", "ANDROID_SDK_ROOT"]);
+        let ndk_home = consistent_environment_directory(&["ANDROID_NDK_HOME"]);
+        let ndk_alias_matches = env::var_os("NDK_HOME").is_none()
+            || consistent_environment_directory(&["NDK_HOME"]).as_ref() == ndk_home.as_ref();
+        let probes_available = command_version("cargo", &["ndk", "--version"], false).is_some()
+            && java_version().is_some();
+        let package_metadata_available = sdk_root
+            .as_deref()
+            .and_then(android_sdk_package_fingerprint)
+            .is_some()
+            && ndk_home
+                .as_deref()
+                .and_then(|home| android_package_revision(&home.join("source.properties")))
+                .is_some();
+
+        if ndk_alias_matches && probes_available && package_metadata_available {
+            assert!(android_toolchain_fingerprint().is_some());
+        }
     }
 
     #[test]
