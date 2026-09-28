@@ -180,6 +180,10 @@ impl MobileRunner for AndroidRunner {
                 "process": process_details(observed_process.as_ref()),
             }),
         );
+        if let Ok(launch) = &result {
+            self.evidence
+                .record_launch_boundaries(&prepared.identity, launch, now_ms());
+        }
         result
     }
 

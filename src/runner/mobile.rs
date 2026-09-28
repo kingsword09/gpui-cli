@@ -327,6 +327,78 @@ impl EvidenceLog {
             details,
         });
     }
+
+    /// Records a process observation without treating a missing PID as an
+    /// exit. A non-zero exit code is failed evidence, while an exit without a
+    /// code remains unknown because the platform has not established why it
+    /// stopped.
+    pub fn record_process_observation(
+        &mut self,
+        identity: &RunIdentity,
+        process: &ProcessEvidence,
+        at_ms: u64,
+    ) {
+        let outcome = if process.exited {
+            match process.exit_code {
+                Some(0) => EvidenceOutcome::Succeeded,
+                Some(_) => EvidenceOutcome::Failed,
+                None => EvidenceOutcome::Unknown,
+            }
+        } else if process.pid.is_some() {
+            EvidenceOutcome::Succeeded
+        } else {
+            EvidenceOutcome::Unknown
+        };
+        self.record(
+            identity,
+            EvidenceStage::Process,
+            outcome,
+            at_ms,
+            serde_json::json!({
+                "pid": process.pid,
+                "start_token_sha256": process.start_token_sha256,
+                "exited": process.exited,
+                "exit_code": process.exit_code,
+                "classification": if process.exited { "process_exit" } else { "process_observation" },
+            }),
+        );
+    }
+
+    /// Records channel state independently from process state. Disconnect or
+    /// a channel that never established is always unknown, never process exit.
+    pub fn record_channel_observation(
+        &mut self,
+        identity: &RunIdentity,
+        state: ChannelState,
+        reason: Option<&str>,
+        at_ms: u64,
+    ) {
+        let outcome = match state {
+            ChannelState::Connected => EvidenceOutcome::Succeeded,
+            ChannelState::NotEstablished | ChannelState::Disconnected => EvidenceOutcome::Unknown,
+        };
+        self.record(
+            identity,
+            EvidenceStage::Channel,
+            outcome,
+            at_ms,
+            serde_json::json!({
+                "state": state,
+                "reason": reason,
+            }),
+        );
+    }
+
+    /// Adds the process/channel boundary events for one launch result.
+    pub fn record_launch_boundaries(
+        &mut self,
+        identity: &RunIdentity,
+        launch: &LaunchEvidence,
+        at_ms: u64,
+    ) {
+        self.record_process_observation(identity, &launch.process, at_ms);
+        self.record_channel_observation(identity, launch.channel, None, at_ms);
+    }
 }
 
 /// The platform adapter boundary for M01/M02.
@@ -480,6 +552,74 @@ mod tests {
         assert_eq!(log.events[0].seq, 1);
         assert_eq!(log.events[1].seq, 2);
         assert_eq!(log.events[1].outcome, EvidenceOutcome::Unknown);
+    }
+
+    #[test]
+    fn process_exit_and_channel_disconnect_remain_independent_faults() {
+        let identity = RunIdentity {
+            run_id: "run-1".into(),
+            project_id: "project-1".into(),
+            device_id: "sim-1".into(),
+            lease_session_id: "session-1".into(),
+            fencing_token: "secret-token".into(),
+            fencing_token_sha256: token_sha256("secret-token"),
+        };
+        let mut log = EvidenceLog::new();
+        let running = ProcessEvidence {
+            pid: Some(42),
+            start_token_sha256: Some("hash".into()),
+            exited: false,
+            exit_code: None,
+        };
+        log.record_process_observation(&identity, &running, 10);
+        log.record_channel_observation(
+            &identity,
+            ChannelState::Disconnected,
+            Some("transport_disconnected"),
+            20,
+        );
+
+        assert_eq!(log.events[0].stage, EvidenceStage::Process);
+        assert_eq!(log.events[0].outcome, EvidenceOutcome::Succeeded);
+        assert_eq!(log.events[1].stage, EvidenceStage::Channel);
+        assert_eq!(log.events[1].outcome, EvidenceOutcome::Unknown);
+        assert_eq!(log.events[1].details["state"], "disconnected");
+    }
+
+    #[test]
+    fn process_exit_without_code_is_unknown_but_nonzero_exit_is_failed() {
+        let identity = RunIdentity {
+            run_id: "run-1".into(),
+            project_id: "project-1".into(),
+            device_id: "sim-1".into(),
+            lease_session_id: "session-1".into(),
+            fencing_token: "secret-token".into(),
+            fencing_token_sha256: token_sha256("secret-token"),
+        };
+        let mut log = EvidenceLog::new();
+        log.record_process_observation(
+            &identity,
+            &ProcessEvidence {
+                pid: None,
+                start_token_sha256: None,
+                exited: true,
+                exit_code: None,
+            },
+            10,
+        );
+        log.record_process_observation(
+            &identity,
+            &ProcessEvidence {
+                pid: Some(42),
+                start_token_sha256: None,
+                exited: true,
+                exit_code: Some(139),
+            },
+            20,
+        );
+        assert_eq!(log.events[0].outcome, EvidenceOutcome::Unknown);
+        assert_eq!(log.events[1].outcome, EvidenceOutcome::Failed);
+        assert_eq!(log.events[1].details["classification"], "process_exit");
     }
 
     #[test]
