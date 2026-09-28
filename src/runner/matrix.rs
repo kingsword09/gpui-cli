@@ -337,6 +337,35 @@ impl MatrixScheduler {
         Ok(())
     }
 
+    /// Records a cell that was rejected by the pre-dispatch admission pass.
+    ///
+    /// Admission failures are terminal before a runner is created, so there
+    /// is no cleanup or start timestamp to account for. Keeping the cell in
+    /// the scheduler report is important: an unavailable required target must
+    /// remain visible and can never disappear through omission.
+    pub fn mark_unavailable(&mut self, cell_id: &str, error: MatrixCellError) -> Result<()> {
+        if self.states.get(cell_id) != Some(&MatrixCellState::Queued) {
+            bail!("matrix cell '{cell_id}' is not queued for admission");
+        }
+        let cell = self.plan.cell(cell_id)?.clone();
+        self.states
+            .insert(cell_id.to_string(), MatrixCellState::Unavailable);
+        self.results.insert(
+            cell_id.to_string(),
+            MatrixCellResult {
+                cell_id: cell.cell_id,
+                target_id: cell.target_id,
+                scenario_id: cell.scenario_id,
+                required: cell.required,
+                status: MatrixCellState::Unavailable,
+                duration_ms: 0,
+                error: Some(error),
+                artifact_ids: Vec::new(),
+            },
+        );
+        Ok(())
+    }
+
     pub fn state(&self, cell_id: &str) -> Option<MatrixCellState> {
         self.states.get(cell_id).copied()
     }

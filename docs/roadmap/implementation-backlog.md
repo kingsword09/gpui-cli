@@ -558,8 +558,9 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 
 ### M02 · 本地 matrix orchestration
 
-代码落点：`src/runner/matrix.rs` 已交付 plan/scheduler/report 契约；后续接入 check 的 matrix
-入口并复用 S04/M03/M04。
+代码落点：`src/runner/matrix.rs` 已交付 plan/scheduler/report 契约，
+`src/runner/matrix_admission.rs` 已交付 matrix 配置展开和分发前 admission；后续接入 check
+的 matrix 入口并复用 S04/M03/M04。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
@@ -567,10 +568,10 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 4. fail_fast 和取消只清理本次拥有的资源；保留已完成 cell 产物，等待和 cleanup 也受 deadline 约束。
 
 PR 拆分：matrix plan/status/summary 契约与纯 scheduler（已交付）→ runner execution adapter
-（当前切片）→
+（已交付）→ target/scenario admission 与 host/ABI/toolchain preflight（当前切片）→
 真实跨目标并发与资源锁验收。
 
-当前契约记录见
+当前契约与 admission 记录见
 [M02 matrix contract](../experiments/M02-matrix-contract-2026-09-28.md)。
 
 验收 M-03/M-06/M-08/R-05。输出 macOS+iOS simulator+Android emulator 矩阵与不可用 Windows cell。回退：用户可单目标运行，不能用本机交叉编译替代 Windows 运行。

@@ -1,7 +1,8 @@
 # M02：local matrix contract and scheduler（2026-09-28）
 
 状态：in_progress。本切片先固定本地 matrix 的 cell lifecycle、deadline、fail-fast、
-required/optional 汇总和 artifact 保留接口；尚未把真实 iOS/Android runner 接入 matrix CLI。
+required/optional 汇总和 artifact 保留接口；当前已加入配置展开和分发前 admission，
+尚未把真实 iOS/Android runner 接入 matrix CLI。
 
 ## 已交付
 
@@ -18,8 +19,16 @@ required/optional 汇总和 artifact 保留接口；尚未把真实 iOS/Android 
 - executor 会在 cleanup 后再次检查 deadline；即使 adapter 迟到地返回 passed，cell 仍记为
   cancelled，已有 artifact id 保留供诊断。Windows CI 曾暴露一项既有 heartbeat/semantics
   socket 测试的帧顺序假设，测试现会有界地应答 heartbeat 并继续等目标 semantics query。
+- `matrix.toml` admission 会校验 frozen source、target/scenario 引用、required/timeout、
+  platform-specific device/ABI 约束，并展开稳定的 target×scenario cell。
+- admission 会把项目目标、runner/宿主平台、设备 ABI、场景 capture requirement 和有界
+  toolchain probe 汇总为 cell 级 unavailable 原因；Windows 等不可运行目标不会被省略。
+- scheduler 接受 admission 产生的 unavailable cell，不启动 runner、不执行 cleanup，但在
+  report 中保留 required/optional、错误码和后续聚合语义。
 
 ## 尚未覆盖
 
-真实 platform runner dispatch、同一冻结快照构建、host/ABI/toolchain admission、设备资源锁、
-跨目标并行和 Windows unavailable cell 属于后续 M02 子 PR。
+真实 platform runner dispatch、同一冻结快照构建、设备资源锁和跨目标并行属于后续 M02
+子 PR。当前 admission 的 toolchain probe 已复用 doctor 的 bounded probe 模型，但还没有
+接入真实设备 inventory、matrix CLI 入口或完整 macOS+iOS simulator+Android emulator
+运行证据。
