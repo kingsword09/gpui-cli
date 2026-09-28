@@ -225,7 +225,7 @@ fn android_requirements(context: &Context) -> Result<Vec<Requirement>> {
             "android.cargo_ndk",
             Target::Android,
             "cargo-ndk",
-            CommandSpec::new("cargo-ndk", &["--version"]),
+            CommandSpec::new("cargo", &["ndk", "--version"]),
             true,
             json!({"executable": true, "version": "reported"}),
             vec![suggestion(
@@ -423,6 +423,18 @@ mod tests {
         context.project_agp = Some("8.9.0".into());
         let requirements = requirements_for(&context, Target::Android).unwrap();
         assert!(requirements.iter().any(|item| item.id == "android.agp"));
+        assert_eq!(
+            requirements
+                .iter()
+                .find(|item| item.id == "android.cargo_ndk")
+                .and_then(|item| item.command.as_ref())
+                .map(CommandSpec::argv),
+            Some(vec![
+                "cargo".to_string(),
+                "ndk".to_string(),
+                "--version".to_string(),
+            ])
+        );
         assert!(
             requirements
                 .iter()
