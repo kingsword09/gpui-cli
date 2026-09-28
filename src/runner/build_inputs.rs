@@ -248,6 +248,11 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     let snapshot = FrozenBuildRoot::create(&root)?;
     let (_, toolchain_fingerprint) = rustc_identity()?;
     let mut native = NativeInputs::scan(&snapshot.root)?;
+    native
+        .excluded_sensitive_files
+        .extend(snapshot.manifest.excluded_sensitive_files.iter().cloned());
+    native.excluded_sensitive_files.sort();
+    native.excluded_sensitive_files.dedup();
     let (cache_hit_disabled_reason, debug_keystore_identity) =
         android_cache_signing_policy(&snapshot.root, release, &mut native)?;
     let key = build_key_from_inputs(
@@ -631,6 +636,19 @@ mod tests {
     fn android_build_plan_uses_a_frozen_workspace_root_and_hash() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("app/src")).unwrap();
+        let android_gradle = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&android_gradle).unwrap();
+        fs::write(android_gradle.join("build.gradle.kts"), "plugins {}\n").unwrap();
+        fs::write(
+            android_gradle.parent().unwrap().join("local.properties"),
+            "sdk.dir=/private/sdk\n",
+        )
+        .unwrap();
+        fs::write(
+            android_gradle.parent().unwrap().join("keystore.properties"),
+            "storePassword=secret-value\n",
+        )
+        .unwrap();
         fs::write(
             root.path().join("Cargo.toml"),
             "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
@@ -663,6 +681,37 @@ mod tests {
             plan.snapshot.input_hash
         );
         assert_eq!(plan.key.material().abi.as_deref(), Some("arm64-v8a+x86_64"));
+        assert_eq!(
+            plan.snapshot.manifest.excluded_sensitive_files,
+            vec![
+                "mobile/android/gradle/keystore.properties",
+                "mobile/android/gradle/local.properties",
+            ]
+        );
+        assert!(
+            !plan
+                .snapshot
+                .root
+                .join("mobile/android/gradle/local.properties")
+                .exists()
+        );
+        assert!(
+            !plan
+                .snapshot
+                .root
+                .join("mobile/android/gradle/keystore.properties")
+                .exists()
+        );
+        assert!(
+            plan.cache_hit_disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("local sensitive Android configuration"))
+        );
+        assert!(
+            !serde_json::to_string(&plan.snapshot.manifest)
+                .unwrap()
+                .contains("secret-value")
+        );
         assert!(
             plan.layout.cargo_target_dir.starts_with(
                 fs::canonicalize(root.path())

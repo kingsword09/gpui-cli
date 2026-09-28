@@ -381,6 +381,9 @@ sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化�
 记录见
 [M04 input stability](../experiments/M04-input-stability-2026-09-27.md)。外部 root 尚未
 覆盖 native/scenario manifest 和 build.rs 隐藏输入；
+FrozenInputs 现对 local.properties/keystore.properties 只保留相对路径声明，不读取内容
+或复制进快照；该精确文件名过滤不是通用 secret scanner，记录见
+[M04 frozen sensitive input filter](../experiments/M04-frozen-sensitive-input-filter-2026-09-28.md)。
 `src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要的独立证据切片，但尚未接入
 构建缓存或执行器。当前 desktop `build`/`run` 已通过
 `src/runner/build_inputs.rs` 组合稳定源码 manifest、Cargo.lock、NativeInputs、
