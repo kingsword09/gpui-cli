@@ -341,6 +341,16 @@ impl MatrixScheduler {
         self.states.get(cell_id).copied()
     }
 
+    pub fn cell_deadline(&self, cell_id: &str) -> Option<Instant> {
+        let started_at = self.started_at.get(cell_id).copied()?;
+        let cell = self.plan.cell(cell_id).ok()?;
+        let timeout_ms = cell.timeout_ms.unwrap_or(self.plan.config.timeout_ms);
+        Some(std::cmp::min(
+            self.deadline,
+            started_at + Duration::from_millis(timeout_ms),
+        ))
+    }
+
     pub fn cancel_requested_cells(&self) -> Vec<String> {
         self.states
             .iter()

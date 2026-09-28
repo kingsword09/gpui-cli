@@ -12,6 +12,9 @@ required/optional 汇总和 artifact 保留接口；尚未把真实 iOS/Android 
   fail_fast 取消未开始 cell 并请求 active cell cleanup。
 - required cell 的 failed/cancelled/inconclusive/unavailable 都不能汇总为 passed；required
   全部通过但 optional cell 缺失或失败时汇总为 partial，并保留 cell artifact ids。
+- `MatrixCellRunner` execution boundary 已接入：runner error 变成 failed cell，cleanup error
+  覆盖原本的 passed，cell deadline 传入 adapter；当前 harness 仍按序执行，保留后续并行
+  executor 的相同 report contract。
 
 ## 尚未覆盖
 
