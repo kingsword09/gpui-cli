@@ -20,6 +20,9 @@ Android BuildKey；无法确认构建实际使用的工具链时禁用 cache hit
 
 - 单元测试验证 SDK platform/build-tools revision 改变会改变身份、不完整或 symlink package
   拒绝生成指纹、不同 SDK 根冲突会被拒绝，以及缺少工具链身份时缓存明确 bypass；
+- Android template CI 安装 cargo-ndk 4.1.2 后，在 SDK 34/build-tools 34/NDK 27.2.12479018
+  与 Java 21 环境将 fingerprint 测试设为 required；该 job 只证明工具身份可读，不执行 GPUI
+  原生 APK 构建或设备运行；
 - 本机版本探测为 cargo-ndk 4.1.2、Amazon Corretto OpenJDK 21.0.8、NDK 27.2.12479018；
   SDK package metadata 含 android-34/35/36 与 build-tools 30.0.3/34.0.0/35.0.0/35.0.1/36.0.0。
   这是身份探测证据，不是 Android APK 构建/安装/启动证据；

@@ -102,6 +102,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
       - run: cargo build --locked
+      - run: cargo install cargo-ndk --locked --version 4.1.2
+      - name: Probe the active Android BuildKey toolchain identity
+        env:
+          GPUI_REQUIRE_ANDROID_TOOLCHAIN_FINGERPRINT: '1'
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          cargo test --locked android_toolchain_fingerprint_reads_a_complete_active_environment
       - name: Verify generated resources, release output and packaged ABIs
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
