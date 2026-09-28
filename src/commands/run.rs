@@ -11,7 +11,9 @@ use crate::runner::build_inputs::{
     DesktopBuildPlan, android_build_plan, desktop_build_plan, ios_build_plan,
 };
 use crate::runner::build_manifest::BuildArtifactManifest;
+use crate::runner::ios::IosSimulatorRunner;
 use crate::runner::lease::DeviceLeaseSession;
+use crate::runner::mobile::{MobileRunner, RunRequest};
 use crate::runner::output_layout::BuildOutputLayout;
 use crate::template::Platform;
 
@@ -612,12 +614,22 @@ pub fn run_ios(project: &Project, flags: &DeviceFlags, release: bool) -> Result<
                 .context("acquiring the iOS simulator lease")?;
             let bundle_id = bundle_id_of(project);
             println!("  {} installing on {}", "→".blue(), ready.label());
-            leased_device_step(Some(&lease), "ios.install", || {
-                ios::install_simulator(&ready.id, &app)
-            })?;
-            leased_device_step(Some(&lease), "ios.launch", || {
-                ios::launch_simulator_with_env(&ready.id, &bundle_id, &[])
-            })?;
+            let mut runner = IosSimulatorRunner::new(
+                ready.id.clone(),
+                app,
+                bundle_id.clone(),
+                project.root.join(".gpui/runs"),
+            );
+            let request = RunRequest {
+                run_id: mobile_run_id(&project.name, &ready.id),
+                project_id: project.name.clone(),
+                device_id: ready.id.clone(),
+                bundle_id,
+                artifact_root: project.root.join(".gpui/runs"),
+                abi: None,
+            };
+            let prepared = runner.prepare(&request, &lease)?;
+            runner.launch(&prepared, &lease)?;
             lease
                 .release()
                 .map_err(anyhow::Error::new)
@@ -626,6 +638,24 @@ pub fn run_ios(project: &Project, flags: &DeviceFlags, release: bool) -> Result<
             Ok(())
         }
     }
+}
+
+fn mobile_run_id(project: &str, device_id: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let safe = device_id
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+                byte as char
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("run-{}-{}-{}", project.replace('-', "_"), safe, now)
 }
 
 /// Reads the bundle id from `mobile/ios/project.yml`.
