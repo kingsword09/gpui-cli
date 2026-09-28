@@ -1,6 +1,8 @@
 # 配置与响应草案
 
-这些文件是路线设计的可解析示例，不是当前 CLI 的配置教程。所涉及的 observe/preview/check/matrix/perf/repro/upgrade 命令尚未实现；不能复制文件后就期待现有程序识别它们。
+这些文件是路线设计的可解析示例，不是当前 CLI 的完整配置教程。desktop `preview`/`check`
+和静态 `scenario validate` 已有受限实现；matrix/perf/repro/完整 upgrade 工作流仍未实现，
+不能复制文件后就期待所有字段都被当前程序识别。
 
 | 文件 | 用途 | 实现任务/契约 |
 | --- | --- | --- |

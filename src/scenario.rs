@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+pub mod baseline;
 pub mod executor;
 
 pub const SCHEMA_VERSION: u32 = 1;
