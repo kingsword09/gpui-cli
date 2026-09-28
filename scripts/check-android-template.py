@@ -15,6 +15,64 @@ def run(*args, cwd=None, env=None):
     subprocess.run(args, cwd=cwd, env=env, check=True)
 
 
+def run_capture(*args, cwd=None, env=None):
+    result = subprocess.run(args, cwd=cwd, env=env, check=False, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if result.returncode:
+        print(result.stdout, flush=True)
+        result.check_returncode()
+    return result.stdout
+
+
+def prepare_minimal_android_library(project):
+    """Avoid compiling GPUI here; exercise the real CLI/cargo-ndk/Gradle path."""
+    (project / "Cargo.toml").write_text(
+        '[workspace]\nmembers = ["crates/app"]\nresolver = "2"\n'
+    )
+    app = project / "crates/app"
+    (app / "Cargo.toml").write_text(
+        '[package]\n'
+        'name = "template-probe-app"\n'
+        'version = "0.1.0"\n'
+        'edition = "2021"\n\n'
+        '[lib]\n'
+        'name = "template_probe_app"\n'
+        'crate-type = ["cdylib"]\n'
+    )
+    (app / "src/lib.rs").write_text(
+        '#[no_mangle]\npub extern "C" fn gpui_cache_probe() -> u32 { 1 }\n'
+    )
+
+
+def check_android_build_cache(gpui, project, expected_abis, env):
+    prepare_minimal_android_library(project)
+    run("cargo", "generate-lockfile", cwd=project, env=env)
+
+    first = run_capture(str(gpui), "build", "android", cwd=project, env=env)
+    assert "Android cache miss:" in first, first
+    second = run_capture(str(gpui), "build", "android", cwd=project, env=env)
+    assert "Android BuildKey cache hit:" in second, second
+
+    outputs = list(
+        (project / ".gpui/builds/android").glob(
+            "*/gradle-build/outputs/apk/debug/*.apk"
+        )
+    )
+    assert len(outputs) == 1, outputs
+    check_apk_file(outputs[0], expected_abis)
+
+
+def check_apk_file(apk, expected_abis):
+    with zipfile.ZipFile(apk) as archive:
+        actual = {
+            name.split("/")[1]
+            for name in archive.namelist()
+            if name.startswith("lib/") and name.endswith("/libtemplate_probe_app.so")
+        }
+    assert actual == expected_abis, (apk, actual, expected_abis)
+    print(f"Verified cached CLI APK: {apk.name}, ABIs {sorted(actual)}", flush=True)
+
+
 def check_apk(gradle, variant, expected_abis):
     directory = gradle / "app/build/outputs/apk" / variant
     metadata = json.loads((directory / "output-metadata.json").read_text())
@@ -43,8 +101,15 @@ def main():
     host = {"Darwin": "darwin-x86_64", "Linux": "linux-x86_64"}[platform.system()]
     compilers = ndk / "toolchains/llvm/prebuilt" / host / "bin"
     source = Path(__file__).resolve().parent.parent / "tests/fixtures/native_probe.c"
-    env = {**os.environ, "GPUI_ANDROID_ABIS": "arm64-v8a,x86_64"}
+    abis = {"arm64-v8a", "x86_64"}
     with tempfile.TemporaryDirectory(prefix="gpui-android-template-") as scratch:
+        env = {**os.environ, "GPUI_ANDROID_ABIS": ",".join(sorted(abis))}
+        env["HOME"] = str(Path(scratch) / "home")
+        Path(env["HOME"]).mkdir()
+        env["ANDROID_USER_HOME"] = str(Path(env["HOME"]) / ".android")
+        env.setdefault("CARGO_HOME", str(Path.home() / ".cargo"))
+        env.setdefault("RUSTUP_HOME", str(Path.home() / ".rustup"))
+        env.setdefault("GRADLE_USER_HOME", str(Path.home() / ".gradle"))
         project = Path(scratch) / "app"
         run(str(gpui), "init", "template-probe", "--path", str(project),
             "--targets", "android", "--title", 'R&D "Desk" <工具> \\path {{APP_CRATE}}',
@@ -65,6 +130,7 @@ def main():
         # from the earlier build, even though both .so files remain on disk.
         run(*wrapper, "assembleRelease", "-Pgpui.abis=x86_64", cwd=gradle, env=env)
         check_apk(gradle, "release", {"x86_64"})
+        check_android_build_cache(gpui, project, abis, env)
 
 
 if __name__ == "__main__":

@@ -31,8 +31,10 @@ manifest cache hit；release/custom signing、live Android 和真实任务共享
 - 单元测试覆盖默认 debug keystore 指纹变化、构建期 keystore 变化拒绝继续发布、release/
   sensitive/custom signing/缺失 keystore bypass，以及 Android manifest roots 与 APK metadata
   的完整命中/拒绝路径；
-- 本 PR 运行 workspace fmt、clippy、全量测试和设计文档检查；CI Android template fixture
-  不冒充真实 NDK/emulator/device 构建或安装证据；
+- workspace fmt、clippy、全量测试和设计文档检查通过；Android-template CI 现在另跑真实
+  cargo-ndk/Gradle 的最小 cdylib CLI cache smoke，断言首次 miss、二次 hit 并验证 APK ABI，
+  详见 [T06 Android CLI cache smoke](T06-android-cli-cache-smoke-2026-09-28.md)；该 fixture
+  移除了 GPUI app 依赖，不冒充完整 GPUI app 或 emulator/device build/install/run 证据；
 - 等锁当前不可取消；OS 锁串行化请求，不表示共享一个可订阅/取消的在途任务。
 
 ## 未覆盖

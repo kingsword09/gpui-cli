@@ -1,0 +1,32 @@
+# T06：Android CLI 构建与 cache-hit smoke（2026-09-28）
+
+状态：in_progress。该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次
+构建和同 BuildKey 第二次命中；Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
+
+## 流程
+
+- `scripts/check-android-template.py` 先生成 Android 项目并用小型 native fixture 验证原始
+  模板的 Gradle debug/release 资源和 ABI 打包；随后仅在临时项目中把 Cargo workspace/app
+  收窄为无外部依赖的 `cdylib`，保留同一 gpui.toml 与 Android Gradle host；
+- 使用真实 `gpui build android`、cargo-ndk 以及项目 Gradle wrapper 生成 arm64-v8a 与 x86_64
+  native library 和 debug APK；断言第一次输出 cache miss，第二次输出 BuildKey cache hit；
+- 检查缓存 APK 中恰好包含两个目标 ABI；设备安装与 NativeActivity 启动不在该脚本范围；
+- 测试通过临时 `HOME` 和 `ANDROID_USER_HOME` 放置默认 debug keystore，Cargo/Rustup/Gradle
+  工具缓存仍复用已配置目录，避免读写用户已有 signing key。
+
+## 证据
+
+- 本机 macOS Android NDK 27.2.12479018 实际执行脚本通过：cargo-ndk 为两个 Rust target
+  生成 `.so`，Gradle 打包 debug/release 模板 APK，GPUI CLI minimal cdylib 首次构建成功，
+  第二次确认 manifest cache hit，缓存 APK ABI 为 arm64-v8a/x86_64；
+- Android-template CI 安装对应 Linux Rust targets、SDK 34/build-tools 34、NDK 27.2.12479018
+  和 cargo-ndk 4.1.2 后运行同一脚本；这将是 PR 门槛，不等同于完整 GPUI crate 的 Android
+  编译或 emulator/device 运行。
+
+## 未覆盖
+
+- 最小 app 主动移除了模板的 GPUI/gpui-mobile 依赖，因而不验证 GPUI renderer、窗口初始化、
+  JNI 行为或完整 app 冷启动；它只验证 `gpui build android` 的冻结输入、真实 NDK 编译、
+  Gradle APK 打包、manifest 校验和第二次 cache hit；
+- Android emulator/device 安装启动、release/custom signing、cache 并发订阅/取消引用和容量
+  清理仍未覆盖。
