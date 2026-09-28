@@ -70,6 +70,7 @@ pub struct DesktopBuildPlan {
     pub key: BuildKey,
     pub layout: BuildOutputLayout,
     pub snapshot: FrozenBuildRoot,
+    pub cache_hit_disabled_reason: Option<String>,
 }
 
 pub struct IosBuildPlan {
@@ -130,6 +131,7 @@ pub fn desktop_build_plan(root: &Path, release: bool) -> Result<DesktopBuildPlan
     let (host, toolchain_fingerprint) = rustc_identity()?;
     let target_triple = env::var("CARGO_BUILD_TARGET").unwrap_or(host);
     let native = NativeInputs::scan(&snapshot.root)?;
+    let cache_hit_disabled_reason = local_build_script_cache_disabled_reason(&snapshot.root)?;
     let key = build_key_from_inputs(
         &snapshot.manifest,
         snapshot.input_hash.clone(),
@@ -146,6 +148,7 @@ pub fn desktop_build_plan(root: &Path, release: bool) -> Result<DesktopBuildPlan
         key,
         layout,
         snapshot,
+        cache_hit_disabled_reason,
     })
 }
 
@@ -172,9 +175,14 @@ pub fn ios_build_plan(root: &Path, release: bool, rust_target: &str) -> Result<I
     let snapshot = FrozenBuildRoot::create(&root)?;
     let (_, rustc_fingerprint) = rustc_identity()?;
     let mut native = NativeInputs::scan(&snapshot.root)?;
+    let build_script_disabled_reason = local_build_script_cache_disabled_reason(&snapshot.root)?;
     let xcode_fingerprint = ios_xcode_sdk_fingerprint(rust_target);
     let (toolchain_fingerprint, cache_hit_disabled_reason) =
         bind_ios_toolchain_identity(&mut native, &rustc_fingerprint, xcode_fingerprint);
+    let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
+        cache_hit_disabled_reason,
+        build_script_disabled_reason,
+    ]);
     let key = build_key_from_inputs(
         &snapshot.manifest,
         snapshot.input_hash.clone(),
@@ -326,6 +334,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     let snapshot = FrozenBuildRoot::create(&root)?;
     let (_, rustc_fingerprint) = rustc_identity()?;
     let mut native = NativeInputs::scan(&snapshot.root)?;
+    let build_script_disabled_reason = local_build_script_cache_disabled_reason(&snapshot.root)?;
     native
         .excluded_sensitive_files
         .extend(snapshot.manifest.excluded_sensitive_files.iter().cloned());
@@ -338,8 +347,11 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         &rustc_fingerprint,
         android_toolchain_fingerprint(),
     );
-    let cache_hit_disabled_reason =
-        combine_cache_hit_disabled_reasons([toolchain_disabled_reason, signing_disabled_reason]);
+    let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
+        toolchain_disabled_reason,
+        signing_disabled_reason,
+        build_script_disabled_reason,
+    ]);
     let key = build_key_from_inputs(
         &snapshot.manifest,
         snapshot.input_hash.clone(),
@@ -359,6 +371,21 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         cache_hit_disabled_reason,
         debug_keystore_identity,
     })
+}
+
+fn local_build_script_cache_disabled_reason(root: &Path) -> Result<Option<String>> {
+    let manifest = Inputs::scan(root)?;
+    if manifest
+        .sources
+        .keys()
+        .any(|path| Path::new(path).file_name() == Some(std::ffi::OsStr::new("build.rs")))
+    {
+        Ok(Some(
+            "local build.rs hidden inputs are not modeled; BuildKey cache reuse is disabled".into(),
+        ))
+    } else {
+        Ok(None)
+    }
 }
 
 fn android_toolchain_fingerprint() -> Option<String> {
@@ -764,6 +791,54 @@ mod tests {
 
         let key = desktop_build_key(root.path(), false).unwrap();
         assert_eq!(key.material().cargo_lock_hash, "missing");
+    }
+
+    #[test]
+    fn local_build_script_disables_cache_reuse_without_blocking_input_scanning() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/src")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("app/build.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.path().join("app/src/lib.rs"), "pub fn value() {}\n").unwrap();
+
+        let reason = local_build_script_cache_disabled_reason(root.path())
+            .unwrap()
+            .unwrap();
+        assert!(reason.contains("build.rs hidden inputs"));
+
+        let status = Command::new("cargo")
+            .current_dir(root.path())
+            .args(["generate-lockfile"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let plan = desktop_build_plan(root.path(), false).unwrap();
+        assert!(
+            plan.cache_hit_disabled_reason
+                .as_deref()
+                .is_some_and(|value| value.contains("build.rs hidden inputs"))
+        );
+    }
+
+    #[test]
+    fn workspace_without_build_script_keeps_cache_reuse_eligible() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+
+        assert!(
+            local_build_script_cache_disabled_reason(root.path())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

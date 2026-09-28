@@ -436,7 +436,9 @@ Android default-debug 切片在 BuildKey 纳入 debug keystore 指纹并完整�
 Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次，验证 Android CLI
 第一次 miss、第二次同 key hit 和 APK ABI；它不包含完整 GPUI app 或设备运行，记录见
 [T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。真实在途
-任务共享仍未接入；`gpui cache clean --max-bytes` 已提供按 BuildKey 大小预算的显式清理，
+任务共享仍未接入；本地 `build.rs` 项目已保守 bypass artifact cache reuse，记录见
+[T06 build-script cache bypass](../experiments/T06-build-script-cache-bypass-2026-09-28.md)。
+`gpui cache clean --max-bytes` 已提供按 BuildKey 大小预算的显式清理，
 活动锁和不安全目录会跳过，记录见
 [T06 cache cleanup](../experiments/T06-cache-cleanup-2026-09-28.md)。
 

@@ -260,7 +260,12 @@ fn build_desktop_artifacts(
     release: bool,
 ) -> Result<()> {
     let _output_lock = BuildOutputLock::acquire(&plan.layout)?;
-    match lookup_verified(&plan.layout, &plan.key) {
+    let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
+        BuildCacheLookup::Miss(reason.clone())
+    } else {
+        lookup_verified(&plan.layout, &plan.key)
+    };
+    match cache_lookup {
         BuildCacheLookup::Hit(manifest) => {
             println!(
                 "  {} BuildKey cache hit: {} verified artifact(s)",
