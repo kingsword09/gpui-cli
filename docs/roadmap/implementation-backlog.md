@@ -541,14 +541,18 @@ artifact 接线和报告证据见
 
 ### M01 · iOS simulator / Android 截图与原生日志
 
-代码落点：`src/device/{ios,android}.rs`、`src/commands/{live,run}.rs`；拟议 `src/runner/{ios,android,logs}.rs`。
+代码落点：`src/device/{ios,android}.rs`、`src/commands/{live,run}.rs`、
+`src/runner/mobile.rs`；拟议 `src/runner/{ios,android,logs}.rs`。
 
 1. 用明确 UDID/serial、租约和 run 身份执行截图，二进制保存 PNG；记录方向/DPI/系统栏/前台应用。
 2. 启动日志 collector，在 early native crash、PID 切换、app channel 未建立时仍有证据；不能归属的日志单独保存。
 3. 将安装/launch/进程证据分离；断线不等于退出，设备截图不等于 scene capture。
 4. 分别跑完整 GPUI Android emulator/iOS simulator 应用，包含键盘、系统弹窗、旋转和后台切换。
 
-PR 拆分：runner trait/契约 → iOS → Android → 真模拟器故障矩阵。验收 M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 desktop；不以宿主 APK 打包测试宣称运行通过。
+PR 拆分：runner trait/契约（当前已交付）→ iOS → Android → 真模拟器故障矩阵。验收
+M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 desktop；不以宿主 APK 打包
+测试宣称运行通过。契约记录见
+[M01 runner contract](../experiments/M01-runner-contract-2026-09-28.md)。
 
 ### M02 · 本地 matrix orchestration
 
