@@ -591,6 +591,13 @@ fn reject_existing_symlink(path: &Path) -> Result<(), LeaseError> {
 fn reject_symlink_path(path: &Path) -> Result<(), LeaseError> {
     let mut current = PathBuf::new();
     for component in path.components() {
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            current.push(component.as_os_str());
+            continue;
+        }
         if matches!(component, std::path::Component::ParentDir) {
             return Err(LeaseError::InvalidOwner(
                 "unsafe lease path component".into(),
