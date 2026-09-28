@@ -153,6 +153,9 @@ pub struct MatrixAdmissionContext {
     pub project_targets: Option<BTreeSet<String>>,
     pub runners: BTreeMap<String, MatrixRunnerAvailability>,
     pub toolchains: BTreeMap<MatrixPlatform, MatrixToolchainReport>,
+    /// Scenario capabilities advertised by the runner implementation.
+    /// Missing entries leave this part of admission unspecified.
+    pub scenario_capabilities: BTreeMap<MatrixPlatform, BTreeSet<String>>,
 }
 
 impl MatrixAdmissionContext {
@@ -168,6 +171,20 @@ impl MatrixAdmissionContext {
         .into_iter()
         .filter(|platform| platform.host_compatible(&host_os))
         .collect();
+        let desktop_capabilities = [
+            "screenshot",
+            "capture.window",
+            "semantics",
+            "semantics.read",
+            "semantics.bounds",
+            "scenario.reset",
+            "input.pointer",
+            "input.keyboard",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        let mobile_capabilities = BTreeSet::from(["capture.device".to_string()]);
         Self {
             project_targets: Some(
                 project_targets
@@ -186,6 +203,13 @@ impl MatrixAdmissionContext {
                 },
             )]),
             toolchains: BTreeMap::new(),
+            scenario_capabilities: BTreeMap::from([
+                (MatrixPlatform::Macos, desktop_capabilities.clone()),
+                (MatrixPlatform::Windows, desktop_capabilities.clone()),
+                (MatrixPlatform::Linux, desktop_capabilities),
+                (MatrixPlatform::Ios, mobile_capabilities.clone()),
+                (MatrixPlatform::Android, mobile_capabilities),
+            ]),
         }
     }
 
@@ -204,6 +228,16 @@ impl MatrixAdmissionContext {
         report: MatrixToolchainReport,
     ) -> Self {
         self.toolchains.insert(platform, report);
+        self
+    }
+
+    pub fn with_scenario_capabilities(
+        mut self,
+        platform: MatrixPlatform,
+        capabilities: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.scenario_capabilities
+            .insert(platform, capabilities.into_iter().map(Into::into).collect());
         self
     }
 }
@@ -659,6 +693,18 @@ fn admission_issues(
                 ),
             ));
         }
+        if let Some(capabilities) = context.scenario_capabilities.get(&platform)
+            && !capabilities.contains(requirement)
+        {
+            issues.push(issue(
+                "scenario_capability_unavailable",
+                format!(
+                    "runner for platform '{}' does not advertise scenario capability '{}'",
+                    platform.label(),
+                    requirement
+                ),
+            ));
+        }
     }
 
     match context.toolchains.get(&platform) {
@@ -899,6 +945,36 @@ mod tests {
                 .issues
                 .iter()
                 .any(|issue| issue.code == "scenario_requirement_unsupported")
+        );
+    }
+
+    #[test]
+    fn mobile_semantics_requirement_is_unavailable_without_a_mobile_scenario_driver() {
+        let matrix: MatrixFile = toml::from_str(
+            r#"
+                schema_version = 1
+                [[targets]]
+                id = "android-emulator"
+                runner = "local"
+                platform = "android"
+                device = "emulator-1"
+                abi = "x86_64"
+                scenarios = ["counter-basic"]
+            "#,
+        )
+        .unwrap();
+        let admission = admit_matrix(
+            matrix,
+            scenarios(vec!["semantics", "capture.device"]),
+            None,
+            &local_context(MatrixPlatform::Android),
+        )
+        .unwrap();
+        assert!(
+            admission.cells[0]
+                .issues
+                .iter()
+                .any(|issue| issue.code == "scenario_capability_unavailable")
         );
     }
 
