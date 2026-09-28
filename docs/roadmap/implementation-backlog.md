@@ -38,7 +38,7 @@
 | S03 | G2 | core | L | O06, O04 | S-03, S-04, S-05, S-06, S-08 | in_progress |
 | M03 | G2 | core | M | T01, F02 | M-04, M-05, M-06 | planned |
 | M04 | G2 | core | L | T01, F01 | M-07, M-08 | in_progress |
-| S04 | G2 | core | L | S01, S02, S03, M04 | S-02, S-03, S-07, S-08, S-09, R-05 | planned |
+| S04 | G2 | core | L | S01, S02, S03, M04 | S-02, S-03, S-07, S-08, S-09, R-05 | in_progress |
 | A01 | G2 | core | M | O04, O03 | A-01, A-02, A-03 | planned |
 | A02 | G2 | core | M | A01, S04, M03 | A-01, A-04 | planned |
 | A03 | G2 | core | M | T02, S01, F02 | A-05 | planned |
@@ -451,6 +451,14 @@ Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次
 3. 为每步保存前后观察、动作结果、日志 seq 和耗时；失败停止依赖步骤，默认 retries=0。
 4. 增加视觉基线读取/差异产物，基线缺失或不可比不自动通过；基线批准是独立操作，不在修复路径隐式执行。
 5. CLI 的等待/async/退出码与 operation 模型一致；失败报告不能被后续 cleanup 错误覆盖。
+
+当前已交付 S04 的 runtime-agnostic 核心：`src/scenario/executor.rs` 提供 bounded
+`CheckPlan`、注入式 `ScenarioRunner`、逐步 `CheckReport`，并覆盖 normal input、wait_for、
+assert、capture 的状态转移。断言支持 schema v1 的语义字段、runtime error 和 screenshot
+比较；缺少语义/字段/不可比视觉证据返回 `inconclusive`，已投递但未确认的动作不会被重放或
+伪造成失败。每步保留 observation/log 序号、action/断言/capture 证据；终止步骤后的依赖
+步骤显式 `skipped`，cleanup 错误不会覆盖原始失败或 unknown。记录见
+[S04 check core](../experiments/S04-check-core-2026-09-28.md)。
 
 验收 S-02/S-03/S-07/S-08/S-09/R-05。输出三个标准夹具各连续 20 次真实执行和故障变体。回退：撤回不完整断言，不能将 unknown 转成布尔 false 或 passed。
 

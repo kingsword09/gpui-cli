@@ -1,8 +1,6 @@
-//! Static validation for schema-v1 scenario files.
-//!
-//! This module deliberately stops before preview/check execution. It validates
-//! the portable plan, its fixture inputs, and bounded hashes without starting
-//! an app or assuming that a component registry exists.
+//! Static validation and runtime-agnostic check contracts for schema-v1
+//! scenarios. The executor submodule owns bounded step/report semantics but
+//! leaves process launch and platform capture to an injected runner.
 
 use crate::fixtures::Fixture;
 use anyhow::{Context, Result, bail};
@@ -12,6 +10,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+pub mod executor;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
