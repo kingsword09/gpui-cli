@@ -5,6 +5,7 @@ use clap::Args;
 use gpui_dev_protocol::ARTIFACT_CHUNK_BYTES;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -13,9 +14,21 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::run::Project;
+use crate::device;
 use crate::devserver::actions::Action;
 use crate::devserver::control::{self, Command as ControlCommand, Registration};
 use crate::devserver::events::{Event, Kind, Page};
+use crate::runner::matrix::{
+    MatrixCellError, MatrixCellSpec, MatrixCellState, MatrixReport, MatrixStatus,
+};
+use crate::runner::matrix_admission::{
+    MatrixAdmissionContext, MatrixDeviceAvailability, MatrixFile, MatrixPlatform, load_and_admit,
+    probe_local_toolchain,
+};
+use crate::runner::matrix_executor::{
+    MatrixCellExecution, MatrixCellRunner, execute_admitted_matrix_parallel,
+};
+use crate::runner::matrix_resources::MatrixResourcePool;
 use crate::scenario::baseline::{
     BaselineComparison, BaselineKey, BaselineLoad, DiffPng, MAX_IMAGE_BYTES, compare_png, diff_png,
     load_baseline,
@@ -34,11 +47,14 @@ const QUERY_LIMIT: u32 = 200;
 pub struct CheckArgs {
     /// Scenario id to execute from the scenario file
     #[arg(long)]
-    pub scenario: String,
+    pub scenario: Option<String>,
     /// Scenario file, relative to the current project by default
     #[arg(long, default_value = "gpui.scenarios.toml")]
     pub file: PathBuf,
-    /// Check target; this slice supports desktop only
+    /// Matrix configuration; when present, expand and execute target×scenario cells.
+    #[arg(long)]
+    pub matrix: Option<PathBuf>,
+    /// Check target for a single-scenario check; matrix targets come from the matrix file
     #[arg(long, default_value = "desktop")]
     pub target: String,
     /// Emit the structured check report as JSON
@@ -48,6 +64,16 @@ pub struct CheckArgs {
 
 pub fn handle_check(args: CheckArgs) -> Result<()> {
     let project = Project::load(None)?;
+    if let Some(matrix) = args.matrix {
+        if args.scenario.is_some() {
+            bail!("--scenario cannot be combined with --matrix");
+        }
+        return handle_matrix_check(&project, args.file, matrix, args.json);
+    }
+    let scenario_id = args
+        .scenario
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--scenario is required unless --matrix is provided"))?;
     if !matches!(
         args.target.to_ascii_lowercase().as_str(),
         "desktop" | "macos"
@@ -65,8 +91,8 @@ pub fn handle_check(args: CheckArgs) -> Result<()> {
     let selected = model
         .scenarios
         .iter()
-        .find(|scenario| scenario.id == args.scenario)
-        .with_context(|| format!("scenario `{}` was not found", args.scenario))?;
+        .find(|scenario| scenario.id == scenario_id)
+        .with_context(|| format!("scenario {} was not found", scenario_id))?;
     let fixture_hash = validation
         .scenarios
         .iter()
@@ -87,6 +113,275 @@ pub fn handle_check(args: CheckArgs) -> Result<()> {
         Ok(())
     } else {
         bail!("scenario check ended with {:?}", report.status)
+    }
+}
+
+fn handle_matrix_check(
+    project: &Project,
+    scenario_file: PathBuf,
+    matrix_file: PathBuf,
+    json_output: bool,
+) -> Result<()> {
+    let scenario_path = resolve_project_path(&project.root, scenario_file);
+    let matrix_path = resolve_project_path(&project.root, matrix_file);
+    let validation = scenario::validate_file(&scenario_path, &project.root)?;
+    if !validation.valid {
+        bail!("scenario validation failed; matrix was not launched");
+    }
+    let scenario_source = fs::read_to_string(&scenario_path)
+        .with_context(|| format!("reading scenario file {}", scenario_path.display()))?;
+    let scenarios: ScenarioFile =
+        toml::from_str(&scenario_source).context("parsing scenario file")?;
+    let matrix_source = fs::read_to_string(&matrix_path)
+        .with_context(|| format!("reading matrix file {}", matrix_path.display()))?;
+    let matrix: MatrixFile = toml::from_str(&matrix_source).context("parsing matrix file")?;
+    let context = matrix_admission_context(project, &matrix)?;
+    let admission = load_and_admit(&matrix_path, &scenario_path, &project.root, &context)?;
+    prepare_cargo_lock(&project.root)?;
+
+    let target_platforms = matrix
+        .targets
+        .iter()
+        .map(|target| {
+            let platform = MatrixPlatform::parse(&target.platform)
+                .ok_or_else(|| anyhow::anyhow!("unknown matrix platform '{}'", target.platform))?;
+            Ok((target.id.clone(), platform))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let scenario_by_id = scenarios
+        .scenarios
+        .iter()
+        .map(|scenario| (scenario.id.clone(), scenario.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let fixture_hashes = validation
+        .scenarios
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .fixture_hash
+                .clone()
+                .map(|hash| (entry.id.clone(), hash))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let project_root = project.root.clone();
+    let scenario_path = scenario_path.clone();
+    let factory = move |cell: &MatrixCellSpec| -> Result<MatrixCheckRunner> {
+        let platform = target_platforms
+            .get(&cell.target_id)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("matrix target '{}' disappeared", cell.target_id))?;
+        let scenario = scenario_by_id
+            .get(&cell.scenario_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("matrix scenario '{}' disappeared", cell.scenario_id))?;
+        let fixture_hash = fixture_hashes.get(&cell.scenario_id).cloned();
+        if matches!(
+            platform,
+            MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux
+        ) {
+            Ok(MatrixCheckRunner::Desktop(Box::new(
+                DesktopMatrixCheckRunner {
+                    project_root: project_root.clone(),
+                    scenario_file: scenario_path.clone(),
+                    scenario,
+                    fixture_hash,
+                    target: platform.label().into(),
+                    inner: None,
+                },
+            )))
+        } else {
+            Ok(MatrixCheckRunner::Unavailable {
+                code: "scenario_driver_unavailable".into(),
+                message: format!(
+                    "matrix scenario driver for '{}' is not connected to the mobile runtime yet",
+                    platform.label()
+                ),
+            })
+        }
+    };
+    let report = execute_admitted_matrix_parallel(
+        &admission,
+        factory,
+        MatrixResourcePool::new(),
+        Instant::now(),
+    )?;
+    print_matrix_report(&report, json_output)?;
+    if report.status == MatrixStatus::Passed {
+        Ok(())
+    } else {
+        bail!("matrix check ended with {:?}", report.status)
+    }
+}
+
+fn matrix_admission_context(
+    project: &Project,
+    matrix: &MatrixFile,
+) -> Result<MatrixAdmissionContext> {
+    let host_os = std::env::consts::OS;
+    let mut context = MatrixAdmissionContext::for_local(host_os, project.targets.clone());
+    let local = context
+        .runners
+        .get_mut("local")
+        .ok_or_else(|| anyhow::anyhow!("local matrix runner was not initialized"))?;
+
+    if cfg!(target_os = "macos") {
+        for device in device::ios::simulators()? {
+            local.devices.insert(
+                device.id.clone(),
+                MatrixDeviceAvailability {
+                    available: device.launchable(),
+                    arch: device.arch.clone(),
+                },
+            );
+        }
+    }
+    for device in device::android::all() {
+        let available = device.launchable() && device.serial().is_some();
+        let availability = MatrixDeviceAvailability {
+            available,
+            arch: device.arch.clone(),
+        };
+        local
+            .devices
+            .insert(device.id.clone(), availability.clone());
+        if let Some(serial) = device.serial() {
+            local.devices.insert(serial.to_owned(), availability);
+        }
+    }
+
+    let mut probed = BTreeSet::new();
+    for target in &matrix.targets {
+        if target.runner != "local" {
+            continue;
+        }
+        let platform = MatrixPlatform::parse(&target.platform)
+            .ok_or_else(|| anyhow::anyhow!("unknown matrix platform '{}'", target.platform))?;
+        if !probed.insert(platform) {
+            continue;
+        }
+        let report =
+            probe_local_toolchain(platform, target.abi.as_deref(), &project.root, host_os)?;
+        context.toolchains.insert(platform, report);
+    }
+    Ok(context)
+}
+
+fn print_matrix_report(report: &MatrixReport, json_output: bool) -> Result<()> {
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+    println!("matrix {}: {:?}", report.plan_id, report.status);
+    for cell in &report.cells {
+        let detail = cell
+            .error
+            .as_ref()
+            .map(|error| format!(" — {}: {}", error.code, error.message))
+            .unwrap_or_default();
+        println!("  {:<32} {:?}{}", cell.cell_id, cell.status, detail);
+    }
+    Ok(())
+}
+
+enum MatrixCheckRunner {
+    Desktop(Box<DesktopMatrixCheckRunner>),
+    Unavailable { code: String, message: String },
+}
+
+struct DesktopMatrixCheckRunner {
+    project_root: PathBuf,
+    scenario_file: PathBuf,
+    scenario: ScenarioDefinition,
+    fixture_hash: Option<String>,
+    target: String,
+    inner: Option<DesktopCheckRunner>,
+}
+
+impl MatrixCellRunner for MatrixCheckRunner {
+    fn run_cell(
+        &mut self,
+        _cell: &MatrixCellSpec,
+        deadline: Instant,
+    ) -> Result<MatrixCellExecution> {
+        match self {
+            Self::Unavailable { code, message } => Ok(MatrixCellExecution::unavailable(
+                code.clone(),
+                message.clone(),
+            )),
+            Self::Desktop(desktop) => {
+                let DesktopMatrixCheckRunner {
+                    project_root,
+                    scenario_file,
+                    scenario,
+                    fixture_hash,
+                    target,
+                    inner,
+                } = desktop.as_mut();
+                if Instant::now() >= deadline {
+                    bail!("matrix desktop cell deadline exceeded before launch");
+                }
+                let mut bounded_scenario = scenario.clone();
+                let remaining_ms = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX)
+                    .max(1);
+                bounded_scenario.timeout_ms = bounded_scenario.timeout_ms.min(remaining_ms);
+                let mut runner = DesktopCheckRunner::launch_until(
+                    project_root,
+                    scenario_file,
+                    &bounded_scenario,
+                    fixture_hash.clone(),
+                    target,
+                    deadline,
+                )?;
+                let report = crate::scenario::executor::execute(
+                    &mut runner,
+                    &bounded_scenario,
+                    fixture_hash.clone(),
+                );
+                let status = match report.status {
+                    crate::scenario::executor::CheckStatus::Passed => MatrixCellState::Passed,
+                    crate::scenario::executor::CheckStatus::Failed => MatrixCellState::Failed,
+                    crate::scenario::executor::CheckStatus::Inconclusive => {
+                        MatrixCellState::Inconclusive
+                    }
+                    crate::scenario::executor::CheckStatus::Unavailable => {
+                        MatrixCellState::Unavailable
+                    }
+                    crate::scenario::executor::CheckStatus::Cancelled => MatrixCellState::Cancelled,
+                };
+                let error = report.primary_error.map(|error| MatrixCellError {
+                    code: error.code,
+                    message: error.message,
+                });
+                let artifact_ids = report
+                    .steps
+                    .iter()
+                    .filter_map(|step| step.capture.as_ref())
+                    .filter_map(|capture| capture.artifact_id.clone())
+                    .collect();
+                *inner = None;
+                Ok(MatrixCellExecution {
+                    status,
+                    error,
+                    artifact_ids,
+                })
+            }
+        }
+    }
+
+    fn cleanup_cell(&mut self, _cell: &MatrixCellSpec, _deadline: Instant) -> Result<()> {
+        if let Self::Desktop(desktop) = self
+            && let Some(runner) = desktop.inner.as_mut()
+        {
+            ScenarioRunner::cleanup(runner).map_err(|error| {
+                anyhow::anyhow!("desktop matrix cleanup failed: {}", error.message)
+            })?;
+            desktop.inner = None;
+        }
+        Ok(())
     }
 }
 
@@ -168,6 +463,24 @@ impl DesktopCheckRunner {
         fixture_hash: Option<String>,
         target: &str,
     ) -> Result<Self> {
+        Self::launch_until(
+            project_root,
+            scenario_file,
+            scenario,
+            fixture_hash,
+            target,
+            Instant::now() + PREVIEW_START_TIMEOUT,
+        )
+    }
+
+    fn launch_until(
+        project_root: &Path,
+        scenario_file: &Path,
+        scenario: &ScenarioDefinition,
+        fixture_hash: Option<String>,
+        target: &str,
+        deadline: Instant,
+    ) -> Result<Self> {
         let executable = std::env::current_exe().context("locating the gpui executable")?;
         let scenario_file = scenario_file
             .strip_prefix(project_root)
@@ -189,7 +502,6 @@ impl DesktopCheckRunner {
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         let child = child.spawn().context("starting isolated desktop preview")?;
-        let deadline = Instant::now() + PREVIEW_START_TIMEOUT;
         let registration = match wait_for_registration(project_root, &scenario.id, deadline) {
             Ok(registration) => registration,
             Err(error) => {
