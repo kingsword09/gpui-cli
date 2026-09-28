@@ -5,7 +5,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, android, inventory, ios};
+use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, inventory, ios};
+use crate::runner::android::AndroidRunner;
 use crate::runner::build_cache::{BuildCacheLookup, BuildOutputLock, lookup_verified};
 use crate::runner::build_inputs::{
     DesktopBuildPlan, android_build_plan, desktop_build_plan, ios_build_plan,
@@ -1067,12 +1068,22 @@ pub fn run_android(project: &Project, flags: &DeviceFlags, release: bool) -> Res
     let bundle_id = bundle_id_of_android(project);
 
     println!("  {} installing on {}", "→".blue(), target.label());
-    leased_device_step(Some(&lease), "android.install", || {
-        android::install_apk(serial, &apk)
-    })?;
-    leased_device_step(Some(&lease), "android.launch", || {
-        android::launch_app(serial, &bundle_id)
-    })?;
+    let mut runner = AndroidRunner::new(
+        serial,
+        apk,
+        bundle_id.clone(),
+        project.root.join(".gpui/runs"),
+    );
+    let request = RunRequest {
+        run_id: mobile_run_id(&project.name, serial),
+        project_id: project.name.clone(),
+        device_id: serial.to_owned(),
+        bundle_id,
+        artifact_root: project.root.join(".gpui/runs"),
+        abi: None,
+    };
+    let prepared = runner.prepare(&request, &lease)?;
+    runner.launch(&prepared, &lease)?;
     lease
         .release()
         .map_err(anyhow::Error::new)

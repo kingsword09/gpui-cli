@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, bail};
 use colored::*;
 use std::fs::OpenOptions;
-use std::io::Write as _;
+use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -620,6 +620,18 @@ pub fn launch_app(serial: &str, bundle_id: &str) -> Result<()> {
     )
 }
 
+/// Returns the current PID for an installed package, if it is running.
+pub fn app_pid(serial: &str, bundle_id: &str) -> Result<Option<u32>> {
+    let adb = adb().context("`adb` was not found")?;
+    let Some(output) = try_capture(&adb, &["-s", serial, "shell", "pidof", "-s", bundle_id]) else {
+        return Ok(None);
+    };
+    Ok(output
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u32>().ok()))
+}
+
 /// Captures the device framebuffer as a binary PNG. `exec-out` avoids the
 /// shell and never subjects the image bytes to text framing or line endings.
 pub fn capture_screenshot(serial: &str, output: &Path) -> Result<()> {
@@ -651,6 +663,74 @@ pub fn capture_screenshot(serial: &str, output: &Path) -> Result<()> {
         bail!("`adb -s {serial} exec-out screencap -p` failed");
     }
     Ok(())
+}
+
+pub const MAX_LOGCAT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Collects a bounded logcat snapshot. When no verified PID is available the
+/// caller may omit the filter, but must preserve that uncertainty in evidence.
+pub fn collect_logcat(serial: &str, output: &Path, pid: Option<u32>) -> Result<(u64, bool)> {
+    match std::fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "refusing to write logcat through symbolic link: {}",
+                output.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let parent = output
+        .parent()
+        .context("logcat output has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating logcat directory {}", parent.display()))?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(output)
+        .with_context(|| format!("opening logcat output {}", output.display()))?;
+    let adb = adb().context("`adb` was not found")?;
+    let mut args = vec!["-s", serial, "logcat", "-d", "-v", "threadtime"];
+    let pid_text = pid.map(|value| value.to_string());
+    if let Some(pid_text) = pid_text.as_deref() {
+        args.extend(["--pid", pid_text]);
+    }
+    let mut child = Command::new(&adb)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("starting logcat collection for {serial}"))?;
+    let mut stdout = child.stdout.take().context("capturing logcat output")?;
+    let mut file = file;
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut written = 0_u64;
+    let mut truncated = false;
+    loop {
+        let read = stdout.read(&mut buffer).context("reading logcat output")?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_LOGCAT_BYTES.saturating_sub(written);
+        let to_write = (read as u64).min(remaining) as usize;
+        if to_write > 0 {
+            file.write_all(&buffer[..to_write])
+                .context("writing logcat output")?;
+            written += to_write as u64;
+        }
+        if to_write < read {
+            truncated = true;
+        }
+    }
+    let status = child.wait().context("waiting for logcat collection")?;
+    if !status.success() {
+        let _ = std::fs::remove_file(output);
+        bail!("logcat collection failed for {serial}");
+    }
+    Ok((written, truncated))
 }
 
 /// Maps a device-side port onto the same host port over adb, so the app can
