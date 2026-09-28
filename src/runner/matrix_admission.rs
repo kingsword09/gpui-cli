@@ -371,6 +371,11 @@ pub fn admit_matrix(
                 scenario_id: scenario.id.clone(),
                 required: target.required,
                 timeout_ms: Some(target.timeout_ms),
+                resource_ids: target
+                    .device
+                    .as_deref()
+                    .map(|device| vec![format!("device:{}:{}", target.runner, device)])
+                    .unwrap_or_default(),
             };
             let issues = admission_issues(target, platform, scenario, context);
             let state = if issues.is_empty() {
@@ -856,6 +861,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(admission.cells[0].state, MatrixAdmissionState::Unavailable);
+        assert_eq!(
+            admission.plan.cells[0].resource_ids,
+            vec!["device:local:emulator-1"]
+        );
         assert_eq!(admission.cells[0].issues[0].code, "target_not_declared");
         assert!(
             admission.cells[0]

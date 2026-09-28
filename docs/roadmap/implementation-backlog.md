@@ -568,8 +568,9 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 4. fail_fast 和取消只清理本次拥有的资源；保留已完成 cell 产物，等待和 cleanup 也受 deadline 约束。
 
 PR 拆分：matrix plan/status/summary 契约与纯 scheduler（已交付）→ runner execution adapter
-（已交付）→ target/scenario admission 与 host/ABI/toolchain preflight（当前切片）→
-真实跨目标并发与资源锁验收。
+（已交付）→ target/scenario admission 与 host/ABI/toolchain preflight（已交付）→
+跨目标并行与 supervisor 内资源锁（当前切片）→真实 platform runner、host lease 接入与
+矩阵验收。
 
 当前契约与 admission 记录见
 [M02 matrix contract](../experiments/M02-matrix-contract-2026-09-28.md)。

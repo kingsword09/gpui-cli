@@ -10,5 +10,6 @@ pub mod lease;
 pub mod matrix;
 pub mod matrix_admission;
 pub mod matrix_executor;
+pub mod matrix_resources;
 pub mod mobile;
 pub mod output_layout;
