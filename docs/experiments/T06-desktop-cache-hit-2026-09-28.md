@@ -30,5 +30,8 @@
 - iOS/Android cache hit、跨平台/远程共享缓存和 artifact 清理尚未接入；
 - 等锁请求当前不可取消、无等待 deadline；真正的并发任务 subscriber/refcount/cancellation 未接入；
 - desktop bin 以外的旁置 DLL/资源和 build.rs 隐藏 I/O 不在 manifest 闭包内；
+- 包含本地 `build.rs` 的 workspace 现在保守 bypass artifact cache reuse，避免将未建模读取集
+  当作可命中的完整 BuildKey；记录见
+  [T06 build-script cache bypass](T06-build-script-cache-bypass-2026-09-28.md)；
 - BuildKey 环境/toolchain 维度的进一步完备化仍需单独证据切片，故不宣称任意项目构建均可
   完全复现。
