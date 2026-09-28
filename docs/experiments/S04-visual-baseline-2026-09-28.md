@@ -32,7 +32,14 @@ scope；图片声明相对路径、字节数、PNG 像素尺寸和 `sha256:`。�
 
 - 5 个纯 Rust 测试覆盖缺失、unknown manifest field、hash 篡改、key mismatch、精确匹配/差异
   和尺寸不可比。
-- 当前 `gpui check` desktop runner 仍把 screenshot baseline 接线保留为后续步骤；本切片的
-  loader/comparator 是无 GPU 的稳定 seam，尚未从 artifact store 下载 PNG 并生成 diff artifact。
+- `gpui check` desktop runner 已接入这个 loader/comparator：`screenshot_matches` 绑定当前
+  observation 的 PNG artifact，按 chunk 读取并校验 artifact manifest/hash，再把
+  `baseline_id`、完整可用的 `BaselineKey`、artifact_id、尺寸/scale/scope/provider 和
+  matched/different/not_comparable 写入断言 `actual`。artifact 读取失败不会复用旧图片。
+- strict key 需要 runtime 的实际 backend 和 font fingerprint；生成模板会报告 OS，并预留
+  `GPUI_PREVIEW_BACKEND` / `GPUI_PREVIEW_FONT_FINGERPRINT` 作为显式 runtime 环境值。缺失
+  这些字段时 check 返回 `inconclusive`，错误不会猜成通过。
+- 当前仍不生成 diff artifact；本切片的 loader/comparator 是无 GPU 的稳定 seam，实际
+  macOS Screen Recording/semantics 权限和真实基线批准仍需平台验收。
 - 容差、动态区域 mask、baseline approval/review、跨平台 backend 目录和独立更新命令属于后续
   S04/R-05 切片。

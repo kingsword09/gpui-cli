@@ -27,10 +27,13 @@
 
 ## 未覆盖
 
-- `screenshot_matches` 尚未读取/比较 baseline；即使 PNG 已采集也返回 `inconclusive`，不自动
-  通过。
+- `screenshot_matches` 已读取/比较严格 baseline：PNG artifact 通过 bounded
+  ArtifactInfo/ArtifactRead 下载并校验 hash，key 与 baseline manifest 必须完整匹配；
+  缺 baseline、缺 backend/font fingerprint 或不可比时仍返回 `inconclusive`，不自动
+  通过、批准或更新。
 - check 当前只支持 desktop；移动端设备租约、真实模拟器 runner、矩阵调度和 20 次证据尚未
   接入。
-- capture report 目前保留 capture kind，artifact 下载/报告引用和视觉 diff 仍由后续切片补齐。
+- capture step report 目前仍只保留 capture kind；screenshot_matches 断言已经保留其 PNG
+  artifact/key 引用，视觉 diff 仍由后续切片补齐。
 - 本地没有真实 macOS 图形会话时，observe 会明确返回 unavailable/inconclusive；不以模板
   编译通过替代窗口运行证据。

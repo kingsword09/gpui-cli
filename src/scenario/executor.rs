@@ -7,6 +7,7 @@
 //! makes an unavailable or uncertain runtime result impossible to turn into a
 //! passing check by accident.
 
+use super::baseline::BaselineKey;
 use super::{ScenarioDefinition, ScenarioStep, Selector};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -129,7 +130,17 @@ pub struct SemanticNode {
 /// Evidence produced by a screenshot provider for a scenario observation.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct ScreenshotEvidence {
+    pub artifact_id: Option<String>,
     pub baseline_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_key: Option<BaselineKey>,
+    pub scope: Option<String>,
+    pub provider: Option<String>,
+    pub pixel_width: Option<u32>,
+    pub pixel_height: Option<u32>,
+    pub logical_width: Option<u32>,
+    pub logical_height: Option<u32>,
+    pub scale_milli: Option<u32>,
     pub comparable: bool,
     pub matches: Option<bool>,
     pub reason: Option<String>,
@@ -322,6 +333,18 @@ pub trait ScenarioRunner {
     ) -> Result<Observation, DriverError>;
 
     fn observe(&mut self, deadline: Instant) -> Result<Observation, DriverError>;
+
+    /// Resolve the baseline-specific evidence needed by a screenshot
+    /// assertion. Most runners can keep the observation unchanged; a runner
+    /// with a real artifact store may load and compare the referenced PNG.
+    fn resolve_screenshot(
+        &mut self,
+        _step: &ScenarioStep,
+        observation: &Observation,
+        _deadline: Instant,
+    ) -> Result<Observation, DriverError> {
+        Ok(observation.clone())
+    }
 
     fn act(
         &mut self,
@@ -555,13 +578,18 @@ fn execute_step<R: ScenarioRunner>(
             Ok(StepResult::Assertion(assertion, after))
         }
         "assert" => {
+            let assertion_observation = if step.assertion.as_deref() == Some("screenshot_matches") {
+                runner.resolve_screenshot(step, before, deadline)?
+            } else {
+                before.clone()
+            };
             let assertion = evaluate_assertion(
                 step.assertion.as_deref().unwrap_or(""),
                 step.selector.as_ref(),
                 step.expected.as_ref(),
-                before,
+                &assertion_observation,
             );
-            Ok(StepResult::Assertion(assertion, before.clone()))
+            Ok(StepResult::Assertion(assertion, assertion_observation))
         }
         "capture" => {
             let capture = runner.capture(step, before, deadline)?;
@@ -710,16 +738,24 @@ pub fn evaluate_assertion(
                     .reason
                     .as_deref()
                     .unwrap_or("screenshot is not comparable"),
-                None,
+                Some(screenshot_actual(evidence)),
             ),
             Some(evidence) => match evidence.matches {
-                Some(true) => passed(assertion, "screenshot matches baseline", Some(json!(true))),
+                Some(true) => passed(
+                    assertion,
+                    "screenshot matches baseline",
+                    Some(screenshot_actual(evidence)),
+                ),
                 Some(false) => failed(
                     assertion,
                     "screenshot differs from baseline",
-                    Some(json!(false)),
+                    Some(screenshot_actual(evidence)),
                 ),
-                None => inconclusive(assertion, "screenshot comparison has no result", None),
+                None => inconclusive(
+                    assertion,
+                    "screenshot comparison has no result",
+                    Some(screenshot_actual(evidence)),
+                ),
             },
         };
     }
@@ -825,6 +861,24 @@ fn compare_bool(assertion: &str, actual: Option<bool>) -> AssertionEvaluation {
         Some(false) => failed(assertion, "semantic flag is false", Some(json!(false))),
         None => inconclusive(assertion, "semantic flag is unavailable", None),
     }
+}
+
+fn screenshot_actual(evidence: &ScreenshotEvidence) -> Value {
+    json!({
+        "artifact_id": evidence.artifact_id,
+        "baseline_id": evidence.baseline_id,
+        "baseline_key": evidence.baseline_key,
+        "scope": evidence.scope,
+        "provider": evidence.provider,
+        "pixel_width": evidence.pixel_width,
+        "pixel_height": evidence.pixel_height,
+        "logical_width": evidence.logical_width,
+        "logical_height": evidence.logical_height,
+        "scale_milli": evidence.scale_milli,
+        "comparable": evidence.comparable,
+        "matches": evidence.matches,
+        "reason": evidence.reason,
+    })
 }
 
 fn passed(assertion: &str, message: &str, actual: Option<Value>) -> AssertionEvaluation {
@@ -947,6 +1001,7 @@ mod tests {
         captures: VecDeque<Result<CaptureEvidence, DriverError>>,
         cleanup: Option<Result<(), DriverError>>,
         action_calls: usize,
+        screenshot_resolutions: usize,
     }
 
     impl ScenarioRunner for FakeRunner {
@@ -964,6 +1019,32 @@ mod tests {
             self.observations
                 .pop_front()
                 .unwrap_or_else(|| Err(DriverError::unknown("missing_observation", "fake observe")))
+        }
+
+        fn resolve_screenshot(
+            &mut self,
+            _step: &ScenarioStep,
+            observation: &Observation,
+            _deadline: Instant,
+        ) -> Result<Observation, DriverError> {
+            self.screenshot_resolutions += 1;
+            let mut resolved = observation.clone();
+            resolved.screenshot = Some(ScreenshotEvidence {
+                artifact_id: Some("artifact-1".into()),
+                baseline_id: Some("counter".into()),
+                baseline_key: None,
+                scope: Some("window".into()),
+                provider: Some("test".into()),
+                pixel_width: Some(640),
+                pixel_height: Some(480),
+                logical_width: Some(640),
+                logical_height: Some(480),
+                scale_milli: Some(1000),
+                comparable: true,
+                matches: Some(true),
+                reason: None,
+            });
+            Ok(resolved)
         }
 
         fn act(
@@ -1173,7 +1254,16 @@ mod tests {
     fn screenshot_comparison_requires_comparable_evidence() {
         let mut current = observation("o-1", Vec::new());
         current.screenshot = Some(ScreenshotEvidence {
+            artifact_id: None,
             baseline_id: Some("missing".into()),
+            baseline_key: None,
+            scope: None,
+            provider: None,
+            pixel_width: None,
+            pixel_height: None,
+            logical_width: None,
+            logical_height: None,
+            scale_milli: None,
             comparable: false,
             matches: None,
             reason: Some("baseline_missing".into()),
@@ -1181,5 +1271,39 @@ mod tests {
         let result = evaluate_assertion("screenshot_matches", None, None, &current);
         assert_eq!(result.status, StepStatus::Inconclusive);
         assert_eq!(result.message, "baseline_missing");
+    }
+
+    #[test]
+    fn screenshot_assertion_resolves_and_reports_artifact_evidence() {
+        let mut step = assert_step("visual", "screenshot_matches", None);
+        step.selector = None;
+        step.baseline_id = Some("counter".into());
+        let mut runner = FakeRunner {
+            prepared: Some(Ok(observation("o-1", Vec::new()))),
+            ..FakeRunner::default()
+        };
+        let report = execute(&mut runner, &scenario(vec![step]), None);
+        assert_eq!(report.status, CheckStatus::Passed);
+        assert_eq!(runner.screenshot_resolutions, 1);
+        assert_eq!(
+            report.steps[0]
+                .assertion
+                .as_ref()
+                .unwrap()
+                .actual
+                .as_ref()
+                .unwrap()["artifact_id"],
+            "artifact-1"
+        );
+        assert_eq!(
+            report.steps[0]
+                .assertion
+                .as_ref()
+                .unwrap()
+                .actual
+                .as_ref()
+                .unwrap()["matches"],
+            true
+        );
     }
 }

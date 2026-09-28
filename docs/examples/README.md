@@ -37,7 +37,9 @@ List fixture 的 count/prefix/digits 表示由组件的确定性 fixture factory
 ## 3. 关键语义
 
 - API JSON schema=2、app proto=2，与场景/matrix/performance/repro/template 文件 schema=1 是不同版本维度。
-- observation 是完成的观察，不是“输入后的断言已通过”；示例 check.status=not_run。presented_frame_id=null 明确表示未证明屏幕呈现。
+- observation 是完成的观察，不是“输入后的断言已通过”；示例 check.status=not_run。presented_frame_id=null 明确表示未证明屏幕呈现。`screenshot_matches` 只有在
+  PNG artifact、完整环境 key 和 exact baseline 都匹配时才通过；缺少 backend/font
+  fingerprint 或 baseline 时是 inconclusive。
 - scenario 的 requires 使用 screenshot/semantics 别名及明确能力；input/bounds 缺失会阻止对应步骤，不能仅有图片就假设可点击。
 - 每次动作由执行器重新建立/确认观察，TOML 不硬编码过期 observation_id 或可重复点击 request_id。
 - LoginForm 中的文本仅为测试数据。允许 invalid_credentials 日志不表示可以忽略其他 runtime error 或 panic。

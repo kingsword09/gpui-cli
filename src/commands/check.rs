@@ -2,7 +2,9 @@
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use gpui_dev_protocol::ARTIFACT_CHUNK_BYTES;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -13,6 +15,9 @@ use super::run::Project;
 use crate::devserver::actions::Action;
 use crate::devserver::control::{self, Command as ControlCommand, Registration};
 use crate::devserver::events::{Event, Kind, Page};
+use crate::scenario::baseline::{
+    BaselineComparison, BaselineKey, BaselineLoad, MAX_IMAGE_BYTES, compare_png, load_baseline,
+};
 use crate::scenario::executor::{
     ActionResult, CaptureEvidence, CheckReport, DriverError, DriverErrorKind, Observation,
     ScenarioRunner, ScreenshotEvidence, SemanticNode,
@@ -67,8 +72,13 @@ pub fn handle_check(args: CheckArgs) -> Result<()> {
         .and_then(|entry| entry.fixture_hash.clone());
 
     prepare_cargo_lock(&project.root)?;
-    let mut runner =
-        DesktopCheckRunner::launch(&project.root, &file, selected, fixture_hash.clone())?;
+    let mut runner = DesktopCheckRunner::launch(
+        &project.root,
+        &file,
+        selected,
+        fixture_hash.clone(),
+        &args.target,
+    )?;
     let report = crate::scenario::executor::execute(&mut runner, selected, fixture_hash);
     print_report(&report, args.json)?;
     if report.status == crate::scenario::executor::CheckStatus::Passed {
@@ -131,10 +141,19 @@ fn print_report(report: &CheckReport, json_output: bool) -> Result<()> {
 
 struct DesktopCheckRunner {
     child: Child,
+    project_root: PathBuf,
     registration: Registration,
     event_cursor: u64,
     scenario_id: String,
     component: String,
+    target: String,
+    fixture_hash: Option<String>,
+    viewport_width: u32,
+    viewport_height: u32,
+    requested_theme: String,
+    requested_locale: String,
+    ready_fixture_hash: Option<String>,
+    ready_environment: Value,
     default_requirements: Vec<String>,
     issue_floor: u64,
 }
@@ -144,7 +163,8 @@ impl DesktopCheckRunner {
         project_root: &Path,
         scenario_file: &Path,
         scenario: &ScenarioDefinition,
-        _fixture_hash: Option<String>,
+        fixture_hash: Option<String>,
+        target: &str,
     ) -> Result<Self> {
         let executable = std::env::current_exe().context("locating the gpui executable")?;
         let scenario_file = scenario_file
@@ -179,10 +199,19 @@ impl DesktopCheckRunner {
         };
         let mut runner = Self {
             child,
+            project_root: project_root.to_owned(),
             registration,
             event_cursor: 0,
             scenario_id: scenario.id.clone(),
             component: scenario.component.clone(),
+            target: target.to_ascii_lowercase(),
+            fixture_hash,
+            viewport_width: scenario.viewport.width,
+            viewport_height: scenario.viewport.height,
+            requested_theme: scenario.theme.clone(),
+            requested_locale: scenario.locale.clone(),
+            ready_fixture_hash: None,
+            ready_environment: Value::Object(serde_json::Map::new()),
             default_requirements: observation_requirements(&scenario.requires),
             issue_floor: 0,
         };
@@ -201,6 +230,7 @@ impl DesktopCheckRunner {
                     && event.data["scenario_id"].as_str() == Some(self.scenario_id.as_str())
                     && event.data["component"].as_str() == Some(self.component.as_str())
                 {
+                    self.record_ready_environment(&event);
                     return Ok(());
                 }
                 if matches!(event.kind, Kind::AppLaunchFailed | Kind::AppExited) {
@@ -242,6 +272,7 @@ impl DesktopCheckRunner {
                         if event.data["scenario_id"].as_str()
                             == Some(self.scenario_id.as_str()) =>
                     {
+                        self.record_ready_environment(&event);
                         ready = true;
                         if accepted {
                             return Ok(());
@@ -413,6 +444,186 @@ impl DesktopCheckRunner {
         })
     }
 
+    fn record_ready_environment(&mut self, event: &Event) {
+        self.ready_fixture_hash = event.data["fixture_hash"].as_str().map(str::to_owned);
+        self.ready_environment = event.data["environment"].clone();
+    }
+
+    fn environment_string(&self, field: &str) -> Option<String> {
+        self.ready_environment
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }
+
+    fn baseline_key(&self, screenshot: &ScreenshotEvidence) -> Result<BaselineKey, String> {
+        let mut missing = Vec::new();
+        let fixture_hash = self.ready_fixture_hash.clone();
+        if fixture_hash.is_none() {
+            missing.push("fixture_hash");
+        } else if self.fixture_hash.as_deref() != fixture_hash.as_deref() {
+            return Err("baseline_not_comparable:fixture_hash".into());
+        }
+        let backend = self.environment_string("backend");
+        if backend.is_none() {
+            missing.push("backend");
+        }
+        let os = self
+            .environment_string("os")
+            .or_else(|| Some(std::env::consts::OS.to_owned()));
+        let font_fingerprint = self.environment_string("font_fingerprint");
+        if font_fingerprint.is_none() {
+            missing.push("font_fingerprint");
+        }
+        let logical_width = screenshot.logical_width;
+        if logical_width != Some(self.viewport_width) {
+            return Err("baseline_not_comparable:viewport_width".into());
+        }
+        let logical_height = screenshot.logical_height;
+        if logical_height != Some(self.viewport_height) {
+            return Err("baseline_not_comparable:viewport_height".into());
+        }
+        let scale_milli = screenshot.scale_milli;
+        if scale_milli.is_none() {
+            missing.push("scale_milli");
+        }
+        let scope = screenshot.scope.clone();
+        if scope.is_none() {
+            missing.push("scope");
+        }
+        let theme = self.environment_string("theme");
+        if theme.as_deref() != Some(self.requested_theme.as_str()) {
+            return Err("baseline_not_comparable:theme".into());
+        }
+        let locale = self.environment_string("locale");
+        if locale.as_deref() != Some(self.requested_locale.as_str()) {
+            return Err("baseline_not_comparable:locale".into());
+        }
+        if !missing.is_empty() {
+            return Err(format!("baseline_key_unavailable:{}", missing.join(",")));
+        }
+        Ok(BaselineKey {
+            scenario: self.scenario_id.clone(),
+            fixture_hash: fixture_hash.expect("checked above"),
+            target: self.target.clone(),
+            backend: backend.expect("checked above"),
+            os: os.expect("always has a host OS fallback"),
+            viewport_width: self.viewport_width,
+            viewport_height: self.viewport_height,
+            scale_milli: scale_milli.expect("checked above"),
+            theme: theme.expect("checked above"),
+            locale: locale.expect("checked above"),
+            font_fingerprint: font_fingerprint.expect("checked above"),
+            scope: scope.expect("checked above"),
+        })
+    }
+
+    fn read_artifact(&self, artifact_id: &str, deadline: Instant) -> Result<Vec<u8>, DriverError> {
+        let info_reply = control::request(
+            &self.registration,
+            &control::next_request_id("check.artifact.info"),
+            ControlCommand::ArtifactInfo {
+                artifact_id: artifact_id.to_owned(),
+            },
+        )
+        .map_err(|error| DriverError::unknown("artifact_read_failed", error.to_string()))?;
+        if !info_reply.ok {
+            return Err(reply_error(&info_reply, "artifact_info_failed"));
+        }
+        let info = info_reply.result.unwrap_or_default();
+        if info["status"] != "published" {
+            return Err(DriverError::failed(
+                "artifact_not_published",
+                "screenshot artifact is not published",
+            ));
+        }
+        if info["kind"] != "png" {
+            return Err(DriverError::failed(
+                "artifact_kind_mismatch",
+                "screenshot evidence references a non-PNG artifact",
+            ));
+        }
+        let declared_bytes = info["declared_bytes"]
+            .as_u64()
+            .ok_or_else(|| DriverError::failed("artifact_invalid", "artifact size is missing"))?;
+        if declared_bytes == 0 || declared_bytes > MAX_IMAGE_BYTES {
+            return Err(DriverError::failed(
+                "artifact_size_invalid",
+                "screenshot artifact exceeds the bounded image size",
+            ));
+        }
+        let expected_hash = info["sha256"]
+            .as_str()
+            .and_then(normalize_sha256)
+            .ok_or_else(|| {
+                DriverError::failed("artifact_invalid", "artifact SHA-256 is invalid")
+            })?;
+        let mut bytes = Vec::with_capacity(declared_bytes as usize);
+        let mut offset = 0_u64;
+        while offset < declared_bytes {
+            if Instant::now() >= deadline {
+                return Err(DriverError::timeout(
+                    "artifact_read_timeout",
+                    "screenshot artifact read exceeded the scenario deadline",
+                ));
+            }
+            let length = (declared_bytes - offset).min(ARTIFACT_CHUNK_BYTES as u64) as u32;
+            let chunk_reply = control::request(
+                &self.registration,
+                &control::next_request_id("check.artifact.read"),
+                ControlCommand::ArtifactRead {
+                    artifact_id: artifact_id.to_owned(),
+                    offset,
+                    length,
+                },
+            )
+            .map_err(|error| DriverError::unknown("artifact_read_failed", error.to_string()))?;
+            if !chunk_reply.ok {
+                return Err(reply_error(&chunk_reply, "artifact_read_failed"));
+            }
+            let chunk = chunk_reply.result.unwrap_or_default();
+            if chunk["offset"].as_u64() != Some(offset) {
+                return Err(DriverError::failed(
+                    "artifact_invalid",
+                    "artifact chunk offset does not match the requested offset",
+                ));
+            }
+            let encoded = chunk["data"].as_str().ok_or_else(|| {
+                DriverError::failed("artifact_invalid", "artifact chunk is missing data")
+            })?;
+            let data = crate::devserver::protocol::b64::decode(encoded).ok_or_else(|| {
+                DriverError::failed("artifact_invalid", "artifact chunk is not valid base64")
+            })?;
+            if data.is_empty()
+                || data.len() as u64 > declared_bytes - offset
+                || chunk["bytes"].as_u64() != Some(data.len() as u64)
+            {
+                return Err(DriverError::failed(
+                    "artifact_invalid",
+                    "artifact chunk length is invalid",
+                ));
+            }
+            offset += data.len() as u64;
+            bytes.extend_from_slice(&data);
+            let eof = chunk["eof"].as_bool().unwrap_or(false);
+            if eof != (offset == declared_bytes) {
+                return Err(DriverError::failed(
+                    "artifact_invalid",
+                    "artifact EOF does not match its declared size",
+                ));
+            }
+        }
+        let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+        if actual_hash != expected_hash {
+            return Err(DriverError::unknown(
+                "artifact_checksum_mismatch",
+                "screenshot artifact checksum does not match its manifest",
+            ));
+        }
+        Ok(bytes)
+    }
+
     fn query_nodes(&self, observation_id: &str) -> Result<Vec<SemanticNode>, DriverError> {
         let reply = control::request(
             &self.registration,
@@ -492,6 +703,81 @@ impl DesktopCheckRunner {
 }
 
 impl ScenarioRunner for DesktopCheckRunner {
+    fn resolve_screenshot(
+        &mut self,
+        step: &ScenarioStep,
+        before: &Observation,
+        deadline: Instant,
+    ) -> Result<Observation, DriverError> {
+        let mut observation = if before
+            .screenshot
+            .as_ref()
+            .and_then(|screenshot| screenshot.artifact_id.as_ref())
+            .is_some()
+        {
+            before.clone()
+        } else {
+            self.observe_with_requirements(vec!["screenshot".into()], deadline)?
+        };
+        let Some(mut screenshot) = observation.screenshot.take() else {
+            return Ok(observation);
+        };
+        screenshot.baseline_id = step.baseline_id.clone();
+        let Some(baseline_id) = step.baseline_id.as_deref() else {
+            observation.screenshot = Some(screenshot);
+            return Ok(observation);
+        };
+        let key = match self.baseline_key(&screenshot) {
+            Ok(key) => key,
+            Err(reason) => {
+                screenshot.reason = Some(reason);
+                observation.screenshot = Some(screenshot);
+                return Ok(observation);
+            }
+        };
+        screenshot.baseline_key = Some(key.clone());
+        let (load_status, loaded) =
+            load_baseline(&self.project_root, &self.target, baseline_id, &key);
+        let Some(baseline) = loaded else {
+            screenshot.reason = Some(match load_status {
+                BaselineLoad::Missing { .. } => "baseline_missing".into(),
+                BaselineLoad::Invalid { code, .. } => format!("baseline_invalid:{code}"),
+                BaselineLoad::NotComparable { mismatches } => {
+                    format!("baseline_not_comparable:{}", mismatches.join(","))
+                }
+                BaselineLoad::Loaded => "baseline_load_failed".into(),
+            });
+            observation.screenshot = Some(screenshot);
+            return Ok(observation);
+        };
+        let artifact_id = screenshot.artifact_id.clone().ok_or_else(|| {
+            DriverError::failed(
+                "screenshot_artifact_missing",
+                "screenshot observation has no PNG artifact id",
+            )
+        })?;
+        let actual = self.read_artifact(&artifact_id, deadline)?;
+        match compare_png(&baseline, &actual) {
+            BaselineComparison::Matched { .. } => {
+                screenshot.comparable = true;
+                screenshot.matches = Some(true);
+                screenshot.reason = None;
+            }
+            BaselineComparison::Different { .. } => {
+                screenshot.comparable = true;
+                screenshot.matches = Some(false);
+                screenshot.reason = Some("baseline_different".into());
+            }
+            BaselineComparison::NotComparable { code, message } => {
+                screenshot.comparable = false;
+                screenshot.matches = None;
+                screenshot.reason = Some(format!("{code}:{message}"));
+            }
+        }
+        observation.screenshot = Some(screenshot);
+        Ok(observation)
+    }
+
     fn prepare(
         &mut self,
         scenario: &ScenarioDefinition,
@@ -755,13 +1041,40 @@ fn semantic_node(value: Value) -> SemanticNode {
 
 fn screenshot_evidence(result: &Value) -> Option<ScreenshotEvidence> {
     let artifacts = result["artifacts"].as_array()?;
-    let has_png = artifacts.iter().any(|artifact| artifact["kind"] == "png");
-    has_png.then_some(ScreenshotEvidence {
+    let artifact = artifacts
+        .iter()
+        .find(|artifact| artifact["kind"] == "png")?;
+    Some(ScreenshotEvidence {
+        artifact_id: artifact["artifact_id"].as_str().map(str::to_owned),
         baseline_id: None,
+        baseline_key: None,
+        scope: result["scope"].as_str().map(str::to_owned),
+        provider: result["provider"].as_str().map(str::to_owned),
+        pixel_width: result["pixel_width"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok()),
+        pixel_height: result["pixel_height"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok()),
+        logical_width: result["logical_width"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok()),
+        logical_height: result["logical_height"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok()),
+        scale_milli: result["scale_milli"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok()),
         comparable: false,
         matches: None,
-        reason: Some("baseline_not_loaded".into()),
+        reason: None,
     })
+}
+
+fn normalize_sha256(value: &str) -> Option<String> {
+    let hex = value.strip_prefix("sha256:").unwrap_or(value);
+    (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| hex.to_ascii_lowercase())
 }
 
 fn operation_error(operation: &Value, kind: DriverErrorKind) -> DriverError {
@@ -847,6 +1160,44 @@ mod tests {
         assert_eq!(
             operation_error(&operation, DriverErrorKind::Failed).kind,
             DriverErrorKind::Unavailable
+        );
+    }
+
+    #[test]
+    fn screenshot_evidence_keeps_the_png_artifact_and_capture_dimensions() {
+        let result = json!({
+            "scope": "window",
+            "provider": "macos_screencapture",
+            "pixel_width": 1280,
+            "pixel_height": 720,
+            "logical_width": 640,
+            "logical_height": 480,
+            "scale_milli": 2000,
+            "artifacts": [
+                {"kind": "tree", "artifact_id": "tree-1"},
+                {"kind": "png", "artifact_id": "png-1"}
+            ]
+        });
+        let evidence = screenshot_evidence(&result).unwrap();
+        assert_eq!(evidence.artifact_id.as_deref(), Some("png-1"));
+        assert_eq!(evidence.scope.as_deref(), Some("window"));
+        assert_eq!(evidence.provider.as_deref(), Some("macos_screencapture"));
+        assert_eq!(evidence.pixel_width, Some(1280));
+        assert_eq!(evidence.logical_width, Some(640));
+        assert_eq!(evidence.scale_milli, Some(2000));
+        assert_eq!(
+            normalize_sha256(&format!("sha256:{}", "A".repeat(64))),
+            Some("a".repeat(64))
+        );
+    }
+
+    #[test]
+    fn screenshot_evidence_requires_a_png_artifact() {
+        assert!(
+            screenshot_evidence(&json!({
+                "artifacts": [{"kind": "tree", "artifact_id": "tree-1"}]
+            }))
+            .is_none()
         );
     }
 }

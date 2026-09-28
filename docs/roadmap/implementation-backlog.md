@@ -466,7 +466,10 @@ assert、capture 的状态转移。断言支持 schema v1 的语义字段、runt
 reset→observe→action/wait/assert/capture，并在报告后终止子进程。动作继续只接受
 `logical_id` selector；role/name selector 在路由前明确 `unavailable`。语义 query 将 bounded
 节点和 bounds/clip 信息接入断言，runtime issue 按 reset 前 event seq 过滤。截图 artifact
-已实际采集但视觉 baseline 尚未加载，`screenshot_matches` 保持 `inconclusive`。记录见
+已实际采集并由 `screenshot_matches` 接入严格 baseline loader：check 有界读取 published
+PNG artifact、校验 chunk/hash、构造实际 key 并把 artifact/key/result 写入断言报告；缺少
+backend/font fingerprint、baseline 缺失或不可比仍保持 `inconclusive`，不自动批准或更新。
+记录见
 [S04 desktop check](../experiments/S04-check-desktop-2026-09-28.md)。
 
 视觉 baseline 静态契约已单独交付：`src/scenario/baseline.rs` 读取项目内
@@ -474,7 +477,9 @@ reset→observe→action/wait/assert/capture，并在报告后终止子进程。
 BaselineKey、PNG 尺寸和 `sha256:`；缺失、损坏、key/DPI/locale/scope 不一致分别报告
 `baseline_missing`、invalid 或 not comparable。当前算法固定为 `exact-sha256-v1`，只返回
 matched/different/not_comparable，不创建或更新基线；记录见
-[S04 visual baseline contract](../experiments/S04-visual-baseline-2026-09-28.md)。
+[S04 visual baseline contract](../experiments/S04-visual-baseline-2026-09-28.md)；desktop
+artifact 接线和报告证据见
+[S04 baseline check wiring](../experiments/S04-baseline-check-wiring-2026-09-28.md)。
 
 验收 S-02/S-03/S-07/S-08/S-09/R-05。输出三个标准夹具各连续 20 次真实执行和故障变体。回退：撤回不完整断言，不能将 unknown 转成布尔 false 或 passed。
 

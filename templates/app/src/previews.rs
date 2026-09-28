@@ -212,6 +212,9 @@ fn ready_environment(state: &PreviewState) -> String {
     json!({
         "theme": state.theme,
         "locale": state.locale,
+        "os": std::env::consts::OS,
+        "backend": env_optional("GPUI_PREVIEW_BACKEND"),
+        "font_fingerprint": env_optional("GPUI_PREVIEW_FONT_FINGERPRINT"),
         "clock": state.clock,
         "clock_at": state.clock_at,
         "random_seed": state.random_seed,
