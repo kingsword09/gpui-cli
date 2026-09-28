@@ -27,6 +27,6 @@
 ## 未覆盖
 
 - 真机签名输入建模后才能启用 physical-device cache hit；Android cache hit 尚未接入；
-- Xcode/SDK/toolchain 版本、未声明 build-script I/O 等输入边界仍未完整纳入 BuildKey，不能
-  宣称任意环境下的完整可复现构建；
+- Xcode/目标 SDK version/build 已纳入 BuildKey；XcodeGen、任意 build-script 隐藏 I/O 等
+  输入边界仍未完整纳入，不能宣称任意环境下的完整可复现构建；
 - live builder、在途任务共享/取消引用、缓存清理与容量预算仍未接入。
