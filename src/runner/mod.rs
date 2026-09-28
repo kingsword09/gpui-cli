@@ -8,5 +8,6 @@ pub mod build_manifest;
 pub mod ios;
 pub mod lease;
 pub mod matrix;
+pub mod matrix_executor;
 pub mod mobile;
 pub mod output_layout;

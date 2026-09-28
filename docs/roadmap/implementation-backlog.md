@@ -566,7 +566,8 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 3. 汇总 passed/failed/inconclusive/unavailable/cancelled；optional 缺失为 partial，required 不全通过绝不 passed。
 4. fail_fast 和取消只清理本次拥有的资源；保留已完成 cell 产物，等待和 cleanup 也受 deadline 约束。
 
-PR 拆分：matrix plan/status/summary 契约与纯 scheduler（当前已交付）→ runner 执行接线 →
+PR 拆分：matrix plan/status/summary 契约与纯 scheduler（已交付）→ runner execution adapter
+（当前切片）→
 真实跨目标并发与资源锁验收。
 
 当前契约记录见

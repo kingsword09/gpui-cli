@@ -54,6 +54,38 @@ fn connect_with_capabilities(
     socket
 }
 
+fn read_semantics_query(socket: &mut TcpStream, request_id: &str, window_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for target semantics query"
+        );
+        let message =
+            protocol::decode::<ServerMessage>(&protocol::read_frame(socket).unwrap()).unwrap();
+        match message {
+            ServerMessage::SemanticsQuery {
+                request_id: actual_request_id,
+                window_id: actual_window_id,
+                max_bytes: 262144,
+            } if actual_request_id == request_id && actual_window_id == window_id => return,
+            ServerMessage::ProbeUi {
+                request_id,
+                window_id,
+            } => send(
+                socket,
+                &ClientMessage::UiProbeResult {
+                    request_id,
+                    window_id,
+                    responsive: true,
+                    latency_ms: Some(1),
+                },
+            ),
+            other => panic!("expected target semantics query, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn logical_id_capability_is_reported_only_when_the_runtime_declares_the_adapter() {
     let dir = tempfile::tempdir().unwrap();
@@ -625,16 +657,7 @@ fn semantics_read_roundtrip_is_run_and_window_bound_and_publishes_tree_artifact(
         SubmitResult::Existing(_) => panic!("expected a new observe operation"),
     };
     session.advance_observe_requests();
-    let query =
-        protocol::decode::<ServerMessage>(&protocol::read_frame(&mut socket).unwrap()).unwrap();
-    assert!(matches!(
-        query,
-        ServerMessage::SemanticsQuery {
-            ref request_id,
-            ref window_id,
-            max_bytes: 262144,
-        } if request_id == &operation_id && window_id == "main"
-    ));
+    read_semantics_query(&mut socket, &operation_id, "main");
     let tree =
         r#"{"root":"a","nodes":{"a":{"aria":{"role":"Window","label":"Counter"},"children":[]}}}"#;
     send(
