@@ -7,5 +7,6 @@ pub mod build_key;
 pub mod build_manifest;
 pub mod ios;
 pub mod lease;
+pub mod matrix;
 pub mod mobile;
 pub mod output_layout;

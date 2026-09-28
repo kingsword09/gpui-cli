@@ -44,7 +44,7 @@
 | A03 | G2 | core | M | T02, S01, F02 | A-05 | planned |
 | S05 | G2 | optional | M | S02, S04 | S-10 | planned |
 | M01 | G3 | core | L | O04, T01, M03 | M-01, M-02, O-08, O-10 | planned |
-| M02 | G3 | core | L | S04, M01, M03, M04 | M-03, M-06, M-08, R-05 | planned |
+| M02 | G3 | core | L | S04, M01, M03, M04 | M-03, M-06, M-08, R-05 | in_progress |
 | M05 | G3 | core | L | M02, O03 | R-01, R-02, R-03, R-04, R-05 | planned |
 | Q01 | G3 | core | M | F01, O04, S04, M01 | C-02, O-01, O-11, S-03, M-01, M-02, R-04 | planned |
 | G01 | G4 | core | L | F01, P01, O01 | P-03, P-04 | planned |
@@ -558,12 +558,19 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 
 ### M02 · 本地 matrix orchestration
 
-代码落点：拟议 `src/runner/{matrix,scheduler,report}.rs`、check 的 matrix 入口；复用 S04/M03/M04。
+代码落点：`src/runner/matrix.rs` 已交付 plan/scheduler/report 契约；后续接入 check 的 matrix
+入口并复用 S04/M03/M04。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
 3. 汇总 passed/failed/inconclusive/unavailable/cancelled；optional 缺失为 partial，required 不全通过绝不 passed。
 4. fail_fast 和取消只清理本次拥有的资源；保留已完成 cell 产物，等待和 cleanup 也受 deadline 约束。
+
+PR 拆分：matrix plan/status/summary 契约与纯 scheduler（当前已交付）→ runner 执行接线 →
+真实跨目标并发与资源锁验收。
+
+当前契约记录见
+[M02 matrix contract](../experiments/M02-matrix-contract-2026-09-28.md)。
 
 验收 M-03/M-06/M-08/R-05。输出 macOS+iOS simulator+Android emulator 矩阵与不可用 Windows cell。回退：用户可单目标运行，不能用本机交叉编译替代 Windows 运行。
 
