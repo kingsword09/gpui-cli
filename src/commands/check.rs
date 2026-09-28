@@ -6,6 +6,7 @@ use gpui_dev_protocol::ARTIFACT_CHUNK_BYTES;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -16,11 +17,12 @@ use crate::devserver::actions::Action;
 use crate::devserver::control::{self, Command as ControlCommand, Registration};
 use crate::devserver::events::{Event, Kind, Page};
 use crate::scenario::baseline::{
-    BaselineComparison, BaselineKey, BaselineLoad, MAX_IMAGE_BYTES, compare_png, load_baseline,
+    BaselineComparison, BaselineKey, BaselineLoad, DiffPng, MAX_IMAGE_BYTES, compare_png, diff_png,
+    load_baseline,
 };
 use crate::scenario::executor::{
-    ActionResult, CaptureEvidence, CheckReport, DriverError, DriverErrorKind, Observation,
-    ScenarioRunner, ScreenshotEvidence, SemanticNode,
+    ActionResult, CaptureEvidence, CheckReport, DiffEvidence, DriverError, DriverErrorKind,
+    Observation, ScenarioRunner, ScreenshotEvidence, SemanticNode,
 };
 use crate::scenario::{self, ScenarioDefinition, ScenarioFile, ScenarioStep, Selector};
 
@@ -624,6 +626,74 @@ impl DesktopCheckRunner {
         Ok(bytes)
     }
 
+    fn write_diff_artifact(
+        &self,
+        observation_id: &str,
+        baseline_id: &str,
+        diff: DiffPng,
+    ) -> Result<DiffEvidence, String> {
+        let gpui_dir = self.project_root.join(".gpui");
+        if let Ok(metadata) = fs::symlink_metadata(&gpui_dir)
+            && metadata.file_type().is_symlink()
+        {
+            return Err("diff output root is a symbolic link".into());
+        }
+        let checks_dir = gpui_dir.join("checks");
+        if let Ok(metadata) = fs::symlink_metadata(&checks_dir)
+            && metadata.file_type().is_symlink()
+        {
+            return Err("diff output directory is a symbolic link".into());
+        }
+        fs::create_dir_all(&checks_dir).map_err(|error| error.to_string())?;
+        for path in [gpui_dir, checks_dir.clone()] {
+            if fs::symlink_metadata(&path)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink()
+            {
+                return Err("diff output path contains a symbolic link".into());
+            }
+        }
+        let file_name = format!(
+            "{}-{}-{}.diff.png",
+            safe_diff_component(&self.scenario_id),
+            safe_diff_component(observation_id),
+            safe_diff_component(baseline_id)
+        );
+        let output = checks_dir.join(file_name);
+        if let Ok(metadata) = fs::symlink_metadata(&output)
+            && (metadata.file_type().is_symlink() || !metadata.is_file())
+        {
+            return Err("diff output path is not a regular file".into());
+        }
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(&checks_dir).map_err(|error| error.to_string())?;
+        temporary
+            .write_all(&diff.bytes)
+            .map_err(|error| error.to_string())?;
+        temporary
+            .as_file_mut()
+            .sync_all()
+            .map_err(|error| error.to_string())?;
+        temporary
+            .persist(&output)
+            .map_err(|error| error.error.to_string())?;
+        let path = output
+            .strip_prefix(&self.project_root)
+            .unwrap_or(&output)
+            .to_string_lossy()
+            .into_owned();
+        Ok(DiffEvidence {
+            path,
+            bytes: diff.bytes.len() as u64,
+            sha256: format!("sha256:{:x}", Sha256::digest(&diff.bytes)),
+            changed_pixels: diff.changed_pixels,
+            total_pixels: diff.total_pixels,
+            pixel_width: diff.pixel_width,
+            pixel_height: diff.pixel_height,
+        })
+    }
+
     fn query_nodes(&self, observation_id: &str) -> Result<Vec<SemanticNode>, DriverError> {
         let reply = control::request(
             &self.registration,
@@ -767,6 +837,23 @@ impl ScenarioRunner for DesktopCheckRunner {
                 screenshot.comparable = true;
                 screenshot.matches = Some(false);
                 screenshot.reason = Some("baseline_different".into());
+                match diff_png(&baseline, &actual) {
+                    Ok(diff) => match self.write_diff_artifact(
+                        &observation.observation_id,
+                        baseline_id,
+                        diff,
+                    ) {
+                        Ok(evidence) => screenshot.diff = Some(evidence),
+                        Err(error) => {
+                            screenshot.reason =
+                                Some(format!("baseline_different:diff_unavailable:{error}"));
+                        }
+                    },
+                    Err(error) => {
+                        screenshot.reason =
+                            Some(format!("baseline_different:diff_unavailable:{error}"));
+                    }
+                }
             }
             BaselineComparison::NotComparable { code, message } => {
                 screenshot.comparable = false;
@@ -1048,6 +1135,7 @@ fn screenshot_evidence(result: &Value) -> Option<ScreenshotEvidence> {
         artifact_id: artifact["artifact_id"].as_str().map(str::to_owned),
         baseline_id: None,
         baseline_key: None,
+        diff: None,
         scope: result["scope"].as_str().map(str::to_owned),
         provider: result["provider"].as_str().map(str::to_owned),
         pixel_width: result["pixel_width"]
@@ -1075,6 +1163,24 @@ fn normalize_sha256(value: &str) -> Option<String> {
     let hex = value.strip_prefix("sha256:").unwrap_or(value);
     (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| hex.to_ascii_lowercase())
+}
+
+fn safe_diff_component(value: &str) -> String {
+    let mut result = value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+                byte as char
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if result.is_empty() {
+        result.push('_');
+    }
+    result.truncate(128);
+    result
 }
 
 fn operation_error(operation: &Value, kind: DriverErrorKind) -> DriverError {

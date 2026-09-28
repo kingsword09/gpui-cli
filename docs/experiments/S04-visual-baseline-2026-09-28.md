@@ -39,7 +39,7 @@ scope；图片声明相对路径、字节数、PNG 像素尺寸和 `sha256:`。�
 - strict key 需要 runtime 的实际 backend 和 font fingerprint；生成模板会报告 OS，并预留
   `GPUI_PREVIEW_BACKEND` / `GPUI_PREVIEW_FONT_FINGERPRINT` 作为显式 runtime 环境值。缺失
   这些字段时 check 返回 `inconclusive`，错误不会猜成通过。
-- 当前仍不生成 diff artifact；本切片的 loader/comparator 是无 GPU 的稳定 seam，实际
-  macOS Screen Recording/semantics 权限和真实基线批准仍需平台验收。
+- `different` 会在 PNG 可解码且尺寸一致时生成有界红色 diff，原子写入 `.gpui/checks/`
+  并记录相对路径、hash、尺寸和 changed pixel count；它是失败诊断，不是批准/更新操作。
 - 容差、动态区域 mask、baseline approval/review、跨平台 backend 目录和独立更新命令属于后续
   S04/R-05 切片。

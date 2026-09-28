@@ -134,6 +134,8 @@ pub struct ScreenshotEvidence {
     pub baseline_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_key: Option<BaselineKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<DiffEvidence>,
     pub scope: Option<String>,
     pub provider: Option<String>,
     pub pixel_width: Option<u32>,
@@ -144,6 +146,18 @@ pub struct ScreenshotEvidence {
     pub comparable: bool,
     pub matches: Option<bool>,
     pub reason: Option<String>,
+}
+
+/// A local diagnostic diff written by a check after a visual mismatch.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct DiffEvidence {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub changed_pixels: u64,
+    pub total_pixels: u64,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
 }
 
 /// The smallest observation contract needed by the check core.
@@ -868,6 +882,7 @@ fn screenshot_actual(evidence: &ScreenshotEvidence) -> Value {
         "artifact_id": evidence.artifact_id,
         "baseline_id": evidence.baseline_id,
         "baseline_key": evidence.baseline_key,
+        "diff": evidence.diff,
         "scope": evidence.scope,
         "provider": evidence.provider,
         "pixel_width": evidence.pixel_width,
@@ -1033,6 +1048,7 @@ mod tests {
                 artifact_id: Some("artifact-1".into()),
                 baseline_id: Some("counter".into()),
                 baseline_key: None,
+                diff: None,
                 scope: Some("window".into()),
                 provider: Some("test".into()),
                 pixel_width: Some(640),
@@ -1257,6 +1273,7 @@ mod tests {
             artifact_id: None,
             baseline_id: Some("missing".into()),
             baseline_key: None,
+            diff: None,
             scope: None,
             provider: None,
             pixel_width: None,
