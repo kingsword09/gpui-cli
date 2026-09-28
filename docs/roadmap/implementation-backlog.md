@@ -274,7 +274,8 @@ S01 提供静态 validate 命令，preview/check 执行挂载由 S02/S04 完成�
 当前代码已交付 `gpui scenario validate` 静态入口：schema v1 使用 deny-unknown-fields，
 校验场景/step ID、路径边界、fixture 内容与哈希、timeout/viewport/clock、selector 和
 assertion 参数，并输出规范化 scenario_hash。缺少 `.gpui/registry-manifest.json` 时报告
-`registry_unavailable` 警告，不冒充已检查组件；preview/check 执行器仍未实现。
+`registry_unavailable` 警告，不冒充已检查组件；desktop preview/check 的运行接线由 S02/S04
+后续切片提供，移动端和完整矩阵仍未接入。
 
 ### S02 · 原生组件 preview 与 reset
 
@@ -459,6 +460,14 @@ assert、capture 的状态转移。断言支持 schema v1 的语义字段、runt
 伪造成失败。每步保留 observation/log 序号、action/断言/capture 证据；终止步骤后的依赖
 步骤显式 `skipped`，cleanup 错误不会覆盖原始失败或 unknown。记录见
 [S04 check core](../experiments/S04-check-core-2026-09-28.md)。
+
+当前 desktop 接线已交付：`gpui check --scenario <id> --target desktop` 启动隔离的
+`gpui preview` 子进程，通过同一 control/app channel 等待 `scenario_ready`，再执行
+reset→observe→action/wait/assert/capture，并在报告后终止子进程。动作继续只接受
+`logical_id` selector；role/name selector 在路由前明确 `unavailable`。语义 query 将 bounded
+节点和 bounds/clip 信息接入断言，runtime issue 按 reset 前 event seq 过滤。截图 artifact
+已实际采集但视觉 baseline 尚未加载，`screenshot_matches` 保持 `inconclusive`。记录见
+[S04 desktop check](../experiments/S04-check-desktop-2026-09-28.md)。
 
 验收 S-02/S-03/S-07/S-08/S-09/R-05。输出三个标准夹具各连续 20 次真实执行和故障变体。回退：撤回不完整断言，不能将 unknown 转成布尔 false 或 passed。
 
