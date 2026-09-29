@@ -363,6 +363,39 @@ fn publish_preview_desktop_manifest(root: &Path, key_hash: &str, executable: &Pa
     Ok(())
 }
 
+fn preview_manifest_contains_root(
+    manifest: &BuildArtifactManifest,
+    root: &Path,
+    expected: &Path,
+) -> bool {
+    expected
+        .strip_prefix(root)
+        .ok()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .is_some_and(|relative| manifest.roots.iter().any(|root| root == &relative))
+}
+
+fn publish_preview_ios_manifest(root: &Path, key_hash: &str, app_path: &Path) -> Result<()> {
+    let app_relative = app_path.strip_prefix(root).with_context(|| {
+        format!(
+            "preview iOS app bundle {} is outside output root {}",
+            app_path.display(),
+            root.display()
+        )
+    })?;
+    let manifest = BuildArtifactManifest::capture_at(
+        root,
+        BuildPlatform::Ios,
+        key_hash,
+        &[app_relative.to_owned()],
+    )
+    .context("capturing preview iOS artifact manifest")?;
+    manifest
+        .write_atomic(&root.join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE))
+        .context("publishing preview iOS artifact manifest")?;
+    Ok(())
+}
+
 /// Runs one build + (re)launch cycle. `Ok(BuildFailed)` means a compile failure
 /// was already rendered; infrastructure errors come back as `Err`.
 fn run_iteration(
@@ -919,9 +952,54 @@ fn build_ios_app_live(
     build: &Build,
     outputs: Option<&PreviewBuildOutputs>,
 ) -> Result<Option<std::path::PathBuf>> {
+    let outputs = outputs.cloned();
     let _output_lock = outputs
+        .as_ref()
         .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
         .transpose()?;
+    let ios_dir = project.ios_dir();
+    let scheme = project.xcode_target();
+    let derived_dir = outputs
+        .as_ref()
+        .and_then(|outputs| outputs.ios_derived_data_dir.clone())
+        .unwrap_or_else(|| ios_dir.join("build"));
+    let app_path = xcode_app_path(&derived_dir, &scheme, physical, false);
+    if !physical
+        && let Some(outputs) = &outputs
+        && let Some(key_hash) = outputs.build_key_hash.as_deref()
+    {
+        match lookup_verified_at_path(
+            &outputs
+                .output_root
+                .join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE),
+            &outputs.output_root,
+            BuildPlatform::Ios,
+            key_hash,
+        ) {
+            BuildCacheLookup::Hit(manifest)
+                if app_path.is_dir()
+                    && preview_manifest_contains_root(
+                        &manifest,
+                        &outputs.output_root,
+                        &app_path,
+                    ) =>
+            {
+                println!(
+                    "  {} iOS preview BuildKey cache hit: {}",
+                    "✓".green(),
+                    key_hash
+                );
+                return Ok(Some(app_path));
+            }
+            BuildCacheLookup::Hit(_) => println!(
+                "  {} iOS preview cache miss: manifest app bundle root is not usable",
+                "→".blue()
+            ),
+            BuildCacheLookup::Miss(reason) => {
+                println!("  {} iOS preview cache miss: {reason}", "→".blue())
+            }
+        }
+    }
     let rust_target = if physical {
         "aarch64-apple-ios"
     } else {
@@ -944,7 +1022,7 @@ fn build_ios_app_live(
         "--features",
         "gpui-dev",
     ]);
-    if let Some(outputs) = outputs {
+    if let Some(outputs) = &outputs {
         cargo.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
     }
     let outcome = error::run_cargo_json(&mut cargo, build, "cargo.build")?;
@@ -957,7 +1035,6 @@ fn build_ios_app_live(
     }
 
     ensure_tool("xcodegen", "Install it with `brew install xcodegen`.")?;
-    let ios_dir = project.ios_dir();
     run_tool(
         "xcodegen generate",
         Command::new("xcodegen")
@@ -965,11 +1042,6 @@ fn build_ios_app_live(
             .args(["generate", "--spec", "project.yml"]),
         build,
     )?;
-
-    let scheme = project.xcode_target();
-    let derived_dir = outputs
-        .and_then(|outputs| outputs.ios_derived_data_dir.clone())
-        .unwrap_or_else(|| ios_dir.join("build"));
 
     let mut xcodebuild = Command::new("xcodebuild");
     xcodebuild
@@ -988,12 +1060,16 @@ fn build_ios_app_live(
         .arg("build");
     run_tool("xcodebuild (Debug)", &mut xcodebuild, build)?;
 
-    let app_path = xcode_app_path(&derived_dir, &scheme, physical, false);
     if !app_path.exists() {
         bail!(
             "xcodebuild finished but no app bundle was found at '{}'.",
             app_path.display()
         );
+    }
+    if let Some(outputs) = &outputs
+        && let Some(key_hash) = outputs.build_key_hash.as_deref()
+    {
+        publish_preview_ios_manifest(&outputs.output_root, key_hash, &app_path)?;
     }
     println!("  {} {}", "✓".green(), app_path.display());
     Ok(Some(app_path))
@@ -2144,5 +2220,29 @@ mod tests {
             preview_desktop_executable_from_manifest(&ambiguous, root.path()),
             None
         );
+    }
+
+    #[test]
+    fn preview_manifest_matches_the_expected_ios_bundle_root() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root
+            .path()
+            .join("native-staging/ios/derived-data/Build/Products/Debug-iphonesimulator/Demo.app");
+        let manifest = BuildArtifactManifest {
+            schema_version: BUILD_ARTIFACT_MANIFEST_SCHEMA_VERSION,
+            platform: BuildPlatform::Ios,
+            key_hash: "b".repeat(64),
+            roots: vec![
+                "native-staging/ios/derived-data/Build/Products/Debug-iphonesimulator/Demo.app"
+                    .into(),
+            ],
+            files: Vec::new(),
+        };
+        assert!(preview_manifest_contains_root(&manifest, root.path(), &app));
+        assert!(!preview_manifest_contains_root(
+            &manifest,
+            root.path(),
+            &root.path().join("other.app")
+        ));
     }
 }
