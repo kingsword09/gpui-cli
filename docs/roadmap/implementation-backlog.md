@@ -448,7 +448,13 @@ verifier；它与普通 build/run attempt 隔离，同时共享 output lock 串�
 iOS simulator preview 复用该 coordinator，#183 再让 Android default-debug preview 验证 JNI/APK
 manifest 和 debug keystore 指纹；physical device、release/custom-signing、cache-disabled 和
 BuildKey 不可复用路径仍保留原有锁流程。含未建模输入的路径继续不共享。
-M04 仍未完成：preview coordinator 的最后引用退出时的安全取消、失败/取消/partial 终态、heartbeat/fencing、preview/check orchestration 的其余部分，以及
+#185 允许 superseded 的 follower 释放自己的 subscription；#187 让 leader 也持有 subscriber，#189
+按 attempt 安全统计 active references。#191 又让 leader revision 失效时终止 owned process tree，写入
+retryable superseded terminal marker，使旧 attempt 的 followers 释放引用并重新竞争；follower 的取消
+不会终止仍 current 的 leader。subscriber 注册、计数、coordinator record 与 cache-clean 检查共用短时
+state lock，避免刚创建的 subscriber 被误判为 stale。该机制尚不是完整 last-reference 状态机：没有
+`cancelled`/`partial` 终态，active count 不授权忽略 leader 自己的 revision，也无 heartbeat/fencing。
+M04 仍未完成：明确的 last-reference policy、失败/取消/partial 终态、heartbeat/fencing、preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
@@ -468,7 +474,8 @@ build/run 的 coordinator 记录、subscriber 锁和 manifest 复核见
 [S04 Android preview coordinator](../experiments/S04-android-preview-build-coordinator-2026-09-30.md) 与
 [S04 preview coordinator cancellation](../experiments/S04-preview-coordinator-cancellation-2026-09-30.md) 与
 [S04 leader subscriber reference](../experiments/S04-leader-subscriber-reference-2026-09-30.md)。
-[S04 subscriber identity/count](../experiments/S04-subscriber-identity-count-2026-09-30.md)。
+[S04 subscriber identity/count](../experiments/S04-subscriber-identity-count-2026-09-30.md) 与
+[S04 superseded leader cancellation](../experiments/S04-superseded-leader-cancellation-2026-09-30.md)。
 local `build.rs`
 等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
 allowlist 遗漏已由 #149 修复，但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
