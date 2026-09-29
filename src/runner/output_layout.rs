@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const BUILD_OUTPUT_LOCK_FILE: &str = ".build-output.lock";
+pub const BUILD_OUTPUT_OWNER_FILE: &str = ".build-owner.json";
 pub const PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE: &str = "preview-artifact-manifest.json";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
