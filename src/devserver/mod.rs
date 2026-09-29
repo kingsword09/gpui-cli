@@ -10,6 +10,7 @@ pub mod inputs;
 pub mod operations;
 pub mod output;
 mod process;
+pub(crate) use process::OwnedChild;
 pub mod protocol;
 pub mod query;
 pub mod session;

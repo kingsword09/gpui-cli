@@ -3,7 +3,7 @@
 use std::io;
 use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 
-pub(super) struct OwnedChild {
+pub(crate) struct OwnedChild {
     #[cfg(unix)]
     child: std::process::Child,
     #[cfg(windows)]
@@ -13,9 +13,16 @@ pub(super) struct OwnedChild {
 
 impl OwnedChild {
     pub fn spawn(cmd: &mut Command) -> io::Result<Self> {
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        Self::spawn_with_stdio(cmd, Stdio::null(), Stdio::piped(), Stdio::piped())
+    }
+
+    pub fn spawn_with_stdio(
+        cmd: &mut Command,
+        stdin: Stdio,
+        stdout: Stdio,
+        stderr: Stdio,
+    ) -> io::Result<Self> {
+        cmd.stdin(stdin).stdout(stdout).stderr(stderr);
         #[cfg(unix)]
         let child = {
             use std::os::unix::process::CommandExt;
