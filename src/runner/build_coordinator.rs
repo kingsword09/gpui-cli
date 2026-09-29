@@ -1,0 +1,759 @@
+//! Cross-process BuildKey coordination for ordinary build outputs.
+//!
+//! The output lock elects one leader. The coordinator record gives other
+//! processes an attempt identity and terminal result to wait for, so they do
+//! not independently rerun the same BuildKey build after the lock is released.
+//! A successful attempt is accepted only after the ordinary artifact manifest
+//! is verified.
+
+use super::build_cache::{BuildCacheLookup, BuildOutputLock, lookup_verified};
+use super::build_key::BuildKey;
+use super::output_layout::{
+    BUILD_COORDINATOR_LOCK_FILE, BUILD_COORDINATOR_STATE_FILE, BUILD_COORDINATOR_SUBSCRIBERS_DIR,
+    BuildOutputLayout, BuildPlatform,
+};
+use anyhow::{Context, Result, bail};
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tempfile::NamedTempFile;
+
+pub const BUILD_COORDINATOR_SCHEMA_VERSION: u32 = 1;
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const LEADER_ABANDONED_ERROR: &str = "build leader exited before publishing a terminal state";
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildCoordinatorState {
+    Building,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildCoordinatorRecord {
+    pub schema_version: u32,
+    pub platform: BuildPlatform,
+    pub key_hash: String,
+    pub attempt_id: String,
+    pub owner_id: String,
+    pub pid: u32,
+    pub started_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+    pub state: BuildCoordinatorState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuildCoordinatorRole {
+    Leader,
+    Follower,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuildCoordinatorOutcome {
+    pub role: BuildCoordinatorRole,
+    pub attempt_id: String,
+}
+
+/// A short-lived reference held by a waiting caller. The file is intentionally
+/// separate from the state record so a leader never has to rewrite subscriber
+/// count while it is running the compiler.
+struct BuildCoordinatorSubscription {
+    path: PathBuf,
+    _file: File,
+}
+
+impl Drop for BuildCoordinatorSubscription {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Runs one ordinary BuildKey build or joins the already-running attempt.
+///
+/// The closure is invoked only by the elected leader. Followers wait for the
+/// leader's terminal state and verify the published artifact manifest before
+/// returning. If the leader disappears without publishing a terminal state,
+/// a follower can become the next leader and execute the same closure.
+pub fn coordinate_build<F>(
+    layout: &BuildOutputLayout,
+    key: &BuildKey,
+    build: F,
+) -> Result<BuildCoordinatorOutcome>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let mut build = Some(build);
+
+    loop {
+        if let Some(record) = read_record(layout)?
+            && record.platform == layout.platform
+            && record.key_hash == key.key_hash()
+        {
+            match record.state {
+                BuildCoordinatorState::Building => match wait_for_attempt(layout, key, &record)? {
+                    WaitOutcome::Completed(outcome) => return Ok(outcome),
+                    WaitOutcome::Abandoned => continue,
+                },
+                BuildCoordinatorState::Succeeded => {
+                    if verify_completed_output(layout, key).is_ok() {
+                        return Ok(BuildCoordinatorOutcome {
+                            role: BuildCoordinatorRole::Follower,
+                            attempt_id: record.attempt_id,
+                        });
+                    }
+                }
+                BuildCoordinatorState::Failed => {
+                    if has_live_subscriber(layout, &record.attempt_id)? {
+                        bail!(
+                            "coordinated BuildKey build failed: {}",
+                            record
+                                .error
+                                .unwrap_or_else(|| "build failed without an error".into())
+                        );
+                    }
+                }
+            }
+        }
+
+        let Some(lock) = BuildOutputLock::try_acquire(layout)? else {
+            thread::sleep(POLL_INTERVAL);
+            continue;
+        };
+
+        let attempt_id = unique_id("attempt");
+        let owner_id = unique_id("coordinator");
+        let started_at_ms = timestamp_ms();
+        write_record(
+            layout,
+            &BuildCoordinatorRecord {
+                schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
+                platform: layout.platform,
+                key_hash: key.key_hash().to_string(),
+                attempt_id: attempt_id.clone(),
+                owner_id: owner_id.clone(),
+                pid: process::id(),
+                started_at_ms,
+                finished_at_ms: None,
+                state: BuildCoordinatorState::Building,
+                error: None,
+            },
+        )?;
+
+        let build_once = build
+            .take()
+            .expect("BuildKey coordinator closure is consumed once");
+        let result = build_once();
+        let result = match result {
+            Ok(()) => verify_completed_output(layout, key),
+            Err(error) => Err(error),
+        };
+
+        let terminal = BuildCoordinatorRecord {
+            schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
+            platform: layout.platform,
+            key_hash: key.key_hash().to_string(),
+            attempt_id: attempt_id.clone(),
+            owner_id,
+            pid: process::id(),
+            started_at_ms,
+            finished_at_ms: Some(timestamp_ms()),
+            state: if result.is_ok() {
+                BuildCoordinatorState::Succeeded
+            } else {
+                BuildCoordinatorState::Failed
+            },
+            error: result.as_ref().err().map(format_error),
+        };
+        let state_result = write_record(layout, &terminal);
+        drop(lock);
+
+        match (result, state_result) {
+            (Ok(()), Ok(())) => {
+                return Ok(BuildCoordinatorOutcome {
+                    role: BuildCoordinatorRole::Leader,
+                    attempt_id,
+                });
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(()), Err(error)) => {
+                return Err(error).context("publishing successful BuildKey coordinator state");
+            }
+            (Err(error), Err(state_error)) => {
+                return Err(error).context(format!(
+                    "publishing failed BuildKey coordinator state: {state_error:#}"
+                ));
+            }
+        }
+    }
+}
+
+enum WaitOutcome {
+    Completed(BuildCoordinatorOutcome),
+    Abandoned,
+}
+
+fn wait_for_attempt(
+    layout: &BuildOutputLayout,
+    key: &BuildKey,
+    expected: &BuildCoordinatorRecord,
+) -> Result<WaitOutcome> {
+    let subscription = subscribe(layout, &expected.attempt_id)?;
+
+    loop {
+        match read_record(layout)? {
+            Some(record)
+                if record.platform == layout.platform
+                    && record.key_hash == key.key_hash()
+                    && record.attempt_id == expected.attempt_id =>
+            {
+                match record.state {
+                    BuildCoordinatorState::Building => {
+                        if let Some(lock) = BuildOutputLock::try_acquire(layout)? {
+                            let abandoned = BuildCoordinatorRecord {
+                                schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
+                                platform: layout.platform,
+                                key_hash: key.key_hash().to_string(),
+                                attempt_id: record.attempt_id,
+                                owner_id: record.owner_id,
+                                pid: record.pid,
+                                started_at_ms: record.started_at_ms,
+                                finished_at_ms: Some(timestamp_ms()),
+                                state: BuildCoordinatorState::Failed,
+                                error: Some(LEADER_ABANDONED_ERROR.into()),
+                            };
+                            write_record(layout, &abandoned)?;
+                            drop(lock);
+                            drop(subscription);
+                            return Ok(WaitOutcome::Abandoned);
+                        }
+                        thread::sleep(POLL_INTERVAL);
+                    }
+                    BuildCoordinatorState::Succeeded => {
+                        verify_completed_output(layout, key)?;
+                        drop(subscription);
+                        return Ok(WaitOutcome::Completed(BuildCoordinatorOutcome {
+                            role: BuildCoordinatorRole::Follower,
+                            attempt_id: record.attempt_id,
+                        }));
+                    }
+                    BuildCoordinatorState::Failed => {
+                        if record.error.as_deref() == Some(LEADER_ABANDONED_ERROR) {
+                            drop(subscription);
+                            return Ok(WaitOutcome::Abandoned);
+                        }
+                        let reason = record
+                            .error
+                            .unwrap_or_else(|| "coordinated build failed without an error".into());
+                        drop(subscription);
+                        bail!("coordinated BuildKey build failed: {reason}");
+                    }
+                }
+            }
+            Some(_) | None => {
+                if let Some(lock) = BuildOutputLock::try_acquire(layout)? {
+                    if let Some(record) = read_record(layout)?
+                        && record.state == BuildCoordinatorState::Building
+                        && record.platform == layout.platform
+                        && record.key_hash == key.key_hash()
+                    {
+                        let abandoned = BuildCoordinatorRecord {
+                            schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
+                            platform: layout.platform,
+                            key_hash: key.key_hash().to_string(),
+                            attempt_id: record.attempt_id,
+                            owner_id: record.owner_id,
+                            pid: record.pid,
+                            started_at_ms: record.started_at_ms,
+                            finished_at_ms: Some(timestamp_ms()),
+                            state: BuildCoordinatorState::Failed,
+                            error: Some(LEADER_ABANDONED_ERROR.into()),
+                        };
+                        write_record(layout, &abandoned)?;
+                    }
+                    drop(lock);
+                    drop(subscription);
+                    return Ok(WaitOutcome::Abandoned);
+                }
+                thread::sleep(POLL_INTERVAL);
+            }
+        }
+    }
+}
+
+fn verify_completed_output(layout: &BuildOutputLayout, key: &BuildKey) -> Result<()> {
+    match lookup_verified(layout, key) {
+        BuildCacheLookup::Hit(_) => Ok(()),
+        BuildCacheLookup::Miss(reason) => {
+            bail!("coordinated build completed without a verified artifact: {reason}")
+        }
+    }
+}
+
+fn subscribe(layout: &BuildOutputLayout, attempt_id: &str) -> Result<BuildCoordinatorSubscription> {
+    let directory = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
+    fs::create_dir_all(&directory).with_context(|| {
+        format!(
+            "creating BuildKey coordinator subscribers directory {}",
+            directory.display()
+        )
+    })?;
+    let path = directory.join(format!(
+        "{}-{}.json",
+        process::id(),
+        unique_id("subscriber")
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| {
+            format!(
+                "creating BuildKey coordinator subscription {}",
+                path.display()
+            )
+        })?;
+    let record = serde_json::json!({
+        "schema_version": BUILD_COORDINATOR_SCHEMA_VERSION,
+        "attempt_id": attempt_id,
+        "pid": process::id(),
+        "joined_at_ms": timestamp_ms(),
+    });
+    serde_json::to_writer_pretty(&mut file, &record)
+        .context("serializing BuildKey coordinator subscription")?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    file.lock_exclusive().with_context(|| {
+        format!(
+            "locking BuildKey coordinator subscription {}",
+            path.display()
+        )
+    })?;
+    Ok(BuildCoordinatorSubscription { path, _file: file })
+}
+
+fn has_live_subscriber(layout: &BuildOutputLayout, attempt_id: &str) -> Result<bool> {
+    let directory = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "scanning BuildKey coordinator subscribers {}",
+                    directory.display()
+                )
+            });
+        }
+    };
+
+    for entry in entries {
+        let path = entry?.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("checking subscriber {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading subscriber {}", path.display()));
+            }
+        };
+        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+        };
+        if value["attempt_id"].as_str() != Some(attempt_id) {
+            continue;
+        }
+
+        let probe = OpenOptions::new().read(true).write(true).open(&path);
+        let Ok(probe) = probe else {
+            continue;
+        };
+        match probe.try_lock_exclusive() {
+            Ok(()) => {
+                let _ = probe.unlock();
+                let _ = fs::remove_file(&path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(true),
+            Err(_) => return Ok(true),
+        }
+    }
+    Ok(false)
+}
+
+fn read_record(layout: &BuildOutputLayout) -> Result<Option<BuildCoordinatorRecord>> {
+    let path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!(
+                "BuildKey coordinator state is not a regular file: {}",
+                path.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("checking BuildKey coordinator state {}", path.display())
+            });
+        }
+    }
+
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reading BuildKey coordinator state {}", path.display()));
+        }
+    };
+    let record = match serde_json::from_slice::<BuildCoordinatorRecord>(&bytes) {
+        Ok(record) => record,
+        Err(_) => return Ok(None),
+    };
+    if record.schema_version != BUILD_COORDINATOR_SCHEMA_VERSION {
+        return Ok(None);
+    }
+    Ok(Some(record))
+}
+
+fn write_record(layout: &BuildOutputLayout, record: &BuildCoordinatorRecord) -> Result<()> {
+    let state_lock = open_state_lock(&layout.root)?;
+    let path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
+    validate_regular_or_missing(&path, "BuildKey coordinator state")?;
+    let parent = path
+        .parent()
+        .context("BuildKey coordinator state has no parent")?;
+    let mut temporary = NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "creating temporary BuildKey coordinator state in {}",
+            parent.display()
+        )
+    })?;
+    serde_json::to_writer_pretty(temporary.as_file_mut(), record)
+        .context("serializing BuildKey coordinator state")?;
+    temporary.as_file_mut().write_all(b"\n")?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(&path).map_err(|error| {
+        anyhow::anyhow!(
+            "publishing BuildKey coordinator state {}: {}",
+            path.display(),
+            error.error
+        )
+    })?;
+    drop(state_lock);
+    Ok(())
+}
+
+fn open_state_lock(root: &Path) -> Result<File> {
+    let path = root.join(BUILD_COORDINATOR_LOCK_FILE);
+    validate_regular_or_missing(&path, "BuildKey coordinator lock")?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening BuildKey coordinator lock {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking BuildKey coordinator state {}", root.display()))?;
+    Ok(file)
+}
+
+fn validate_regular_or_missing(path: &Path, label: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("{label} is not a regular file: {}", path.display());
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("checking {label} {}", path.display())),
+    }
+}
+
+fn unique_id(prefix: &str) -> String {
+    format!(
+        "{prefix}-{}-{}-{}",
+        process::id(),
+        timestamp_nanos(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn timestamp_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+fn format_error(error: &anyhow::Error) -> String {
+    let mut message = format!("{error:#}");
+    if message.len() > 4096 {
+        message.truncate(4096);
+        message.push('…');
+    }
+    message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runner::build_key::BuildKeyMaterial;
+    use crate::runner::build_manifest::BuildArtifactManifest;
+    use std::env;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn key() -> BuildKey {
+        BuildKey::new(BuildKeyMaterial {
+            source_manifest_hash: "source".into(),
+            cargo_lock_hash: "lock".into(),
+            target_triple: "x86_64-unknown-linux-gnu".into(),
+            profile: "dev".into(),
+            features: Vec::new(),
+            abi: None,
+            native_config_hash: "native".into(),
+            toolchain_fingerprint: "toolchain".into(),
+            relevant_env_hash: "env".into(),
+            preview_registry_hash: "registry".into(),
+        })
+        .unwrap()
+    }
+
+    fn layout(base: &Path) -> BuildOutputLayout {
+        BuildOutputLayout::for_key(base, &key(), BuildPlatform::Desktop).unwrap()
+    }
+
+    fn publish_fake_artifact(layout: &BuildOutputLayout) {
+        let executable = layout.cargo_target_dir.join("debug/app");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"complete binary").unwrap();
+        let entry = executable.strip_prefix(&layout.root).unwrap().to_owned();
+        BuildArtifactManifest::capture(layout, &[entry])
+            .unwrap()
+            .write_atomic(&layout.artifact_manifest_path())
+            .unwrap();
+    }
+
+    #[test]
+    fn same_key_builders_share_one_in_flight_attempt() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let count = Arc::new(AtomicUsize::new(0));
+        let first_layout = layout.clone();
+        let first_key = key.clone();
+        let first_count = count.clone();
+        let first = std::thread::spawn(move || {
+            coordinate_build(&first_layout, &first_key, || {
+                assert_eq!(first_count.fetch_add(1, Ordering::SeqCst), 0);
+                std::thread::sleep(Duration::from_millis(200));
+                publish_fake_artifact(&first_layout);
+                Ok(())
+            })
+            .unwrap()
+        });
+
+        let state_path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
+        for _ in 0..100 {
+            if state_path.is_file() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(state_path.is_file());
+
+        let second_layout = layout.clone();
+        let second_key = key.clone();
+        let second = std::thread::spawn(move || {
+            coordinate_build(&second_layout, &second_key, || {
+                panic!("follower must not execute the build closure");
+            })
+            .unwrap()
+        });
+
+        let first_outcome = first.join().unwrap();
+        let second_outcome = second.join().unwrap();
+        assert_eq!(first_outcome.role, BuildCoordinatorRole::Leader);
+        assert_eq!(second_outcome.role, BuildCoordinatorRole::Follower);
+        assert_eq!(first_outcome.attempt_id, second_outcome.attempt_id);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR).is_dir());
+        assert!(
+            fs::read_dir(layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failed_attempt_is_shared_with_followers() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let first_layout = layout.clone();
+        let first_key = key.clone();
+        let first = std::thread::spawn(move || {
+            coordinate_build(&first_layout, &first_key, || {
+                std::thread::sleep(Duration::from_millis(100));
+                bail!("compiler failed")
+            })
+            .unwrap_err()
+            .to_string()
+        });
+
+        let state_path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
+        for _ in 0..100 {
+            if state_path.is_file() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let second_layout = layout.clone();
+        let second_key = key.clone();
+        let second = std::thread::spawn(move || {
+            coordinate_build(&second_layout, &second_key, || {
+                panic!("follower must not execute the failed build closure");
+            })
+            .unwrap_err()
+            .to_string()
+        });
+
+        assert!(first.join().unwrap().contains("compiler failed"));
+        assert!(second.join().unwrap().contains("compiler failed"));
+        let state: BuildCoordinatorRecord =
+            serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
+        assert_eq!(state.state, BuildCoordinatorState::Failed);
+        assert_eq!(state.error.as_deref(), Some("compiler failed"));
+    }
+
+    #[test]
+    fn a_new_call_retries_after_a_failed_attempt_has_no_followers() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+
+        assert!(coordinate_build(&layout, &key, || bail!("first failure")).is_err());
+        let outcome = coordinate_build(&layout, &key, || {
+            publish_fake_artifact(&layout);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(outcome.role, BuildCoordinatorRole::Leader);
+    }
+
+    #[test]
+    fn same_key_builders_share_across_processes() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let mut child = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runner::build_coordinator::tests::coordinator_process_child",
+                "--nocapture",
+            ])
+            .env("GPUI_COORDINATOR_TEST_ROOT", base.path())
+            .spawn()
+            .unwrap();
+
+        let state_path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
+        for _ in 0..100 {
+            if state_path.is_file() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(state_path.is_file());
+
+        let outcome = coordinate_build(&layout, &key, || {
+            panic!("cross-process follower must not execute the build closure");
+        })
+        .unwrap();
+        assert_eq!(outcome.role, BuildCoordinatorRole::Follower);
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn coordinator_process_child() {
+        let Some(root) = env::var_os("GPUI_COORDINATOR_TEST_ROOT") else {
+            return;
+        };
+        let base = PathBuf::from(root);
+        let layout = layout(&base);
+        let key = key();
+        let outcome = coordinate_build(&layout, &key, || {
+            std::thread::sleep(Duration::from_millis(250));
+            publish_fake_artifact(&layout);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(outcome.role, BuildCoordinatorRole::Leader);
+    }
+
+    #[test]
+    fn stale_building_record_can_be_replaced_after_owner_disappears() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        fs::create_dir_all(&layout.root).unwrap();
+        let stale = BuildCoordinatorRecord {
+            schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
+            platform: BuildPlatform::Desktop,
+            key_hash: key.key_hash().into(),
+            attempt_id: "stale-attempt".into(),
+            owner_id: "stale-owner".into(),
+            pid: 1,
+            started_at_ms: 1,
+            finished_at_ms: None,
+            state: BuildCoordinatorState::Building,
+            error: None,
+        };
+        write_record(&layout, &stale).unwrap();
+
+        let outcome = coordinate_build(&layout, &key, || {
+            publish_fake_artifact(&layout);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(outcome.role, BuildCoordinatorRole::Leader);
+        assert_ne!(outcome.attempt_id, "stale-attempt");
+    }
+}

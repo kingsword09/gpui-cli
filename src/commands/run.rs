@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use crate::device::{self, DeviceFlags, Kind, Platform as DevicePlatform, inventory, ios};
 use crate::runner::android::AndroidRunner;
 use crate::runner::build_cache::{BuildCacheLookup, BuildOutputLock, lookup_verified};
+use crate::runner::build_coordinator::{BuildCoordinatorRole, coordinate_build};
 use crate::runner::build_inputs::{
     DesktopBuildPlan, android_build_plan, desktop_build_plan, ios_build_plan,
 };
@@ -258,41 +259,76 @@ fn publish_desktop_build_manifest(
     Ok(manifest)
 }
 
+/// Runs a reusable BuildKey through the cross-process coordinator. If the
+/// plan has unmodeled inputs, retain the previous exclusive-lock behavior and
+/// do not share the result with another invocation.
+fn coordinated_build(
+    layout: &BuildOutputLayout,
+    key: &crate::runner::build_key::BuildKey,
+    reusable: bool,
+    build: impl FnOnce() -> Result<()>,
+) -> Result<Option<BuildCoordinatorRole>> {
+    if reusable {
+        let outcome = coordinate_build(layout, key, build)?;
+        Ok(Some(outcome.role))
+    } else {
+        let _output_lock = BuildOutputLock::acquire(layout)?;
+        build()?;
+        Ok(None)
+    }
+}
+
 fn build_desktop_artifacts(
     project: &Project,
     plan: &DesktopBuildPlan,
     release: bool,
 ) -> Result<()> {
-    let _output_lock = BuildOutputLock::acquire(&plan.layout)?;
-    let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
-        BuildCacheLookup::Miss(reason.clone())
-    } else {
-        lookup_verified(&plan.layout, &plan.key)
-    };
-    match cache_lookup {
-        BuildCacheLookup::Hit(manifest) => {
+    let role = coordinated_build(
+        &plan.layout,
+        &plan.key,
+        plan.cache_hit_disabled_reason.is_none(),
+        || {
+            let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
+                BuildCacheLookup::Miss(reason.clone())
+            } else {
+                lookup_verified(&plan.layout, &plan.key)
+            };
+            match cache_lookup {
+                BuildCacheLookup::Hit(manifest) => {
+                    println!(
+                        "  {} BuildKey cache hit: {} verified artifact(s)",
+                        "✓".green(),
+                        manifest.files.len()
+                    );
+                    return Ok(());
+                }
+                BuildCacheLookup::Miss(reason) => {
+                    println!("  {} desktop cache miss: {reason}", "→".blue());
+                }
+            }
+            let artifacts = run_desktop_cargo_build(project, plan, release)?;
+            let manifest = publish_desktop_build_manifest(&plan.layout, &artifacts)?;
             println!(
-                "  {} BuildKey cache hit: {} verified artifact(s)",
+                "  {} artifact manifest: {}",
                 "✓".green(),
-                manifest.files.len()
+                plan.layout.artifact_manifest_path().display()
             );
-            return Ok(());
-        }
-        BuildCacheLookup::Miss(reason) => {
-            println!("  {} desktop cache miss: {reason}", "→".blue());
-        }
+            for artifact in &artifacts {
+                println!("  {} {}", "✓".green(), artifact.executable.display());
+            }
+            debug_assert_eq!(manifest.files.len(), artifacts.len());
+            Ok(())
+        },
+    )?;
+    if role == Some(BuildCoordinatorRole::Follower)
+        && let BuildCacheLookup::Hit(manifest) = lookup_verified(&plan.layout, &plan.key)
+    {
+        println!(
+            "  {} BuildKey cache hit: {} verified artifact(s)",
+            "✓".green(),
+            manifest.files.len()
+        );
     }
-    let artifacts = run_desktop_cargo_build(project, plan, release)?;
-    let manifest = publish_desktop_build_manifest(&plan.layout, &artifacts)?;
-    println!(
-        "  {} artifact manifest: {}",
-        "✓".green(),
-        plan.layout.artifact_manifest_path().display()
-    );
-    for artifact in &artifacts {
-        println!("  {} {}", "✓".green(), artifact.executable.display());
-    }
-    debug_assert_eq!(manifest.files.len(), artifacts.len());
     Ok(())
 }
 
@@ -471,7 +507,6 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         "aarch64-apple-ios-sim"
     };
     let plan = ios_build_plan(&project.root, release, rust_target)?;
-    let _output_lock = BuildOutputLock::acquire(&plan.layout)?;
     let layout = &plan.layout;
     let snapshot_root = &plan.snapshot.root;
     let scheme = project.xcode_target();
@@ -481,102 +516,133 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         .context("iOS output layout did not provide a DerivedData path")?;
     let app_path = xcode_app_path(derived_dir, &scheme, device, release);
 
-    let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
-        BuildCacheLookup::Miss(reason.clone())
-    } else {
-        lookup_ios_app_for_target(layout, &plan.key, &app_path, device)
-    };
-    match cache_lookup {
-        BuildCacheLookup::Hit(manifest) => {
-            println!(
-                "  {} iOS BuildKey cache hit: {} verified artifact(s)",
-                "✓".green(),
-                manifest.files.len()
-            );
-            return Ok(app_path);
+    let reusable = plan.cache_hit_disabled_reason.is_none() && !device;
+    let role = coordinated_build(layout, &plan.key, reusable, || {
+        let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
+            BuildCacheLookup::Miss(reason.clone())
+        } else {
+            lookup_ios_app_for_target(layout, &plan.key, &app_path, device)
+        };
+        match cache_lookup {
+            BuildCacheLookup::Hit(manifest) => {
+                println!(
+                    "  {} iOS BuildKey cache hit: {} verified artifact(s)",
+                    "✓".green(),
+                    manifest.files.len()
+                );
+                return Ok(());
+            }
+            BuildCacheLookup::Miss(reason) => {
+                println!("  {} iOS cache miss: {reason}", "→".blue());
+            }
         }
-        BuildCacheLookup::Miss(reason) => {
-            println!("  {} iOS cache miss: {reason}", "→".blue());
+
+        ensure_tool("xcodegen", "Install it with `brew install xcodegen`.")?;
+        ensure_rust_target(rust_target)?;
+
+        // 1. Rust staticlib (Xcode's build phase also does this, but doing it here
+        //    surfaces Rust errors with Rust-quality messages).
+        let mut cargo = Command::new("cargo");
+        cargo
+            .current_dir(snapshot_root)
+            .args([
+                "build",
+                "--lib",
+                "-p",
+                &project.app_crate(),
+                "--target",
+                rust_target,
+            ])
+            .env("CARGO_TARGET_DIR", &layout.cargo_target_dir);
+        if release {
+            cargo.arg("--release");
         }
-    }
+        run_step(&format!("cargo build --target {rust_target}"), &mut cargo)?;
 
-    ensure_tool("xcodegen", "Install it with `brew install xcodegen`.")?;
-    ensure_rust_target(rust_target)?;
+        // 2. XcodeGen: project.yml -> .xcodeproj
+        let ios_dir = snapshot_root.join("mobile/ios");
+        run_step(
+            "xcodegen generate",
+            Command::new("xcodegen").current_dir(&ios_dir).args([
+                "generate",
+                "--spec",
+                "project.yml",
+            ]),
+        )?;
 
-    // 1. Rust staticlib (Xcode's build phase also does this, but doing it here
-    //    surfaces Rust errors with Rust-quality messages).
-    let mut cargo = Command::new("cargo");
-    cargo
-        .current_dir(snapshot_root)
-        .args([
-            "build",
-            "--lib",
-            "-p",
-            &project.app_crate(),
-            "--target",
-            rust_target,
-        ])
-        .env("CARGO_TARGET_DIR", &layout.cargo_target_dir);
-    if release {
-        cargo.arg("--release");
-    }
-    run_step(&format!("cargo build --target {rust_target}"), &mut cargo)?;
+        // 3. xcodebuild
+        let xcode_project = ios_dir.join(format!("{scheme}.xcodeproj"));
+        let config = if release { "Release" } else { "Debug" };
 
-    // 2. XcodeGen: project.yml -> .xcodeproj
-    let ios_dir = snapshot_root.join("mobile/ios");
-    run_step(
-        "xcodegen generate",
-        Command::new("xcodegen")
+        // Resolve to a concrete UDID: matching a simulator by name is ambiguous
+        // once several runtimes are installed, and xcodebuild then refuses to pick.
+        let udid = match target {
+            IosTarget::Simulator(device) | IosTarget::Physical(device) => device.id.clone(),
+        };
+        let destination = xcode_destination(device, &udid);
+
+        let mut xcodebuild = Command::new("xcodebuild");
+        xcodebuild
             .current_dir(&ios_dir)
-            .args(["generate", "--spec", "project.yml"]),
-    )?;
+            .arg("-project")
+            .arg(&xcode_project)
+            .arg("-scheme")
+            .arg(&scheme)
+            .arg("-configuration")
+            .arg(config)
+            .arg("-destination")
+            .arg(&destination)
+            .arg("-derivedDataPath")
+            .arg(derived_dir)
+            .arg(format!(
+                "GPUI_CARGO_TARGET_DIR={}",
+                layout.cargo_target_dir.display()
+            ))
+            .env("CARGO_TARGET_DIR", &layout.cargo_target_dir)
+            .arg("-allowProvisioningUpdates")
+            .arg("build");
+        run_step(&format!("xcodebuild ({config})"), &mut xcodebuild)?;
 
-    // 3. xcodebuild
-    let xcode_project = ios_dir.join(format!("{scheme}.xcodeproj"));
-    let config = if release { "Release" } else { "Debug" };
-
-    // Resolve to a concrete UDID: matching a simulator by name is ambiguous
-    // once several runtimes are installed, and xcodebuild then refuses to pick.
-    let udid = match target {
-        IosTarget::Simulator(device) | IosTarget::Physical(device) => device.id.clone(),
-    };
-    let destination = xcode_destination(device, &udid);
-
-    let mut xcodebuild = Command::new("xcodebuild");
-    xcodebuild
-        .current_dir(&ios_dir)
-        .arg("-project")
-        .arg(&xcode_project)
-        .arg("-scheme")
-        .arg(&scheme)
-        .arg("-configuration")
-        .arg(config)
-        .arg("-destination")
-        .arg(&destination)
-        .arg("-derivedDataPath")
-        .arg(derived_dir)
-        .arg(format!(
-            "GPUI_CARGO_TARGET_DIR={}",
-            layout.cargo_target_dir.display()
-        ))
-        .env("CARGO_TARGET_DIR", &layout.cargo_target_dir)
-        .arg("-allowProvisioningUpdates")
-        .arg("build");
-    run_step(&format!("xcodebuild ({config})"), &mut xcodebuild)?;
-
-    if !app_path.is_dir() {
-        bail!(
-            "Xcode reported success but no app bundle directory was found at '{}'.",
-            app_path.display()
+        if !app_path.is_dir() {
+            bail!(
+                "Xcode reported success but no app bundle directory was found at '{}'.",
+                app_path.display()
+            );
+        }
+        publish_ios_build_manifest(layout, &app_path)?;
+        println!(
+            "  {} artifact manifest: {}",
+            "✓".green(),
+            layout.artifact_manifest_path().display()
+        );
+        println!("  {} {}", "✓".green(), app_path.display());
+        Ok(())
+    })?;
+    if role == Some(BuildCoordinatorRole::Follower)
+        && let BuildCacheLookup::Hit(manifest) =
+            lookup_ios_app_for_target(layout, &plan.key, &app_path, false)
+    {
+        println!(
+            "  {} iOS BuildKey cache hit: {} verified artifact(s)",
+            "✓".green(),
+            manifest.files.len()
         );
     }
-    publish_ios_build_manifest(layout, &app_path)?;
-    println!(
-        "  {} artifact manifest: {}",
-        "✓".green(),
-        layout.artifact_manifest_path().display()
-    );
-    println!("  {} {}", "✓".green(), app_path.display());
+    if device {
+        match lookup_verified(layout, &plan.key) {
+            BuildCacheLookup::Hit(_) => {}
+            BuildCacheLookup::Miss(reason) => {
+                bail!("iOS build completed without a verified artifact: {reason}");
+            }
+        }
+    } else {
+        match lookup_ios_app_for_target(layout, &plan.key, &app_path, false) {
+            BuildCacheLookup::Hit(_) => {}
+            BuildCacheLookup::Miss(reason) => {
+                bail!("iOS build completed without the expected app bundle: {reason}");
+            }
+        }
+    }
     Ok(app_path)
 }
 
@@ -888,10 +954,7 @@ fn publish_android_build_manifest(
 }
 
 enum AndroidBuildCacheLookup {
-    Hit {
-        manifest: BuildArtifactManifest,
-        apk: PathBuf,
-    },
+    Hit { manifest: BuildArtifactManifest },
     Miss(String),
 }
 
@@ -954,7 +1017,7 @@ fn lookup_verified_android_apk(
                         .into(),
                 );
             }
-            AndroidBuildCacheLookup::Hit { manifest, apk }
+            AndroidBuildCacheLookup::Hit { manifest }
         }
     }
 }
@@ -966,93 +1029,125 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     }
     let abis = android_abis()?;
     let plan = android_build_plan(&project.root, release, &abis)?;
-    let _output_lock = BuildOutputLock::acquire(&plan.layout)?;
     let layout = &plan.layout;
 
-    let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
-        AndroidBuildCacheLookup::Miss(reason.clone())
-    } else {
-        if let Some(identity) = &plan.debug_keystore_identity {
-            identity.verify_unchanged()?;
-        }
-        lookup_verified_android_apk(project, layout, &plan.key, release)
-    };
-    match cache_lookup {
-        AndroidBuildCacheLookup::Hit { manifest, apk } => {
+    let reusable = plan.cache_hit_disabled_reason.is_none();
+    if reusable && let Some(identity) = &plan.debug_keystore_identity {
+        identity.verify_unchanged()?;
+    }
+    let role = coordinated_build(layout, &plan.key, reusable, || {
+        let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
+            AndroidBuildCacheLookup::Miss(reason.clone())
+        } else {
             if let Some(identity) = &plan.debug_keystore_identity {
                 identity.verify_unchanged()?;
             }
-            println!(
-                "  {} Android BuildKey cache hit: {} verified artifact(s)",
-                "✓".green(),
-                manifest.files.len()
-            );
-            return Ok(apk);
+            lookup_verified_android_apk(project, layout, &plan.key, release)
+        };
+        match cache_lookup {
+            AndroidBuildCacheLookup::Hit { manifest, .. } => {
+                if let Some(identity) = &plan.debug_keystore_identity {
+                    identity.verify_unchanged()?;
+                }
+                println!(
+                    "  {} Android BuildKey cache hit: {} verified artifact(s)",
+                    "✓".green(),
+                    manifest.files.len()
+                );
+                return Ok(());
+            }
+            AndroidBuildCacheLookup::Miss(reason) => {
+                println!("  {} Android cache miss: {reason}", "→".blue());
+            }
         }
-        AndroidBuildCacheLookup::Miss(reason) => {
-            println!("  {} Android cache miss: {reason}", "→".blue());
+
+        ensure_tool(
+            "cargo-ndk",
+            "Install it with `cargo install cargo-ndk`, then set ANDROID_NDK_HOME.",
+        )?;
+        for abi in &abis {
+            ensure_rust_target(android_rust_target(abi)?)?;
         }
+        let snapshot_root = &plan.snapshot.root;
+        let jni_libs_dir = layout
+            .android_jni_dir
+            .as_deref()
+            .context("Android output layout did not provide a JNI staging path")?;
+        let gradle_build_dir = layout
+            .android_gradle_build_dir
+            .as_deref()
+            .context("Android output layout did not provide a Gradle build path")?;
+
+        // 1. Rust shared library via cargo-ndk.
+        let mut ndk = Command::new("cargo");
+        ndk.current_dir(snapshot_root)
+            .args(["ndk"])
+            .env("CARGO_TARGET_DIR", &layout.cargo_target_dir);
+        for abi in &abis {
+            ndk.args(["-t", abi]);
+        }
+        ndk.arg("-o").arg(jni_libs_dir).args([
+            "--platform",
+            "31",
+            "build",
+            "-p",
+            &project.app_crate(),
+        ]);
+        if release {
+            ndk.arg("--release");
+        }
+        run_step(&format!("cargo ndk ({})", abis.join(", ")), &mut ndk)?;
+
+        check_android_libraries_at(jni_libs_dir, &project.app_lib_name(), &abis)?;
+
+        // 2. Gradle: package the APK.
+        run_step(
+            &format!("gradlew {}", gradle_task(release)),
+            &mut gradle_command_at(
+                &snapshot_root.join("mobile/android/gradle"),
+                release,
+                &abis,
+                Some(jni_libs_dir),
+                Some(gradle_build_dir),
+            ),
+        )?;
+
+        let apk = apk_path_at(project, release, Some(gradle_build_dir))?;
+        if let Some(identity) = &plan.debug_keystore_identity {
+            identity.verify_unchanged()?;
+        }
+        publish_android_build_manifest(layout, &apk)?;
+        println!(
+            "  {} artifact manifest: {}",
+            "✓".green(),
+            layout.artifact_manifest_path().display()
+        );
+        println!("  {} {}", "✓".green(), apk.display());
+        Ok(())
+    })?;
+    if role == Some(BuildCoordinatorRole::Follower)
+        && let AndroidBuildCacheLookup::Hit { manifest } =
+            lookup_verified_android_apk(project, layout, &plan.key, release)
+    {
+        println!(
+            "  {} Android BuildKey cache hit: {} verified artifact(s)",
+            "✓".green(),
+            manifest.files.len()
+        );
     }
-
-    ensure_tool(
-        "cargo-ndk",
-        "Install it with `cargo install cargo-ndk`, then set ANDROID_NDK_HOME.",
-    )?;
-    for abi in &abis {
-        ensure_rust_target(android_rust_target(abi)?)?;
-    }
-    let snapshot_root = &plan.snapshot.root;
-    let jni_libs_dir = layout
-        .android_jni_dir
-        .as_deref()
-        .context("Android output layout did not provide a JNI staging path")?;
-    let gradle_build_dir = layout
-        .android_gradle_build_dir
-        .as_deref()
-        .context("Android output layout did not provide a Gradle build path")?;
-
-    // 1. Rust shared library via cargo-ndk.
-    let mut ndk = Command::new("cargo");
-    ndk.current_dir(snapshot_root)
-        .args(["ndk"])
-        .env("CARGO_TARGET_DIR", &layout.cargo_target_dir);
-    for abi in &abis {
-        ndk.args(["-t", abi]);
-    }
-    ndk.arg("-o")
-        .arg(jni_libs_dir)
-        .args(["--platform", "31", "build", "-p", &project.app_crate()]);
-    if release {
-        ndk.arg("--release");
-    }
-    run_step(&format!("cargo ndk ({})", abis.join(", ")), &mut ndk)?;
-
-    check_android_libraries_at(jni_libs_dir, &project.app_lib_name(), &abis)?;
-
-    // 2. Gradle: package the APK.
-    run_step(
-        &format!("gradlew {}", gradle_task(release)),
-        &mut gradle_command_at(
-            &snapshot_root.join("mobile/android/gradle"),
-            release,
-            &abis,
-            Some(jni_libs_dir),
-            Some(gradle_build_dir),
-        ),
-    )?;
-
-    let apk = apk_path_at(project, release, Some(gradle_build_dir))?;
-    if let Some(identity) = &plan.debug_keystore_identity {
+    if reusable && let Some(identity) = &plan.debug_keystore_identity {
         identity.verify_unchanged()?;
     }
-    publish_android_build_manifest(layout, &apk)?;
-    println!(
-        "  {} artifact manifest: {}",
-        "✓".green(),
-        layout.artifact_manifest_path().display()
-    );
-    println!("  {} {}", "✓".green(), apk.display());
-    Ok(apk)
+    match lookup_verified_android_apk(project, layout, &plan.key, release) {
+        AndroidBuildCacheLookup::Hit { .. } => apk_path_at(
+            project,
+            release,
+            plan.layout.android_gradle_build_dir.as_deref(),
+        ),
+        AndroidBuildCacheLookup::Miss(reason) => {
+            bail!("Android build completed without the expected APK outputs: {reason}");
+        }
+    }
 }
 
 pub fn run_android(project: &Project, flags: &DeviceFlags, release: bool) -> Result<()> {
