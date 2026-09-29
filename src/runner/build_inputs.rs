@@ -67,6 +67,29 @@ impl FrozenBuildRoot {
     }
 }
 
+/// Frozen inputs shared by a strict check invocation.
+///
+/// The snapshot lifetime is owned by this value so callers can hand its root
+/// to several preview workers without allowing any worker to fall back to the
+/// mutable source workspace.
+pub struct FrozenCheckInputs {
+    pub snapshot: FrozenBuildRoot,
+    pub cache_hit_disabled_reason: Option<String>,
+}
+
+/// Creates one immutable workspace snapshot for a strict check invocation and
+/// applies the known local build-script cache safety policy.
+pub fn frozen_check_inputs(root: &Path) -> Result<FrozenCheckInputs> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving check root for freeze: {}", root.display()))?;
+    let snapshot = FrozenBuildRoot::create(&root)?;
+    let cache_hit_disabled_reason = local_build_script_cache_disabled_reason(&snapshot.root)?;
+    Ok(FrozenCheckInputs {
+        snapshot,
+        cache_hit_disabled_reason,
+    })
+}
+
 pub struct DesktopBuildPlan {
     pub key: BuildKey,
     pub layout: BuildOutputLayout,
@@ -128,11 +151,11 @@ pub fn desktop_build_key(root: &Path, release: bool) -> Result<BuildKey> {
 pub fn desktop_build_plan(root: &Path, release: bool) -> Result<DesktopBuildPlan> {
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving desktop build root: {}", root.display()))?;
-    let snapshot = FrozenBuildRoot::create(&root)?;
+    let frozen = frozen_check_inputs(&root)?;
+    let snapshot = frozen.snapshot;
     let (host, toolchain_fingerprint) = rustc_identity()?;
     let target_triple = env::var("CARGO_BUILD_TARGET").unwrap_or(host);
     let native = NativeInputs::scan(&snapshot.root)?;
-    let cache_hit_disabled_reason = local_build_script_cache_disabled_reason(&snapshot.root)?;
     let key = build_key_from_inputs(
         &snapshot.manifest,
         snapshot.input_hash.clone(),
@@ -149,7 +172,7 @@ pub fn desktop_build_plan(root: &Path, release: bool) -> Result<DesktopBuildPlan
         key,
         layout,
         snapshot,
-        cache_hit_disabled_reason,
+        cache_hit_disabled_reason: frozen.cache_hit_disabled_reason,
     })
 }
 

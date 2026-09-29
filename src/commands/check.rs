@@ -20,7 +20,9 @@ use crate::devserver::actions::Action;
 use crate::devserver::control::{self, Command as ControlCommand, Registration};
 use crate::devserver::events::{Event, Kind, Page};
 use crate::runner::android::AndroidRunner;
-use crate::runner::build_inputs::{DesktopBuildPlan, desktop_build_plan};
+use crate::runner::build_inputs::{
+    DesktopBuildPlan, FrozenCheckInputs, desktop_build_plan, frozen_check_inputs,
+};
 use crate::runner::ios::IosSimulatorRunner;
 use crate::runner::lease::DeviceLeaseSession;
 use crate::runner::matrix::{
@@ -125,9 +127,16 @@ fn handle_matrix_check(
     matrix_file: PathBuf,
     json_output: bool,
 ) -> Result<()> {
-    let scenario_path = resolve_project_path(&project.root, scenario_file);
-    let matrix_path = resolve_project_path(&project.root, matrix_file);
-    let validation = scenario::validate_file(&scenario_path, &project.root)?;
+    prepare_cargo_lock(&project.root)?;
+    let scenario_source_path = resolve_project_path(&project.root, scenario_file);
+    let matrix_source_path = resolve_project_path(&project.root, matrix_file);
+    let frozen =
+        prepare_frozen_matrix_check(&project.root, &scenario_source_path, &matrix_source_path)?;
+    let runtime_root = frozen.inputs.snapshot.root.clone();
+    let snapshot_hash = frozen.inputs.snapshot.input_hash.clone();
+    let scenario_path = frozen.scenario_file;
+    let matrix_path = frozen.matrix_file;
+    let validation = scenario::validate_file(&scenario_path, &runtime_root)?;
     if !validation.valid {
         bail!("scenario validation failed; matrix was not launched");
     }
@@ -138,9 +147,8 @@ fn handle_matrix_check(
     let matrix_source = fs::read_to_string(&matrix_path)
         .with_context(|| format!("reading matrix file {}", matrix_path.display()))?;
     let matrix: MatrixFile = toml::from_str(&matrix_source).context("parsing matrix file")?;
-    let context = matrix_admission_context(project, &matrix)?;
-    let admission = load_and_admit(&matrix_path, &scenario_path, &project.root, &context)?;
-    prepare_cargo_lock(&project.root)?;
+    let context = matrix_admission_context(project, &matrix, &runtime_root)?;
+    let admission = load_and_admit(&matrix_path, &scenario_path, &runtime_root, &context)?;
 
     let target_platforms = matrix
         .targets
@@ -177,6 +185,8 @@ fn handle_matrix_check(
         })
         .collect::<BTreeMap<_, _>>();
     let project_root = project.root.clone();
+    let runtime_root_for_factory = runtime_root.clone();
+    let snapshot_hash_for_factory = snapshot_hash.clone();
     let scenario_path = scenario_path.clone();
     let factory = move |cell: &MatrixCellSpec| -> Result<MatrixCheckRunner> {
         let platform = target_platforms
@@ -191,9 +201,11 @@ fn handle_matrix_check(
         Ok(MatrixCheckRunner::Control(Box::new(
             ControlMatrixCheckRunner {
                 project_root: project_root.clone(),
+                runtime_root: runtime_root_for_factory.clone(),
                 scenario_file: scenario_path.clone(),
                 scenario,
                 fixture_hash,
+                snapshot_hash: snapshot_hash_for_factory.clone(),
                 target: platform.label().into(),
                 device: target_devices.get(&cell.target_id).cloned().flatten(),
                 platform,
@@ -218,6 +230,7 @@ fn handle_matrix_check(
 fn matrix_admission_context(
     project: &Project,
     matrix: &MatrixFile,
+    source_root: &Path,
 ) -> Result<MatrixAdmissionContext> {
     let host_os = std::env::consts::OS;
     let mut context = MatrixAdmissionContext::for_local(host_os, project.targets.clone());
@@ -261,8 +274,7 @@ fn matrix_admission_context(
         if !probed.insert(platform) {
             continue;
         }
-        let report =
-            probe_local_toolchain(platform, target.abi.as_deref(), &project.root, host_os)?;
+        let report = probe_local_toolchain(platform, target.abi.as_deref(), source_root, host_os)?;
         context.toolchains.insert(platform, report);
     }
     Ok(context)
@@ -451,9 +463,11 @@ enum MatrixCheckRunner {
 
 struct ControlMatrixCheckRunner {
     project_root: PathBuf,
+    runtime_root: PathBuf,
     scenario_file: PathBuf,
     scenario: ScenarioDefinition,
     fixture_hash: Option<String>,
+    snapshot_hash: String,
     target: String,
     device: Option<String>,
     platform: MatrixPlatform,
@@ -470,9 +484,11 @@ impl MatrixCellRunner for MatrixCheckRunner {
             Self::Control(control) => {
                 let ControlMatrixCheckRunner {
                     project_root,
+                    runtime_root,
                     scenario_file,
                     scenario,
                     fixture_hash,
+                    snapshot_hash,
                     target,
                     device,
                     platform,
@@ -510,7 +526,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     epoch_ms()
                 );
                 let mut runner = DesktopCheckRunner::launch_until(
-                    project_root,
+                    runtime_root,
                     project_root,
                     scenario_file,
                     &bounded_scenario,
@@ -521,7 +537,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                         preleased: mobile_capture.is_some(),
                         deadline,
                         session_key,
-                        snapshot_hash: None,
+                        snapshot_hash: Some(snapshot_hash.clone()),
                         build_key: None,
                     },
                 )?;
@@ -649,6 +665,68 @@ fn prepare_frozen_desktop_check(
         scenario_file: snapshot_file,
         scenario,
         fixture_hash,
+    })
+}
+
+struct FrozenMatrixCheck {
+    inputs: FrozenCheckInputs,
+    scenario_file: PathBuf,
+    matrix_file: PathBuf,
+}
+
+fn prepare_frozen_matrix_check(
+    project_root: &Path,
+    scenario_file: &Path,
+    matrix_file: &Path,
+) -> Result<FrozenMatrixCheck> {
+    let project_root = fs::canonicalize(project_root)
+        .with_context(|| format!("resolving project root {}", project_root.display()))?;
+    let scenario_file = fs::canonicalize(scenario_file)
+        .with_context(|| format!("resolving scenario file {}", scenario_file.display()))?;
+    let matrix_file = fs::canonicalize(matrix_file)
+        .with_context(|| format!("resolving matrix file {}", matrix_file.display()))?;
+    let relative_scenario = scenario_file
+        .strip_prefix(&project_root)
+        .with_context(|| {
+            format!(
+                "scenario file {} is outside project root {}",
+                scenario_file.display(),
+                project_root.display()
+            )
+        })?
+        .to_owned();
+    let relative_matrix = matrix_file
+        .strip_prefix(&project_root)
+        .with_context(|| {
+            format!(
+                "matrix file {} is outside project root {}",
+                matrix_file.display(),
+                project_root.display()
+            )
+        })?
+        .to_owned();
+    let inputs = frozen_check_inputs(&project_root)?;
+    if let Some(reason) = &inputs.cache_hit_disabled_reason {
+        bail!("strict frozen matrix check is unavailable: {reason}");
+    }
+    let snapshot_scenario = inputs.snapshot.root.join(&relative_scenario);
+    if !snapshot_scenario.is_file() {
+        bail!(
+            "frozen snapshot does not contain scenario file {}",
+            relative_scenario.display()
+        );
+    }
+    let snapshot_matrix = inputs.snapshot.root.join(&relative_matrix);
+    if !snapshot_matrix.is_file() {
+        bail!(
+            "frozen snapshot does not contain matrix file {}",
+            relative_matrix.display()
+        );
+    }
+    Ok(FrozenMatrixCheck {
+        inputs,
+        scenario_file: snapshot_scenario,
+        matrix_file: snapshot_matrix,
     })
 }
 
@@ -1956,5 +2034,56 @@ mod tests {
             }))
             .is_none()
         );
+    }
+
+    #[test]
+    fn matrix_inputs_share_one_frozen_workspace_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/src")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("gpui.scenarios.toml"), "scenario = true\n").unwrap();
+        fs::write(
+            root.path().join("matrix.toml"),
+            "source_mode = \"frozen\"\n",
+        )
+        .unwrap();
+        let status = Command::new("cargo")
+            .current_dir(root.path())
+            .args(["generate-lockfile"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let frozen = prepare_frozen_matrix_check(
+            root.path(),
+            &root.path().join("gpui.scenarios.toml"),
+            &root.path().join("matrix.toml"),
+        )
+        .unwrap();
+        let source_root = fs::canonicalize(root.path()).unwrap();
+
+        assert_ne!(frozen.inputs.snapshot.root, source_root);
+        assert!(
+            frozen
+                .scenario_file
+                .starts_with(&frozen.inputs.snapshot.root)
+        );
+        assert!(frozen.matrix_file.starts_with(&frozen.inputs.snapshot.root));
+        assert!(!frozen.inputs.snapshot.input_hash.is_empty());
+        assert!(frozen.inputs.cache_hit_disabled_reason.is_none());
     }
 }
