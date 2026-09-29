@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-09-29，主分支 `3e8b874`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-09-29，主分支 `cca46b3`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -417,7 +417,9 @@ SDK platforms/build-tools package revision、NDK revision、cargo-ndk 与 Java �
 iOS key 另纳入当前 Xcode build 与目标 SDK version/build 指纹；身份不可读时关闭 simulator
 cache hit，记录见
 [M04 iOS Xcode/SDK fingerprint](../experiments/M04-ios-xcode-sdk-fingerprint-2026-09-28.md)。
-live builder、snapshot build orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
+live preview builder 已接入 source-project target-specific output root，并在该 root 上取得跨进程
+`BuildOutputLock`；这只串行进入该锁路径的输出变更，不等于构建已完成或可复用。snapshot build
+orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
 尚未接入。非 live 命令也已接入各自的临时 `FrozenInputs` 工作根；desktop 的切片见
 [M04 desktop frozen build root](../experiments/M04-desktop-frozen-build-root-2026-09-27.md)，
 iOS 的切片见
@@ -440,7 +442,8 @@ M04 仍未完成：snapshot build orchestration、同 key 在途任务合并和
 用于 baseline/diff、移动 artifact 和 lease 路径。单场景 context 保留 snapshot hash/BuildKey，
 matrix per-cell context 现在也保留 shared snapshot hash、runtime environment 和 #161 的
 target-specific BuildKey；#163 又让 preview builder 使用 source-project 的 target/JNI/Gradle/
-DerivedData 输出布局，并在同一 supervisor 内串行同 key cell，但不把 key/layout evidence
+DerivedData 输出布局，并在同一 supervisor 内串行同 key cell；#165 再让 desktop/iOS/Android
+preview builder 在对应 output root 取得跨进程 `BuildOutputLock`，但不把 key/layout/lock evidence
 伪造成构建完成或复用。local `build.rs`
 等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
 allowlist 遗漏已由 #149 修复，但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
@@ -594,7 +597,8 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 并行执行与资源锁；`src/commands/check.rs` 已接入 matrix CLI 和 desktop/mobile control
 scenario driver。#157 已接入 M04 的共享冻结 snapshot 输入边界，#159 已将 per-cell context
 传入 MatrixReport，#161 已将 target-specific BuildKey 写入 context，#163 已绑定 source-project
-output layout 并串行同 key cell；跨命令共享构建和完整 cell steps/cleanup report 仍未接入。
+output layout 并串行同 key cell，#165 已让 preview builder 锁定对应 output root；跨命令共享构建
+所有权和完整 cell steps/cleanup report 仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
@@ -676,7 +680,8 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 
 ### T06 · 构建缓存与有界预热
 
-代码落点：`src/runner/build_cache.rs`、`src/commands/cache.rs` 已实现产物缓存/清理；
+代码落点：`src/runner/build_cache.rs`、`src/commands/cache.rs` 已实现产物缓存/清理，preview
+build 另已接入 output-root lock；
 build coordinator 和有界预热仍拟议。遵循 M04 BuildKey；现有切片与输入遗漏见 M04 和
 [当前审计](current-status.md)。
 
