@@ -113,6 +113,11 @@ fn run_inner(
         let status = loop {
             if build.session.stopping.load(Ordering::SeqCst) {
                 let _ = child.terminate();
+            } else if !build.is_current_revision() {
+                let _ = child.terminate();
+                break Err(std::io::Error::other(format!(
+                    "live build superseded while running {stage}"
+                )));
             }
             match child.try_wait() {
                 Ok(Some(status)) => break Ok(status),

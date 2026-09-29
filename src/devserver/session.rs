@@ -2168,6 +2168,15 @@ impl Build {
         self.span.span_id()
     }
 
+    /// Checks the revision most recently observed by the session input watcher.
+    /// This is intentionally cheap enough to poll while an owned build process
+    /// is running; callers that need a synchronous filesystem rescan should use
+    /// `is_current`.
+    pub fn is_current_revision(&self) -> bool {
+        !self.session.stopping.load(Ordering::SeqCst)
+            && self.session.store.state().desired == self.scope.revision
+    }
+
     pub fn is_current(&self) -> Result<bool> {
         Ok(!self.session.stopping.load(Ordering::SeqCst)
             && self.session.sync_inputs()? == self.scope.revision)

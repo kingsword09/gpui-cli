@@ -526,13 +526,15 @@ fn inspect_entry(path: &Path, stats: &mut TreeStats) -> Result<()> {
 }
 
 fn clear_candidate_contents(root: &Path) -> Result<u64> {
+    let _state_lock = super::build_coordinator::lock_coordinator_state(root, false)?;
     let lock_path = root.join(super::output_layout::BUILD_OUTPUT_LOCK_FILE);
+    let coordinator_lock_path = root.join(super::output_layout::BUILD_COORDINATOR_LOCK_FILE);
     let mut removed_bytes = 0u64;
     for entry in
         fs::read_dir(root).with_context(|| format!("cleaning cache key {}", root.display()))?
     {
         let path = entry?.path();
-        if path == lock_path {
+        if path == lock_path || path == coordinator_lock_path {
             continue;
         }
         removed_bytes = removed_bytes.saturating_add(remove_cache_entry(&path)?);
@@ -541,6 +543,10 @@ fn clear_candidate_contents(root: &Path) -> Result<u64> {
 }
 
 fn coordinator_is_active(root: &Path) -> Result<bool> {
+    // Subscriber registration and coordinator-side counts share this short
+    // lock. Acquiring it before probing prevents the cache cleaner from
+    // observing a just-created, not-yet-locked subscriber file as stale.
+    let _state_lock = super::build_coordinator::lock_coordinator_state(root, false)?;
     let directory = root.join(super::output_layout::BUILD_COORDINATOR_SUBSCRIBERS_DIR);
     let metadata = match fs::symlink_metadata(&directory) {
         Ok(metadata) => metadata,
@@ -1040,6 +1046,12 @@ mod tests {
         assert_eq!(report.evicted_bytes, report.initial_bytes);
         assert!(!payload.exists());
         assert!(layout.lock_file_path().is_file());
+        assert!(
+            layout
+                .root
+                .join(super::super::output_layout::BUILD_COORDINATOR_LOCK_FILE)
+                .is_file()
+        );
     }
 
     #[test]

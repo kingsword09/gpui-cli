@@ -1852,6 +1852,36 @@ fn compiler_diagnostics_arrive_before_exit_and_capture_both_pipes() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn superseded_build_terminates_its_owned_process_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("main.rs");
+    fs::write(&source, "fn main() {}\n").unwrap();
+    let session = Session::start(dir.path(), "test", "desktop:test").unwrap();
+    let build = session.begin_build().unwrap();
+    let worker = thread::spawn(move || {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        super::output::run(&mut command, &build, "fixture", false)
+    });
+
+    thread::sleep(Duration::from_millis(200));
+    fs::write(source, "fn main() { let changed = true; }\n").unwrap();
+    session.sync_inputs().unwrap();
+    let cancelled_at = Instant::now();
+    let error = match worker.join().unwrap() {
+        Err(error) => error,
+        Ok(_) => panic!("superseded build unexpectedly succeeded"),
+    };
+
+    assert!(format!("{error:#}").contains("superseded"));
+    assert!(
+        cancelled_at.elapsed() < Duration::from_secs(5),
+        "superseded build process was not terminated promptly"
+    );
+}
+
 // Also runs as a subprocess to reproduce a leader exiting with a helper
 // still holding both inherited output pipes. No shell/platform tools needed.
 #[test]
