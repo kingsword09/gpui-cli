@@ -406,6 +406,41 @@ fn verified_preview_desktop_executable(root: &Path, key_hash: &str) -> Result<Pa
         .context("preview artifact manifest does not identify one desktop executable")
 }
 
+fn preview_ios_output_layout(outputs: &PreviewBuildOutputs, key_hash: &str) -> BuildOutputLayout {
+    BuildOutputLayout {
+        platform: BuildPlatform::Ios,
+        key_hash: key_hash.to_owned(),
+        root: outputs.output_root.clone(),
+        cargo_target_dir: outputs.cargo_target_dir.clone(),
+        native_staging_dir: outputs.output_root.join("native-staging"),
+        android_jni_dir: None,
+        android_gradle_build_dir: None,
+        ios_derived_data_dir: outputs.ios_derived_data_dir.clone(),
+    }
+}
+
+fn verify_preview_ios_output(
+    layout: &BuildOutputLayout,
+    key_hash: &str,
+    app_path: &Path,
+) -> Result<()> {
+    let manifest = match lookup_verified_at_path(
+        &layout.preview_artifact_manifest_path(),
+        &layout.root,
+        BuildPlatform::Ios,
+        key_hash,
+    ) {
+        BuildCacheLookup::Hit(manifest) => manifest,
+        BuildCacheLookup::Miss(reason) => {
+            bail!("preview iOS artifact manifest is not verified: {reason}")
+        }
+    };
+    if !app_path.is_dir() || !preview_manifest_contains_root(&manifest, &layout.root, app_path) {
+        bail!("preview iOS artifact manifest does not identify the expected app bundle");
+    }
+    Ok(())
+}
+
 fn verify_preview_desktop_output(layout: &BuildOutputLayout, key_hash: &str) -> Result<()> {
     verified_preview_desktop_executable(&layout.root, key_hash).map(|_| ())
 }
@@ -691,7 +726,7 @@ fn run_iteration(
             label,
         } => {
             let bundle_id = bundle_id_of(project);
-            let Some(app) = build_ios_app_live(
+            let app = match build_ios_app_live(
                 project,
                 *physical,
                 id,
@@ -700,9 +735,15 @@ fn run_iteration(
                     .preview
                     .as_ref()
                     .and_then(|preview| preview.build_outputs.as_ref()),
-            )?
-            else {
-                return Ok(Iteration::BuildFailed);
+            ) {
+                Ok(Some(app)) => app,
+                Ok(None) => return Ok(Iteration::BuildFailed),
+                Err(error) => {
+                    if let Some(control) = preview_control_error(&error) {
+                        return Ok(control);
+                    }
+                    return Err(error);
+                }
             };
             if !build.is_current()? {
                 return Ok(Iteration::Superseded);
@@ -1131,20 +1172,65 @@ fn build_ios_app_live(
     outputs: Option<&PreviewBuildOutputs>,
 ) -> Result<Option<std::path::PathBuf>> {
     let outputs = outputs.cloned();
-    let _output_lock = outputs
-        .as_ref()
-        .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
-        .transpose()?;
+    if !physical
+        && let Some(outputs) = &outputs
+        && let Some(key_hash) = outputs.build_key_hash.as_deref()
+        && outputs.cache_hit_disabled_reason.is_none()
+    {
+        let derived_dir = outputs
+            .ios_derived_data_dir
+            .as_deref()
+            .context("iOS preview coordinator requires a DerivedData output directory")?;
+        let app_path = xcode_app_path(derived_dir, &project.xcode_target(), false, false);
+        let layout = preview_ios_output_layout(outputs, key_hash);
+        coordinate_preview_build_with_verifier(
+            &layout,
+            key_hash,
+            || {
+                if build_ios_app_live_once(project, false, udid, build, Some(outputs), false)?
+                    .is_none()
+                {
+                    bail!(PREVIEW_BUILD_FAILED);
+                }
+                if !build.is_current()? {
+                    bail!(PREVIEW_BUILD_SUPERSEDED);
+                }
+                Ok(())
+            },
+            |layout, key_hash| verify_preview_ios_output(layout, key_hash, &app_path),
+        )?;
+        verify_preview_ios_output(&layout, key_hash, &app_path)?;
+        return Ok(Some(app_path));
+    }
+
+    build_ios_app_live_once(project, physical, udid, build, outputs.as_ref(), true)
+}
+
+fn build_ios_app_live_once(
+    project: &Project,
+    physical: bool,
+    udid: &str,
+    build: &Build,
+    outputs: Option<&PreviewBuildOutputs>,
+    acquire_output_lock: bool,
+) -> Result<Option<std::path::PathBuf>> {
+    let _output_lock = if acquire_output_lock {
+        outputs
+            .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
+            .transpose()?
+    } else {
+        None
+    };
     let ios_dir = project.ios_dir();
     let scheme = project.xcode_target();
     let derived_dir = outputs
-        .as_ref()
         .and_then(|outputs| outputs.ios_derived_data_dir.clone())
         .unwrap_or_else(|| ios_dir.join("build"));
     let app_path = xcode_app_path(&derived_dir, &scheme, physical, false);
     if !physical
-        && let Some(outputs) = &outputs
+        && let Some(outputs) = outputs
         && let Some(key_hash) = outputs.build_key_hash.as_deref()
+        && outputs.cache_hit_disabled_reason.is_none()
     {
         match lookup_verified_at_path(
             &outputs
@@ -1200,7 +1286,7 @@ fn build_ios_app_live(
         "--features",
         "gpui-dev",
     ]);
-    if let Some(outputs) = &outputs {
+    if let Some(outputs) = outputs {
         cargo.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
     }
     let outcome = error::run_cargo_json(&mut cargo, build, "cargo.build")?;
@@ -1244,7 +1330,10 @@ fn build_ios_app_live(
             app_path.display()
         );
     }
-    if let Some(outputs) = &outputs
+    if !build.is_current()? {
+        bail!(PREVIEW_BUILD_SUPERSEDED);
+    }
+    if let Some(outputs) = outputs
         && let Some(key_hash) = outputs.build_key_hash.as_deref()
     {
         publish_preview_ios_manifest(&outputs.output_root, key_hash, &app_path)?;
@@ -2511,6 +2600,34 @@ mod tests {
             root.path(),
             &root.path().join("other.app")
         ));
+    }
+
+    #[test]
+    fn ios_preview_coordinator_verifies_the_complete_expected_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let key_hash = "e".repeat(64);
+        let app = root.path().join("derived-data/Demo.app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("Info.plist"), b"bundle metadata").unwrap();
+        publish_preview_ios_manifest(root.path(), &key_hash, &app).unwrap();
+
+        let layout = BuildOutputLayout {
+            platform: BuildPlatform::Ios,
+            key_hash: key_hash.clone(),
+            root: root.path().to_path_buf(),
+            cargo_target_dir: root.path().join("cargo-target"),
+            native_staging_dir: root.path().join("native-staging"),
+            android_jni_dir: None,
+            android_gradle_build_dir: None,
+            ios_derived_data_dir: Some(root.path().join("derived-data")),
+        };
+        verify_preview_ios_output(&layout, &key_hash, &app).unwrap();
+        assert!(
+            verify_preview_ios_output(&layout, &key_hash, &root.path().join("other.app")).is_err()
+        );
+
+        fs::write(app.join("Info.plist"), b"tampered metadata").unwrap();
+        assert!(verify_preview_ios_output(&layout, &key_hash, &app).is_err());
     }
 
     #[test]
