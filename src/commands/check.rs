@@ -572,6 +572,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     status,
                     error,
                     artifact_ids,
+                    context: report.context,
                 })
             }
         }

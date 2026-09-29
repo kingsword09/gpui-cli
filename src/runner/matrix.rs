@@ -5,6 +5,7 @@
 //! never become a passing matrix by omission. Runner creation and platform
 //! side effects remain in the execution adapters.
 
+use crate::scenario::executor::CheckContext;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -176,6 +177,8 @@ pub struct MatrixCellResult {
     pub error: Option<MatrixCellError>,
     #[serde(default)]
     pub artifact_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<CheckContext>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -315,6 +318,20 @@ impl MatrixScheduler {
         error: Option<MatrixCellError>,
         artifact_ids: Vec<String>,
     ) -> Result<()> {
+        self.complete_with_context(cell_id, status, now, error, artifact_ids, None)
+    }
+
+    /// Completes one cell while preserving runtime context supplied by the
+    /// execution adapter for the final matrix report.
+    pub fn complete_with_context(
+        &mut self,
+        cell_id: &str,
+        status: MatrixCellState,
+        now: Instant,
+        error: Option<MatrixCellError>,
+        artifact_ids: Vec<String>,
+        context: Option<CheckContext>,
+    ) -> Result<()> {
         if !matches!(
             status,
             MatrixCellState::Passed
@@ -355,6 +372,7 @@ impl MatrixScheduler {
                 .unwrap_or(u64::MAX),
             error,
             artifact_ids,
+            context,
         };
         self.states.insert(cell_id.to_string(), status);
         self.results.insert(cell_id.to_string(), result);
@@ -390,6 +408,7 @@ impl MatrixScheduler {
                 duration_ms: 0,
                 error: Some(error),
                 artifact_ids: Vec::new(),
+                context: None,
             },
         );
         Ok(())
@@ -511,6 +530,7 @@ impl MatrixScheduler {
                     message: reason.replace('_', " "),
                 }),
                 artifact_ids: Vec::new(),
+                context: None,
             },
         );
     }
@@ -619,6 +639,7 @@ mod tests {
             duration_ms: 0,
             error: Some(error("simulator_missing")),
             artifact_ids: Vec::new(),
+            context: None,
         }];
         assert_eq!(summarize_cells(&cells).unwrap(), MatrixStatus::Unavailable);
         cells[0].status = MatrixCellState::Inconclusive;
