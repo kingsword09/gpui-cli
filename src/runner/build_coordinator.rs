@@ -217,7 +217,7 @@ where
                     }
                 }
                 BuildCoordinatorState::Failed => {
-                    if has_live_subscriber(layout, &record.attempt_id)? {
+                    if active_subscriber_count(layout, &record.attempt_id)? > 0 {
                         bail!(
                             "coordinated BuildKey build failed: {}",
                             record
@@ -433,8 +433,10 @@ fn subscribe(layout: &BuildOutputLayout, attempt_id: &str) -> Result<BuildCoordi
             directory.display()
         )
     })?;
+    let attempt_segment = encode_attempt_id(attempt_id);
     let path = directory.join(format!(
-        "{}-{}.json",
+        "{}-{}-{}.json",
+        attempt_segment,
         process::id(),
         unique_id("subscriber")
     ));
@@ -467,11 +469,19 @@ fn subscribe(layout: &BuildOutputLayout, attempt_id: &str) -> Result<BuildCoordi
     Ok(BuildCoordinatorSubscription { path, _file: file })
 }
 
-fn has_live_subscriber(layout: &BuildOutputLayout, attempt_id: &str) -> Result<bool> {
+fn encode_attempt_id(attempt_id: &str) -> String {
+    attempt_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn active_subscriber_count(layout: &BuildOutputLayout, attempt_id: &str) -> Result<usize> {
     let directory = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => {
             return Err(error).with_context(|| {
                 format!(
@@ -481,6 +491,8 @@ fn has_live_subscriber(layout: &BuildOutputLayout, attempt_id: &str) -> Result<b
             });
         }
     };
+    let prefix = format!("{}-", encode_attempt_id(attempt_id));
+    let mut count = 0;
 
     for entry in entries {
         let path = entry?.path();
@@ -495,39 +507,31 @@ fn has_live_subscriber(layout: &BuildOutputLayout, attempt_id: &str) -> Result<b
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             continue;
         }
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("reading subscriber {}", path.display()));
-            }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
         };
-        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
-            Ok(value) => value,
-            Err(_) => {
-                let _ = fs::remove_file(&path);
-                continue;
-            }
-        };
-        if value["attempt_id"].as_str() != Some(attempt_id) {
+        if !name.starts_with(&prefix) {
             continue;
         }
 
-        let probe = OpenOptions::new().read(true).write(true).open(&path);
-        let Ok(probe) = probe else {
-            continue;
+        let probe = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(probe) => probe,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                count += 1;
+                continue;
+            }
         };
         match probe.try_lock_exclusive() {
             Ok(()) => {
                 let _ = probe.unlock();
                 let _ = fs::remove_file(&path);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(true),
-            Err(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => count += 1,
+            Err(_) => count += 1,
         }
     }
-    Ok(false)
+    Ok(count)
 }
 
 fn coordinator_state_path(layout: &BuildOutputLayout, kind: &str) -> PathBuf {
@@ -777,9 +781,15 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let subscribers = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
         assert_eq!(fs::read_dir(&subscribers).unwrap().count(), 1);
+        let attempt_id = read_record(&layout, BUILD_COORDINATOR_BUILD_KIND)
+            .unwrap()
+            .unwrap()
+            .attempt_id;
+        assert_eq!(active_subscriber_count(&layout, &attempt_id).unwrap(), 1);
         release_tx.send(()).unwrap();
         assert_eq!(leader.join().unwrap().role, BuildCoordinatorRole::Leader);
         assert!(fs::read_dir(subscribers).unwrap().next().is_none());
+        assert_eq!(active_subscriber_count(&layout, &attempt_id).unwrap(), 0);
     }
 
     #[test]
@@ -810,6 +820,10 @@ mod tests {
         leader_started_rx
             .recv_timeout(Duration::from_secs(5))
             .unwrap();
+        let attempt_id = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+            .unwrap()
+            .unwrap()
+            .attempt_id;
         let second_layout = layout.clone();
         let second_key_hash = key.key_hash().to_owned();
         let second_cancelled = cancelled.clone();
@@ -851,11 +865,12 @@ mod tests {
                 .unwrap()
                 .contains(BUILD_COORDINATOR_CANCELLED_ERROR)
         );
-        assert_eq!(fs::read_dir(&subscribers_dir).unwrap().count(), 1);
+        assert_eq!(active_subscriber_count(&layout, &attempt_id).unwrap(), 1);
 
         allow_leader_tx.send(()).unwrap();
         assert_eq!(first.join().unwrap().role, BuildCoordinatorRole::Leader);
         assert!(fs::read_dir(subscribers_dir).unwrap().next().is_none());
+        assert_eq!(active_subscriber_count(&layout, &attempt_id).unwrap(), 0);
     }
 
     #[test]
