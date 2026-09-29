@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-09-29（Asia/Shanghai）。核查代码：`cca46b3`（PR #165 squash merge）。
+更新日期：2026-09-29（Asia/Shanghai）。核查代码：`5e5031a`（PR #167 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -14,8 +14,9 @@
 前创建的 workspace snapshot 由所有 cell 复用，per-cell runtime context 也已进入 MatrixReport。
 iOS simulator/Android runner、移动 matrix control driver 也已落地；preview desktop/iOS/Android
 构建现在会在 source-project 的 target-specific output root 上取得跨进程锁，串行保护同一输出根的
-输出变更。现阶段仍未完成
-跨命令共享构建/在途任务合并、完整 steps/cleanup 详情传播、移动语义/输入验收、MCP、
+输出变更；matrix control scenario cell 现在保留完整 `CheckReport`，包括 steps、证据和 cleanup。
+现阶段仍未完成
+跨命令共享构建/在途任务合并、移动 capture-only 路径的完整 scenario 语义/输入验收、MCP、
 复现包或性能验证闭环。
 
 35 项工作包更新为 **1 done、21 in_progress、13 planned、0 in_review**。
@@ -27,7 +28,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、cleanup/fixture identity hardening | 语义激活、真实环境适配、跨命令共享构建/在途任务合并、matrix steps/cleanup 详情、真实连续场景验收及 MCP |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup/fixture identity hardening | 语义激活、真实环境适配、跨命令共享构建/在途任务合并、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture | 完整三端同快照矩阵、可靠日志归属、设备重连、repro 和 L2/L3 CI |
 | G4 | 普通构建的缓存复用和显式清理 | 缓存输入遗漏、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
@@ -51,6 +52,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `ae9ae94`（#161） | matrix 按 ready target 从共享 frozen root 计算 desktop、iOS simulator、Android ABI-specific BuildKey，并写入每个 cell 的 `CheckContext.build_key` | 只提供 key evidence；target-specific Cargo/Gradle/Xcode 输出编排、共享构建/在途任务合并、完整 steps/cleanup 和真实三端矩阵仍未验收 |
 | `4f35c95`（#163） | matrix preview 将 target BuildKey 绑定到 source-project 的 Cargo target、iOS DerivedData、Android JNI/Gradle 输出布局；同一 target BuildKey 的 cell 通过 matrix resource 串行 | 不覆盖跨命令共享构建/在途任务合并、cache hit/coalescing、完整 steps/cleanup 或真实三端矩阵验收 |
 | `cca46b3`（#165） | preview desktop/iOS/Android builder 在 source-project 的 target-specific output root 取得 `BuildOutputLock`；root 路径随受控环境传入 preview，并增加跨进程释放回归测试 | 只保护进入该 preview lock 路径的输出变更；不提供 cache hit、manifest 复用、跨命令构建所有权或在途任务 coalescing |
+| `5e5031a`（#167） | matrix control scenario cell 将完整 `CheckReport` 保留到 `MatrixCellResult`，JSON 包含 steps、action/assertion/capture evidence、primary error、cleanup 和 context，并增加反序列化 round-trip 回归测试 | 不为 admission-unavailable 或 capture-only mobile lifecycle cell 伪造 scenario report；不覆盖真实三端连续验收或跨命令构建所有权 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -80,13 +82,13 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | S03 | in_progress | click/type/key/scroll、正常事件路径、owner/scope 和 unknown 语义；真实输入/遮挡/污染及持久幂等验收未齐 |
 | M03 | in_progress | 主机 OS 锁、owner/fencing、heartbeat，run/live/capture 和移动 matrix 已接入；重连和真实竞争矩阵未齐 |
 | M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；单场景及 matrix 已消费共享冻结 snapshot/target BuildKey、绑定输出布局并锁定 preview 输出根，跨命令共享构建/隐藏输入建模仍未齐 |
-| S04 | in_progress | executor、desktop check、单场景及 matrix frozen inputs、baseline/diff/approve、移动 matrix 场景 driver、per-cell context/BuildKey/output layout/preview output lock、owned process-tree/fixture identity cleanup；steps/cleanup、环境及三夹具各 20 次真实验收未齐 |
+| S04 | in_progress | executor、desktop check、单场景及 matrix frozen inputs、baseline/diff/approve、移动 matrix 场景 driver、per-cell context/BuildKey/output layout/preview output lock/完整 CheckReport、owned process-tree/fixture identity cleanup；移动 capture-only 语义/输入、环境及三夹具各 20 次真实验收未齐 |
 | A01 | planned | CLI/control 可复用；无 MCP 只读适配、JSON-RPC server 或独立 Agent service |
 | A02 | planned | action/operation/check 可复用；无 MCP 动作/取消/owner 适配 |
 | A03 | planned | pin/manifest/registry 可复用；无 context 命令、版本知识索引或工作流包 |
 | S05 | planned | 无类型化热参数、overlay revision、撤销/固化及收益实验 |
 | M01 | in_progress | iOS/Android adapter、capture/log snapshot、进程身份与 fault evidence；缺完整日志归属、设备故障和 UI 变体验收 |
-| M02 | in_progress | 配置展开、admission、并行/资源锁、matrix CLI、移动 control/native capture、共享 frozen snapshot/target output lock；缺跨命令构建所有权、完整 cell 报告保留和三端矩阵 |
+| M02 | in_progress | 配置展开、admission、并行/资源锁、matrix CLI、移动 control/native capture、共享 frozen snapshot/target output lock、control scenario cell 完整报告；缺跨命令构建所有权、移动完整 scenario 证据和三端矩阵 |
 | M05 | planned | 无 repro export/inspect/run、脱敏和干净环境重放 |
 | Q01 | planned | 已有三 OS CLI/macOS 模板/Android 宿主 CI；尚无该工作包的完整真实 GUI/设备 L2/L3 门禁 |
 | G01 | planned | supervisor 计时已有；无应用 layout/paint/frame/CPU/GPU 指标与开销验收 |
@@ -124,14 +126,15 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 - [桌面模板](../../templates/desktop/src/main.rs) 仍固定 Light 主题及窗口注册尺寸；
   `ready_environment` 中 theme/locale/clock/seed 来自配置。报告保留这些值改善了追踪性，
   不能代替真实 viewport/DPI、环境控制、字体/backend 和语义 provider 的验证。
-- matrix CLI 现在把内部 `CheckReport.context` 传到每个 `MatrixCellResult`，因此 matrix JSON
-  可见 reset generation、environment、uncontrolled inputs 和 shared snapshot hash；但仍只保留
-  status、primary error 和 capture step 的 artifact IDs，没有传递完整 steps 与 cleanup 详情。
-  因此 #147 仍不能扩大为完整 matrix execution evidence 或实际环境已受控。
+- matrix CLI 现在把内部 `CheckReport` 传到 control scenario 的每个 `MatrixCellResult`，因此
+  matrix JSON 可见 reset generation、environment、uncontrolled inputs、shared snapshot hash、
+  完整 steps/证据和 cleanup；admission-unavailable cell 与 capture-only mobile lifecycle cell
+  保持没有 scenario report，不用空报告冒充执行证据。该切片关闭了摘要投影缺口，但仍不能扩大
+  为真实三端 matrix execution evidence 或实际环境已受控。
 
 ## 5. 验证记录与证据范围
 
-本轮验证针对上述 `cca46b3` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
+本轮验证针对上述 `5e5031a` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
 `artifacts/progress-audit-2026-09-29/`（忽略的本机产物目录，不是已发布验收证据）。
 测试独立设置 `GPUI_DEVICE_LEASE_DIR`，避免与其他 worktree 的租约测试互相影响。
 
@@ -139,7 +142,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- |
 | `cargo fmt --check` | 通过 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | 通过 |
-| `cargo test --workspace --locked` | 332 个单元测试及全部集成/协议测试通过，0 failed |
+| `cargo test --workspace --locked` | 333 个单元测试及全部集成/协议测试通过，0 failed |
 | `cargo build --locked` | 通过 |
 | `cargo x check-design-docs`、`git diff --check` | 通过；仅验证文档/示例一致性 |
 | 两份 35 项状态表逐项比对 | 相同；1 done、21 in_progress、13 planned |
@@ -150,6 +153,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | PR #161 CI | required checks 全部通过；三 OS check、两组 desktop-template、两组 android-template、baseline-driver 均通过；无 release/tag | [PR #161](https://github.com/kingsword09/gpui-cli/pull/161) |
 | PR #163 CI | required checks 全部通过；Windows pointer-dispatch 既有测试首次超时后重跑通过，三 OS check、两组 desktop-template、两组 android-template、baseline-driver 均通过；无 release/tag | [PR #163](https://github.com/kingsword09/gpui-cli/pull/163) |
 | PR #165 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；无 release/tag | [PR #165](https://github.com/kingsword09/gpui-cli/pull/165) |
+| PR #167 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；无 release/tag | [PR #167](https://github.com/kingsword09/gpui-cli/pull/167) |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
@@ -160,8 +164,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | check 清理 | 旧探针记录了 supervisor-only cleanup 的问题；#151 已改用 process group/Job Object，并用后代持有管道回归测试验证终止传播；尚未重跑完整 GUI check cleanup probe | `check-probes.json`、[S04 process-tree cleanup](../experiments/S04-process-tree-cleanup-2026-09-29.md) |
 | fixture 身份 | 修复前探针记录初值 0→42、generation 1→2，报告 hash 仍为初始值；#153 已接入 runtime hash 刷新和报告传播，尚未重跑完整 GUI probe | `runtime-probes.json`、[S04 fixture identity](../experiments/S04-fixture-hash-2026-09-29.md) |
 | 单场景 frozen check | #155 已让 desktop 单场景从重核验后的 workspace snapshot 读取 scenario/fixture，并在 context 中保留 snapshot hash/BuildKey；matrix 未纳入本切片 | [S04 frozen single check](../experiments/S04-frozen-single-check-2026-09-29.md) |
-| matrix frozen inputs | #157 创建 shared snapshot，#159 写入 per-cell context，#161 写入 target-specific BuildKey，#163 绑定 source-project output layout 并串行同 key cell，#165 在 preview builder 取得该 output root 的跨进程锁；仍未声称跨命令共享构建或完整 steps/cleanup evidence | [S04 frozen matrix snapshot](../experiments/S04-frozen-matrix-snapshot-2026-09-29.md)、[S04 matrix context](../experiments/S04-matrix-context-2026-09-29.md)、[S04 matrix target BuildKey](../experiments/S04-matrix-target-build-key-2026-09-29.md)、[S04 matrix build output layout](../experiments/S04-matrix-build-output-layout-2026-09-29.md)、[S04 preview build output lock](../experiments/S04-preview-build-output-lock-2026-09-29.md) |
+| matrix frozen inputs | #157 创建 shared snapshot，#159 写入 per-cell context，#161 写入 target-specific BuildKey，#163 绑定 source-project output layout 并串行同 key cell，#165 在 preview builder 取得该 output root 的跨进程锁，#167 保留 control scenario cell 的完整 CheckReport；仍未声称跨命令共享构建或真实三端 evidence | [S04 frozen matrix snapshot](../experiments/S04-frozen-matrix-snapshot-2026-09-29.md)、[S04 matrix context](../experiments/S04-matrix-context-2026-09-29.md)、[S04 matrix target BuildKey](../experiments/S04-matrix-target-build-key-2026-09-29.md)、[S04 matrix build output layout](../experiments/S04-matrix-build-output-layout-2026-09-29.md)、[S04 preview build output lock](../experiments/S04-preview-build-output-lock-2026-09-29.md)、[S04 matrix cell reports](../experiments/S04-matrix-cell-reports-2026-09-29.md) |
 | preview output lock | preview desktop/iOS/Android build 在 source-project target-specific root 上通过持久 lock file 做跨进程排他；锁 guard 覆盖 preview build 过程并在进程退出/崩溃时由 OS 释放；只验证 lock 阻塞和 guard drop 释放，不声称命中或合并构建 | [S04 preview build output lock](../experiments/S04-preview-build-output-lock-2026-09-29.md) |
+| matrix cell report | control scenario cell 的 `MatrixCellResult.check_report` 保留完整 steps、证据、primary error、cleanup 和 context，并通过 JSON round-trip 验证；unavailable/capture-only cell 不生成伪报告 | [S04 matrix cell reports](../experiments/S04-matrix-cell-reports-2026-09-29.md) |
 | v1 兼容 | app proto 1 为 `unsupported_version`；control schema 1 为 `invalid_schema`；schema 2 可用 | `cli-probes.json` |
 | 历史升级 | 复制上次用 `3df7a6c` CLI 生成的未修改项目，执行 `upgrade plan --to agent-native-v1-draft --json`，仍退出 1、`baseline_unavailable` | `upgrade-probe.json`、`old-t02-upgrade.json` |
 | doctor 版本 | shim 输出不可解析版本但退出 0，doctor 仍 overall=pass | `runtime-probes.json` |
@@ -177,7 +182,7 @@ PNG 仅有临时路径和记录 hash，未形成持久 CI 产物。本轮没有�
 
 ## 6. 后续接续顺序
 
-1. 在 #157/#159/#161/#163/#165 的共享 snapshot/context/BuildKey/output layout/preview lock 上补齐跨命令构建所有权与在途任务合并、完整 steps/cleanup 详情以及真实环境身份/viewport/DPI 证据。
+1. 在 #157/#159/#161/#163/#165/#167 的共享 snapshot/context/BuildKey/output layout/preview lock/完整 cell report 上补齐跨命令构建所有权与在途任务合并、移动完整 scenario 证据以及真实环境身份/viewport/DPI 证据。
 2. 补齐 v1 在线兼容、不可变历史模板基线和 doctor 版本解析；保留现有拒绝/降级边界。
 3. 完成 macOS 三夹具各连续 20 次及故障变体，再收口移动语义/输入和完整三端矩阵。
 4. 按依赖继续 MCP、repro、L2/L3 CI；性能、索引/预热、Agent 基准按各自验收推进。
