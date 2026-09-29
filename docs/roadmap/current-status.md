@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-09-29（Asia/Shanghai）。核查代码：`f6801e9`（PR #171 squash merge）。
+更新日期：2026-09-29（Asia/Shanghai）。核查代码：`0c2771e`（PR #173 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -14,9 +14,9 @@
 前创建的 workspace snapshot 由所有 cell 复用，per-cell runtime context 也已进入 MatrixReport。
 iOS simulator/Android runner、移动 matrix control driver 也已落地；preview desktop/iOS/Android
 构建现在会在 source-project 的 target-specific output root 上取得跨进程锁，串行保护同一输出根的
-输出变更；desktop preview 与 iOS simulator live preview 已能基于独立 verified artifact manifest
-命中并跳过相应构建步骤；matrix control scenario cell 现在保留完整 `CheckReport`，包括 steps、
-证据和 cleanup。
+输出变更；desktop preview、iOS simulator live preview 与 Android default-debug live preview 已能
+基于独立 verified artifact manifest 命中并跳过相应构建步骤；matrix control scenario cell 现在
+保留完整 `CheckReport`，包括 steps、证据和 cleanup。
 现阶段仍未完成
 跨命令共享构建/在途任务合并、移动 capture-only 路径的完整 scenario 语义/输入验收、MCP、
 复现包或性能验证闭环。
@@ -32,7 +32,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
 | G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup/fixture identity hardening | 语义激活、真实环境适配、跨命令共享构建/在途任务合并、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture | 完整三端同快照矩阵、可靠日志归属、设备重连、repro 和 L2/L3 CI |
-| G4 | 普通构建缓存复用、desktop 与 iOS simulator live preview verified cache hit 和显式清理 | 缓存输入遗漏、iOS physical/Android preview cache hit、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
+| G4 | 普通构建缓存复用、desktop/iOS simulator/Android default-debug live preview verified cache hit 和显式清理 | 缓存输入遗漏、iOS physical/Android custom or signing-sensitive preview cache hit、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
 ## 2. 相对上次审计的新合并
 
@@ -57,6 +57,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `5e5031a`（#167） | matrix control scenario cell 将完整 `CheckReport` 保留到 `MatrixCellResult`，JSON 包含 steps、action/assertion/capture evidence、primary error、cleanup 和 context，并增加反序列化 round-trip 回归测试 | 不为 admission-unavailable 或 capture-only mobile lifecycle cell 伪造 scenario report；不覆盖真实三端连续验收或跨命令构建所有权 |
 | `7283614`（#169） | desktop preview 将 BuildKey hash 通过受控环境传入，在 output root 的独立 preview manifest 经过 platform/key/file/content hash 验证且只有一个可执行文件时跳过 Cargo；manifest 缺失、损坏或歧义回退构建 | 仅覆盖 desktop preview；不覆盖 iOS/Android preview cache hit、跨命令构建所有权、在途任务 coalescing 或隐藏输入建模 |
 | `f6801e9`（#171） | iOS live preview 将 BuildKey hash 通过受控环境传入，在 output root 发布并校验独立 iOS `.app` manifest；simulator 命中时跳过 rustup/Cargo/XcodeGen/`xcodebuild`，physical device 仍强制重建 | 真机签名 identity/Provisioning Profile 等输入仍未建模；不覆盖 Android preview、跨命令构建所有权、在途任务 coalescing 或隐藏输入建模 |
+| `0c2771e`（#173） | Android live preview 将 cache policy、ABI 和 default debug keystore hash 传入 preview；在 output root 校验 JNI staging 与 debug APK 输出的完整 manifest，命中时跳过 rustup/cargo-ndk/Gradle | release/custom/sensitive signing、keystore 变化、工具链身份不可读或隐藏输入会 bypass；不覆盖跨命令构建所有权、在途任务 coalescing 或完整设备验收 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -85,7 +86,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | S02 | in_progress | Counter/LoginForm/VirtualList preview/reset；Android preview 已接入，真实环境适配仍有缺口 |
 | S03 | in_progress | click/type/key/scroll、正常事件路径、owner/scope 和 unknown 语义；真实输入/遮挡/污染及持久幂等验收未齐 |
 | M03 | in_progress | 主机 OS 锁、owner/fencing、heartbeat，run/live/capture 和移动 matrix 已接入；重连和真实竞争矩阵未齐 |
-| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；单场景及 matrix 已消费共享冻结 snapshot/target BuildKey、绑定输出布局并锁定 preview 输出根，desktop 与 iOS simulator live preview 已接入 verified manifest 命中，跨命令共享构建/隐藏输入建模仍未齐 |
+| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；单场景及 matrix 已消费共享冻结 snapshot/target BuildKey、绑定输出布局并锁定 preview 输出根，desktop/iOS simulator/Android default-debug live preview 已接入 verified manifest 命中，跨命令共享构建/隐藏输入建模仍未齐 |
 | S04 | in_progress | executor、desktop check、单场景及 matrix frozen inputs、baseline/diff/approve、移动 matrix 场景 driver、per-cell context/BuildKey/output layout/preview output lock/完整 CheckReport、owned process-tree/fixture identity cleanup；移动 capture-only 语义/输入、环境及三夹具各 20 次真实验收未齐 |
 | A01 | planned | CLI/control 可复用；无 MCP 只读适配、JSON-RPC server 或独立 Agent service |
 | A02 | planned | action/operation/check 可复用；无 MCP 动作/取消/owner 适配 |
@@ -98,7 +99,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | G01 | planned | supervisor 计时已有；无应用 layout/paint/frame/CPU/GPU 指标与开销验收 |
 | G02 | planned | 无 perf 执行器、统计/可比性和性能预算判定 |
 | T05 | planned | watcher/全量内容扫描已有；无增量输入索引及大项目对照 |
-| T06 | in_progress | desktop/iOS simulator/Android default-debug 缓存与 cache clean，desktop 与 iOS simulator live preview verified manifest 命中；输入键有遗漏，iOS physical/Android preview 命中、共享在途构建/取消/预热未实现 |
+| T06 | in_progress | desktop/iOS simulator/Android default-debug 缓存与 cache clean，desktop/iOS simulator/Android default-debug live preview verified manifest 命中；输入键有遗漏，iOS physical/Android custom or signing-sensitive preview、共享在途构建/取消/预热未实现 |
 | Q02 | planned | 仅有 12 项任务设计；无可执行评分器和固定预算对照实验 |
 | G03 | planned | 无 GPU capture/analysis provider 闭环；可选 |
 | M06 | planned | 无远程 runner、传输和断线恢复；可选 |
@@ -138,7 +139,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 
 ## 5. 验证记录与证据范围
 
-本轮验证针对上述 `f6801e9` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
+本轮验证针对上述 `0c2771e` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
 `artifacts/progress-audit-2026-09-29/`（忽略的本机产物目录，不是已发布验收证据）。
 测试独立设置 `GPUI_DEVICE_LEASE_DIR`，避免与其他 worktree 的租约测试互相影响。
 
@@ -146,7 +147,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- |
 | `cargo fmt --check` | 通过 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | 通过 |
-| `cargo test --workspace --locked` | 336 个单元测试及全部集成/协议测试通过，0 failed |
+| `cargo test --workspace --locked` | 338 个单元测试及全部集成/协议测试通过，0 failed |
 | `cargo build --locked` | 通过 |
 | `cargo x check-design-docs`、`git diff --check` | 通过；仅验证文档/示例一致性 |
 | 两份 35 项状态表逐项比对 | 相同；1 done、21 in_progress、13 planned |
@@ -160,6 +161,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | PR #167 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；无 release/tag | [PR #167](https://github.com/kingsword09/gpui-cli/pull/167) |
 | PR #169 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；无 release/tag | [PR #169](https://github.com/kingsword09/gpui-cli/pull/169) |
 | PR #171 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；无 release/tag | [PR #171](https://github.com/kingsword09/gpui-cli/pull/171) |
+| PR #173 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；macOS capture helper deadline 初次波动后重跑通过；无 release/tag | [PR #173](https://github.com/kingsword09/gpui-cli/pull/173) |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
@@ -175,6 +177,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | matrix cell report | control scenario cell 的 `MatrixCellResult.check_report` 保留完整 steps、证据、primary error、cleanup 和 context，并通过 JSON round-trip 验证；unavailable/capture-only cell 不生成伪报告 | [S04 matrix cell reports](../experiments/S04-matrix-cell-reports-2026-09-29.md) |
 | desktop preview cache hit | preview 专用 manifest 绑定 desktop platform/BuildKey hash，逐文件验证内容并要求唯一 Cargo 可执行文件；命中跳过 Cargo，任何验证失败都 miss 并回退正常构建 | [T06 desktop preview cache hit](../experiments/T06-desktop-preview-cache-hit-2026-09-29.md) |
 | iOS simulator live preview cache hit | preview 专用 manifest 绑定 iOS platform/BuildKey hash，逐文件验证 `.app` 内容并要求根正是当前 simulator bundle；命中跳过 rustup/Cargo/XcodeGen/`xcodebuild`，physical device 不命中 | [T06 iOS preview cache hit](../experiments/T06-ios-preview-cache-hit-2026-09-29.md) |
+| Android default-debug live preview cache hit | preview 专用 manifest 绑定 Android platform/BuildKey/ABI，逐文件验证 JNI staging 与 debug APK 输出；default debug keystore 和 cache policy 仍有效时命中并跳过 rustup/cargo-ndk/Gradle | [T06 Android preview cache hit](../experiments/T06-android-preview-cache-hit-2026-09-29.md) |
 | v1 兼容 | app proto 1 为 `unsupported_version`；control schema 1 为 `invalid_schema`；schema 2 可用 | `cli-probes.json` |
 | 历史升级 | 复制上次用 `3df7a6c` CLI 生成的未修改项目，执行 `upgrade plan --to agent-native-v1-draft --json`，仍退出 1、`baseline_unavailable` | `upgrade-probe.json`、`old-t02-upgrade.json` |
 | doctor 版本 | shim 输出不可解析版本但退出 0，doctor 仍 overall=pass | `runtime-probes.json` |
@@ -190,7 +193,7 @@ PNG 仅有临时路径和记录 hash，未形成持久 CI 产物。本轮没有�
 
 ## 6. 后续接续顺序
 
-1. 在 #157/#159/#161/#163/#165/#167/#169/#171 的共享 snapshot/context/BuildKey/output layout/preview lock/完整 cell report 上补齐 iOS physical signing 输入、Android preview 命中、跨命令构建所有权与在途任务合并、移动完整 scenario 证据以及真实环境身份/viewport/DPI 证据。
+1. 在 #157/#159/#161/#163/#165/#167/#169/#171/#173 的共享 snapshot/context/BuildKey/output layout/preview lock/完整 cell report 上补齐 iOS physical signing 输入、Android custom/release/signing-sensitive preview、跨命令构建所有权与在途任务合并、移动完整 scenario 证据以及真实环境身份/viewport/DPI 证据。
 2. 补齐 v1 在线兼容、不可变历史模板基线和 doctor 版本解析；保留现有拒绝/降级边界。
 3. 完成 macOS 三夹具各连续 20 次及故障变体，再收口移动语义/输入和完整三端矩阵。
 4. 按依赖继续 MCP、repro、L2/L3 CI；性能、索引/预热、Agent 基准按各自验收推进。
