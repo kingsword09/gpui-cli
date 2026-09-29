@@ -456,9 +456,11 @@ state lock，避免刚创建的 subscriber 被误判为 stale。该机制尚不�
 `cancelled`/`partial` 终态，active count 不授权忽略 leader 自己的 revision，也无 heartbeat/fencing。
 #193 又增加 caller-cancel reason：leader 在 state lock 内先释放自身引用再计数；有 follower 时发布可复用
 terminal result 并只让取消的 leader 返回 cancellation，无 follower 时发布 retryable cancellation marker。
-现有 live `Build::is_current()` 仍走 superseded reason，caller-cancel API 尚未接入真实 preview/check
-入口，且构建闭包仍需 cooperative polling 才能在最后引用退出时提前终止。
-M04 仍未完成：真实 last-reference 接线、失败/取消/partial 终态、heartbeat/fencing、preview/check orchestration 的其余部分，以及
+#195 又把 leader control 接到 desktop/iOS simulator/Android default-debug preview 的 owned process loop：
+最后引用 caller-cancel 终止整个 process tree，有 follower 时释放 leader 引用并继续构建；superseded
+仍终止旧 attempt 并让 follower 重新竞争。`Build::is_current_for_coordinated_work` 在共享期间不误杀
+仍被 follower 需要的构建。
+M04 仍未完成：失败/取消/partial 终态、heartbeat/fencing、preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
@@ -481,6 +483,7 @@ build/run 的 coordinator 记录、subscriber 锁和 manifest 复核见
 [S04 subscriber identity/count](../experiments/S04-subscriber-identity-count-2026-09-30.md) 与
 [S04 superseded leader cancellation](../experiments/S04-superseded-leader-cancellation-2026-09-30.md) 与
 [S04 last-reference cancellation](../experiments/S04-last-reference-cancellation-2026-09-30.md)。
+[S04 preview last-reference wiring](../experiments/S04-preview-last-reference-wiring-2026-09-30.md)。
 local `build.rs`
 等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
 allowlist 遗漏已由 #149 修复，但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
