@@ -17,6 +17,7 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "ANDROID_NDK_HOME",
     "ANDROID_SDK_ROOT",
     "CARGO_BUILD_TARGET",
+    "CARGO_ENCODED_RUSTFLAGS",
     "CARGO_INCREMENTAL",
     "CARGO_PROFILE_DEV_OPT_LEVEL",
     "CARGO_PROFILE_RELEASE_LTO",
@@ -791,6 +792,29 @@ mod tests {
 
         let key = desktop_build_key(root.path(), false).unwrap();
         assert_eq!(key.material().cargo_lock_hash, "missing");
+    }
+
+    #[test]
+    fn encoded_rustflags_change_the_build_environment_hash() {
+        assert!(RELEVANT_ENVIRONMENT.contains(&"CARGO_ENCODED_RUSTFLAGS"));
+
+        let baseline = hash_relevant_environment(
+            RELEVANT_ENVIRONMENT
+                .iter()
+                .map(|name| ((*name).to_string(), "<unset>".to_string())),
+        )
+        .unwrap();
+        let encoded_flags = hash_relevant_environment(RELEVANT_ENVIRONMENT.iter().map(|name| {
+            let value = if *name == "CARGO_ENCODED_RUSTFLAGS" {
+                "-C\u{1f}opt-level=2"
+            } else {
+                "<unset>"
+            };
+            ((*name).to_string(), value.to_string())
+        }))
+        .unwrap();
+
+        assert_ne!(baseline, encoded_flags);
     }
 
     #[test]
