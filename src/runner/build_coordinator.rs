@@ -12,6 +12,7 @@ use super::output_layout::{
     BUILD_COORDINATOR_LOCK_FILE, BUILD_COORDINATOR_STATE_FILE, BUILD_COORDINATOR_SUBSCRIBERS_DIR,
     BuildOutputLayout, BuildPlatform, PREVIEW_BUILD_COORDINATOR_STATE_FILE,
 };
+use crate::devserver::session::{BuildCancellationReason, BuildProcessCancellationProbe};
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
@@ -85,6 +87,231 @@ pub struct BuildCoordinatorOutcome {
 struct BuildCoordinatorSubscription {
     path: PathBuf,
     _file: File,
+}
+
+#[derive(Clone)]
+pub struct BuildCoordinatorLeaderControl {
+    inner: Arc<BuildCoordinatorLeaderControlInner>,
+}
+
+struct BuildCoordinatorLeaderControlInner {
+    layout: BuildOutputLayout,
+    building: BuildCoordinatorRecord,
+    cancellation_reason:
+        Arc<dyn Fn() -> Result<Option<BuildCoordinatorCancellationReason>> + Send + Sync>,
+    subscription: Mutex<Option<BuildCoordinatorSubscription>>,
+    terminal_published: AtomicBool,
+    terminal_reason: Mutex<Option<BuildCoordinatorCancellationReason>>,
+}
+
+impl BuildCoordinatorLeaderControl {
+    fn new<C>(
+        layout: &BuildOutputLayout,
+        building: BuildCoordinatorRecord,
+        subscription: BuildCoordinatorSubscription,
+        cancellation_reason: C,
+    ) -> Self
+    where
+        C: Fn() -> Result<Option<BuildCoordinatorCancellationReason>> + Send + Sync + 'static,
+    {
+        Self {
+            inner: Arc::new(BuildCoordinatorLeaderControlInner {
+                layout: layout.clone(),
+                building,
+                cancellation_reason: Arc::new(cancellation_reason),
+                subscription: Mutex::new(Some(subscription)),
+                terminal_published: AtomicBool::new(false),
+                terminal_reason: Mutex::new(None),
+            }),
+        }
+    }
+
+    fn finish(&self, mut result: Result<()>) -> Result<(Result<()>, Option<anyhow::Error>)> {
+        if self.inner.terminal_published.load(Ordering::SeqCst) {
+            let reason = *self
+                .inner
+                .terminal_reason
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            return Ok(match reason {
+                Some(BuildCoordinatorCancellationReason::Superseded) => (
+                    Err(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)),
+                    Some(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)),
+                ),
+                Some(BuildCoordinatorCancellationReason::CallerCancelled) => (
+                    Err(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR)),
+                    Some(anyhow::anyhow!(BUILD_COORDINATOR_CANCELLED_ERROR)),
+                ),
+                None => (result, None),
+            });
+        }
+
+        let state_lock = open_state_lock(&self.inner.layout.root)?;
+        let cancellation = match (self.inner.cancellation_reason)() {
+            Ok(reason) => reason,
+            Err(error) => {
+                result = Err(error).context("checking BuildKey leader cancellation");
+                None
+            }
+        };
+        let superseded = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string() == BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR);
+        let mut caller_error = None;
+        let mut terminal_reason = cancellation;
+        if superseded {
+            terminal_reason = Some(BuildCoordinatorCancellationReason::Superseded);
+        }
+        match cancellation {
+            Some(BuildCoordinatorCancellationReason::Superseded) => {
+                caller_error = Some(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR));
+                result = Err(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR));
+                self.release_subscription();
+            }
+            Some(BuildCoordinatorCancellationReason::CallerCancelled) => {
+                caller_error = Some(if superseded {
+                    anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)
+                } else {
+                    anyhow::anyhow!(BUILD_COORDINATOR_CANCELLED_ERROR)
+                });
+                self.release_subscription();
+                if active_subscriber_count_locked(
+                    &self.inner.layout,
+                    &self.inner.building.attempt_id,
+                )? == 0
+                    && !superseded
+                {
+                    result = Err(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR));
+                }
+            }
+            None if superseded => {
+                terminal_reason = Some(BuildCoordinatorCancellationReason::Superseded);
+                caller_error = Some(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR));
+                result = Err(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR));
+                self.release_subscription();
+            }
+            None => {}
+        }
+
+        let terminal = self.terminal_record(result.as_ref().err().map(format_error));
+        let state_result = write_record_locked(&self.inner.layout, &terminal);
+        *self
+            .inner
+            .terminal_reason
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = terminal_reason;
+        self.inner.terminal_published.store(true, Ordering::SeqCst);
+        if terminal_reason.is_none() {
+            self.release_subscription();
+        }
+        drop(state_lock);
+
+        match state_result {
+            Ok(()) => Ok((result, caller_error)),
+            Err(error) => match caller_error {
+                Some(caller_error) => Err(caller_error)
+                    .context(format!("publishing BuildKey coordinator state: {error:#}")),
+                None => Err(error),
+            },
+        }
+    }
+
+    fn release_subscription(&self) {
+        self.inner
+            .subscription
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+    }
+
+    fn terminal_record(&self, error: Option<String>) -> BuildCoordinatorRecord {
+        let mut record = self.inner.building.clone();
+        record.finished_at_ms = Some(timestamp_ms());
+        record.state = if error.is_none() {
+            BuildCoordinatorState::Succeeded
+        } else {
+            BuildCoordinatorState::Failed
+        };
+        record.error = error;
+        record
+    }
+}
+
+impl BuildProcessCancellationProbe for BuildCoordinatorLeaderControl {
+    fn should_abort(&self) -> Result<Option<BuildCancellationReason>> {
+        if self.inner.terminal_published.load(Ordering::SeqCst) {
+            return Ok(self
+                .inner
+                .terminal_reason
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .map(|reason| match reason {
+                    BuildCoordinatorCancellationReason::CallerCancelled => {
+                        BuildCancellationReason::CallerCancelled
+                    }
+                    BuildCoordinatorCancellationReason::Superseded => {
+                        BuildCancellationReason::Superseded
+                    }
+                }));
+        }
+        let Some(reason) = (self.inner.cancellation_reason)()? else {
+            return Ok(None);
+        };
+        let state_lock = open_state_lock(&self.inner.layout.root)?;
+        self.release_subscription();
+        let remaining =
+            active_subscriber_count_locked(&self.inner.layout, &self.inner.building.attempt_id)?;
+        drop(state_lock);
+        Ok(
+            (reason == BuildCoordinatorCancellationReason::Superseded || remaining == 0).then_some(
+                match reason {
+                    BuildCoordinatorCancellationReason::CallerCancelled => {
+                        BuildCancellationReason::CallerCancelled
+                    }
+                    BuildCoordinatorCancellationReason::Superseded => {
+                        BuildCancellationReason::Superseded
+                    }
+                },
+            ),
+        )
+    }
+
+    fn terminate_if_cancelled(
+        &self,
+        terminate: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Option<BuildCancellationReason>> {
+        if self.inner.terminal_published.load(Ordering::SeqCst) {
+            return self.should_abort();
+        }
+        let Some(reason) = self.should_abort()? else {
+            return Ok(None);
+        };
+
+        let state_lock = open_state_lock(&self.inner.layout.root)?;
+        self.release_subscription();
+        terminate()?;
+        let (error, terminal_reason) = match reason {
+            BuildCancellationReason::Superseded => (
+                BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR,
+                BuildCoordinatorCancellationReason::Superseded,
+            ),
+            BuildCancellationReason::CallerCancelled => (
+                BUILD_COORDINATOR_LEADER_CANCELLED_ERROR,
+                BuildCoordinatorCancellationReason::CallerCancelled,
+            ),
+        };
+        let terminal = self.terminal_record(Some(error.to_owned()));
+        write_record_locked(&self.inner.layout, &terminal)?;
+        *self
+            .inner
+            .terminal_reason
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(terminal_reason);
+        self.inner.terminal_published.store(true, Ordering::SeqCst);
+        drop(state_lock);
+        Ok(Some(reason))
+    }
 }
 
 impl Drop for BuildCoordinatorSubscription {
@@ -215,6 +442,128 @@ where
         cancel,
         BuildCoordinatorCancellationReason::CallerCancelled,
     )
+}
+
+/// Coordinates a preview build with a leader control that can fence process
+/// termination against active subscriber references.
+pub fn coordinate_preview_build_with_leader_control<F, V, C>(
+    layout: &BuildOutputLayout,
+    key_hash: &str,
+    build: F,
+    verify: V,
+    cancellation_reason: C,
+) -> Result<BuildCoordinatorOutcome>
+where
+    F: FnOnce(&BuildCoordinatorLeaderControl) -> Result<()>,
+    V: Fn(&BuildOutputLayout, &str) -> Result<()>,
+    C: Fn() -> Result<Option<BuildCoordinatorCancellationReason>> + Send + Sync + 'static,
+{
+    let cancellation_reason = Arc::new(cancellation_reason);
+    let mut build = Some(build);
+    let cancel_waiter = || Ok((cancellation_reason)()?.is_some());
+
+    loop {
+        if cancel_waiter()? {
+            bail!(BUILD_COORDINATOR_CANCELLED_ERROR);
+        }
+        if let Some(record) = read_record(layout, BUILD_COORDINATOR_PREVIEW_KIND)?
+            && record.platform == layout.platform
+            && record.kind == BUILD_COORDINATOR_PREVIEW_KIND
+            && record.key_hash == key_hash
+        {
+            match record.state {
+                BuildCoordinatorState::Building => {
+                    match wait_for_attempt(
+                        layout,
+                        key_hash,
+                        BUILD_COORDINATOR_PREVIEW_KIND,
+                        &record,
+                        &verify,
+                        &cancel_waiter,
+                    )? {
+                        WaitOutcome::Completed(outcome) => return Ok(outcome),
+                        WaitOutcome::Abandoned => continue,
+                    }
+                }
+                BuildCoordinatorState::Succeeded => {
+                    if verify(layout, key_hash).is_ok() {
+                        return Ok(BuildCoordinatorOutcome {
+                            role: BuildCoordinatorRole::Follower,
+                            attempt_id: record.attempt_id,
+                        });
+                    }
+                }
+                BuildCoordinatorState::Failed => {
+                    if !matches!(
+                        record.error.as_deref(),
+                        Some(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)
+                            | Some(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR)
+                    ) && active_subscriber_count(layout, &record.attempt_id)? > 0
+                    {
+                        bail!(
+                            "coordinated BuildKey build failed: {}",
+                            record
+                                .error
+                                .unwrap_or_else(|| "build failed without an error".into())
+                        );
+                    }
+                }
+            }
+        }
+
+        let Some(lock) = BuildOutputLock::try_acquire(layout)? else {
+            thread::sleep(POLL_INTERVAL);
+            continue;
+        };
+
+        let attempt_id = unique_id("attempt");
+        let owner_id = unique_id("coordinator");
+        let started_at_ms = timestamp_ms();
+        let building = BuildCoordinatorRecord {
+            schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
+            kind: BUILD_COORDINATOR_PREVIEW_KIND.to_owned(),
+            platform: layout.platform,
+            key_hash: key_hash.to_owned(),
+            attempt_id: attempt_id.clone(),
+            owner_id,
+            pid: process::id(),
+            started_at_ms,
+            finished_at_ms: None,
+            state: BuildCoordinatorState::Building,
+            error: None,
+        };
+        let subscription = subscribe(layout, &attempt_id)?;
+        write_record(layout, &building)?;
+        let control_cancellation_reason = Arc::clone(&cancellation_reason);
+        let control =
+            BuildCoordinatorLeaderControl::new(layout, building, subscription, move || {
+                control_cancellation_reason()
+            });
+
+        let build_once = build
+            .take()
+            .expect("BuildKey coordinator closure is consumed once");
+        let result = match build_once(&control) {
+            Ok(()) => verify(layout, key_hash),
+            Err(error) => Err(error),
+        };
+        let result = match result {
+            Err(error) if format!("{error:#}").contains("superseded") => {
+                Err(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR))
+            }
+            result => result,
+        };
+        let (result, caller_error) = control.finish(result)?;
+        drop(lock);
+        if let Some(error) = caller_error {
+            return Err(error);
+        }
+        result?;
+        return Ok(BuildCoordinatorOutcome {
+            role: BuildCoordinatorRole::Leader,
+            attempt_id,
+        });
+    }
 }
 
 fn coordinate_build_with_verifier_kind<F, V, C>(
@@ -1199,6 +1548,55 @@ mod tests {
                 .unwrap()
                 .next()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn controlled_leader_cancellation_terminates_only_without_followers() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let terminated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let build_cancelled = cancelled.clone();
+        let predicate_cancelled = cancelled.clone();
+        let termination = terminated.clone();
+        let error = coordinate_preview_build_with_leader_control(
+            &layout,
+            key.key_hash(),
+            move |control| {
+                build_cancelled.store(true, Ordering::SeqCst);
+                assert_eq!(
+                    control.should_abort().unwrap(),
+                    Some(BuildCancellationReason::CallerCancelled)
+                );
+                let mut terminate = || {
+                    termination.store(true, Ordering::SeqCst);
+                    Ok(())
+                };
+                assert_eq!(
+                    control.terminate_if_cancelled(&mut terminate).unwrap(),
+                    Some(BuildCancellationReason::CallerCancelled)
+                );
+                Ok(())
+            },
+            verify_completed_output,
+            move || {
+                Ok(predicate_cancelled
+                    .load(Ordering::SeqCst)
+                    .then_some(BuildCoordinatorCancellationReason::CallerCancelled))
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains(BUILD_COORDINATOR_CANCELLED_ERROR));
+        assert!(terminated.load(Ordering::SeqCst));
+        let record = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.error.as_deref(),
+            Some(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR)
         );
     }
 

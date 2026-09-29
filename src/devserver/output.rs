@@ -2,7 +2,7 @@
 
 use super::events::{Kind, Scope};
 use super::process::OwnedChild;
-use super::session::{Build, Session};
+use super::session::{Build, BuildCancellationReason, Session};
 use super::timing;
 use crate::commands::error::{self, CargoMessage, CargoOutcome};
 use anyhow::{Context, Result};
@@ -111,20 +111,39 @@ fn run_inner(
         let err =
             threads.spawn(|| drain(stderr, &build.session, &build.scope, stage, "stderr", false));
         let status = loop {
-            if build.session.stopping.load(Ordering::SeqCst) {
+            if let Some(probe) = build.process_cancellation_probe() {
+                let mut terminate = || child.terminate().map(|_| ()).map_err(anyhow::Error::from);
+                match probe.terminate_if_cancelled(&mut terminate) {
+                    Ok(Some(BuildCancellationReason::Superseded)) => {
+                        break Err(anyhow::anyhow!(
+                            "live build superseded while running {stage}"
+                        ));
+                    }
+                    Ok(Some(BuildCancellationReason::CallerCancelled)) => {
+                        break Err(anyhow::anyhow!(
+                            "live build cancelled while running {stage}"
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = child.terminate();
+                        break Err(error);
+                    }
+                }
+            } else if build.session.stopping.load(Ordering::SeqCst) {
                 let _ = child.terminate();
             } else if !build.is_current_revision() {
                 let _ = child.terminate();
-                break Err(std::io::Error::other(format!(
+                break Err(anyhow::anyhow!(
                     "live build superseded while running {stage}"
-                )));
+                ));
             }
             match child.try_wait() {
                 Ok(Some(status)) => break Ok(status),
                 Ok(None) => thread::sleep(Duration::from_millis(50)),
                 Err(error) => {
                     let _ = child.terminate();
-                    break Err(error);
+                    break Err(error.into());
                 }
             }
         };

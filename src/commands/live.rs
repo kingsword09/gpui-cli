@@ -31,12 +31,14 @@ use crate::devserver::events::{Kind, Scope};
 use crate::devserver::inputs::{AssetDelta, should_trigger};
 use crate::devserver::output::{self, AppProcess};
 use crate::devserver::protocol::{self, AssetManifestEntry, ServerMessage};
-use crate::devserver::session::{Build, Session};
+use crate::devserver::session::{Build, BuildCancellationReason, Session};
 use crate::devserver::timing;
 use crate::devserver::{AssetReconciliation, DevServer};
 use crate::runner::build_cache::{BuildCacheLookup, BuildOutputLock, lookup_verified_at_path};
 use crate::runner::build_coordinator::{
-    BUILD_COORDINATOR_CANCELLED_ERROR, coordinate_preview_build_with_verifier_and_cancel,
+    BUILD_COORDINATOR_CANCELLED_ERROR, BuildCoordinatorCancellationReason,
+    BuildCoordinatorLeaderControl, BuildCoordinatorOutcome,
+    coordinate_preview_build_with_leader_control,
 };
 use crate::runner::build_inputs::android_debug_keystore_hash;
 use crate::runner::build_manifest::BuildArtifactManifest;
@@ -58,7 +60,6 @@ const MAX_SNAPSHOT_BYTES: usize = 512 * 1024;
 /// Snapshots older than this are pruned on the next save.
 const SNAPSHOT_TTL: Duration = Duration::from_secs(24 * 3600);
 const PREVIEW_BUILD_FAILED: &str = "preview build failed";
-const PREVIEW_BUILD_SUPERSEDED: &str = "preview build superseded";
 
 /// Editors fire several events per save; this absorbs the burst.
 const DEBOUNCE_MS: u64 = 400;
@@ -490,12 +491,49 @@ fn preview_control_error(error: &anyhow::Error) -> Option<Iteration> {
     let message = error.to_string();
     if message.contains(PREVIEW_BUILD_FAILED) {
         Some(Iteration::BuildFailed)
-    } else if message.contains("superseded") || message.contains(BUILD_COORDINATOR_CANCELLED_ERROR)
+    } else if message.contains("superseded")
+        || message.contains("cancelled")
+        || message.contains(BUILD_COORDINATOR_CANCELLED_ERROR)
     {
         Some(Iteration::Superseded)
     } else {
         None
     }
+}
+
+fn coordinate_preview_build_controlled<F, V>(
+    layout: &BuildOutputLayout,
+    key_hash: &str,
+    build: &Build,
+    build_once: F,
+    verify: V,
+) -> Result<BuildCoordinatorOutcome>
+where
+    F: FnOnce() -> Result<()>,
+    V: Fn(&BuildOutputLayout, &str) -> Result<()>,
+{
+    let cancellation_probe = build.cancellation_reason_probe();
+    coordinate_preview_build_with_leader_control(
+        layout,
+        key_hash,
+        |control: &BuildCoordinatorLeaderControl| {
+            build.set_process_cancellation_probe(Some(Arc::new(control.clone())));
+            let result = build_once();
+            build.set_process_cancellation_probe(None);
+            result
+        },
+        verify,
+        move || {
+            Ok(cancellation_probe()?.map(|reason| match reason {
+                BuildCancellationReason::CallerCancelled => {
+                    BuildCoordinatorCancellationReason::CallerCancelled
+                }
+                BuildCancellationReason::Superseded => {
+                    BuildCoordinatorCancellationReason::Superseded
+                }
+            }))
+        },
+    )
 }
 
 fn coordinate_desktop_preview_build(
@@ -508,9 +546,10 @@ fn coordinate_desktop_preview_build(
         .as_deref()
         .context("desktop preview coordinator requires a BuildKey hash")?;
     let layout = preview_desktop_output_layout(outputs, key_hash);
-    coordinate_preview_build_with_verifier_and_cancel(
+    coordinate_preview_build_controlled(
         &layout,
         key_hash,
+        build,
         || {
             match lookup_verified_at_path(
                 &outputs
@@ -553,14 +592,10 @@ fn coordinate_desktop_preview_build(
             let executable = outcome
                 .executable
                 .context("cargo succeeded but reported no binary path")?;
-            if !build.is_current()? {
-                bail!(PREVIEW_BUILD_SUPERSEDED);
-            }
             publish_preview_desktop_manifest(&outputs.output_root, key_hash, &executable)?;
             Ok(())
         },
         verify_preview_desktop_output,
-        || Ok(!build.is_current()?),
     )?;
     verified_preview_desktop_executable(&outputs.output_root, key_hash)
 }
@@ -731,7 +766,7 @@ fn run_iteration(
                         .executable
                         .context("cargo succeeded but reported no binary path")?
                 };
-                if !build.is_current()? {
+                if !build.is_current_for_coordinated_work()? {
                     return Ok(Iteration::Superseded);
                 }
                 if let Some(outputs) = &outputs
@@ -741,11 +776,11 @@ fn run_iteration(
                 }
                 executable
             };
-            if !build.is_current()? {
+            if !build.is_current_for_coordinated_work()? {
                 return Ok(Iteration::Superseded);
             }
             prepare_restart(project, server, channel);
-            if !build.is_current()? {
+            if !build.is_current_for_coordinated_work()? {
                 return Ok(Iteration::Superseded);
             }
             drop(child.take());
@@ -788,13 +823,13 @@ fn run_iteration(
                     return Err(error);
                 }
             };
-            if !build.is_current()? {
+            if !build.is_current_for_coordinated_work()? {
                 return Ok(Iteration::Superseded);
             }
             if !physical {
                 prepare_restart(project, server, channel);
             }
-            if !build.is_current()? {
+            if !build.is_current_for_coordinated_work()? {
                 return Ok(Iteration::Superseded);
             }
             prepare_launch(channel, server, build)?;
@@ -840,12 +875,12 @@ fn run_iteration(
                     return Err(error);
                 }
             };
-            if !build.is_current()? {
+            if !build.is_current_for_coordinated_work()? {
                 return Ok(Iteration::Superseded);
             }
             // Installation stops the old app, so snapshot it first.
             prepare_restart(project, server, channel);
-            if !build.is_current()? {
+            if !build.is_current_for_coordinated_work()? {
                 return Ok(Iteration::Superseded);
             }
             prepare_launch(channel, server, build)?;
@@ -1232,22 +1267,19 @@ fn build_ios_app_live(
             .context("iOS preview coordinator requires a DerivedData output directory")?;
         let app_path = xcode_app_path(derived_dir, &project.xcode_target(), false, false);
         let layout = preview_ios_output_layout(outputs, key_hash);
-        coordinate_preview_build_with_verifier_and_cancel(
+        coordinate_preview_build_controlled(
             &layout,
             key_hash,
+            build,
             || {
                 if build_ios_app_live_once(project, false, udid, build, Some(outputs), false)?
                     .is_none()
                 {
                     bail!(PREVIEW_BUILD_FAILED);
                 }
-                if !build.is_current()? {
-                    bail!(PREVIEW_BUILD_SUPERSEDED);
-                }
                 Ok(())
             },
             |layout, key_hash| verify_preview_ios_output(layout, key_hash, &app_path),
-            || Ok(!build.is_current()?),
         )?;
         verify_preview_ios_output(&layout, key_hash, &app_path)?;
         return Ok(Some(app_path));
@@ -1380,9 +1412,6 @@ fn build_ios_app_live_once(
             app_path.display()
         );
     }
-    if !build.is_current()? {
-        bail!(PREVIEW_BUILD_SUPERSEDED);
-    }
     if let Some(outputs) = outputs
         && let Some(key_hash) = outputs.build_key_hash.as_deref()
     {
@@ -1425,20 +1454,17 @@ fn build_android_apk_live(
             }
             verify_preview_android_output(layout, key_hash, jni_libs_dir, &apk_output_dir)
         };
-        coordinate_preview_build_with_verifier_and_cancel(
+        coordinate_preview_build_controlled(
             &layout,
             key_hash,
+            build,
             || {
                 if build_android_apk_live_once(project, build, Some(outputs), false)?.is_none() {
                     bail!(PREVIEW_BUILD_FAILED);
                 }
-                if !build.is_current()? {
-                    bail!(PREVIEW_BUILD_SUPERSEDED);
-                }
                 Ok(())
             },
             verify,
-            || Ok(!build.is_current()?),
         )?;
         let apk = super::run::apk_path_at(project, false, Some(gradle_build_dir))?;
         verify(&layout, key_hash)?;
@@ -1581,9 +1607,6 @@ fn build_android_apk_live_once(
         build,
     )?;
 
-    if !build.is_current()? {
-        bail!(PREVIEW_BUILD_SUPERSEDED);
-    }
     let apk = super::run::apk_path_at(project, false, gradle_build_dir.as_deref())?;
     if let Some(outputs) = outputs
         && let Some(key_hash) = outputs.build_key_hash.as_deref()
