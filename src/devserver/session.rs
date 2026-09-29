@@ -152,6 +152,24 @@ pub struct Build {
     pub session: Arc<Session>,
     pub scope: Scope,
     span: SpanGuard,
+    process_cancellation_probe: Mutex<Option<Arc<dyn BuildProcessCancellationProbe>>>,
+}
+
+pub trait BuildProcessCancellationProbe: Send + Sync {
+    fn should_abort(&self) -> Result<Option<BuildCancellationReason>>;
+
+    /// Runs `terminate` while cancellation and subscriber ownership are fenced.
+    /// Returns the cancellation reason when the build process should stop.
+    fn terminate_if_cancelled(
+        &self,
+        terminate: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Option<BuildCancellationReason>>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuildCancellationReason {
+    CallerCancelled,
+    Superseded,
 }
 
 impl Session {
@@ -2101,6 +2119,7 @@ impl Session {
             session: self.clone(),
             scope,
             span: build_span,
+            process_cancellation_probe: Mutex::new(None),
         })
     }
 
@@ -2177,9 +2196,49 @@ impl Build {
             && self.session.store.state().desired == self.scope.revision
     }
 
+    pub fn cancellation_reason_probe(
+        &self,
+    ) -> impl Fn() -> Result<Option<BuildCancellationReason>> + Send + Sync + 'static {
+        let session = self.session.clone();
+        let revision = self.scope.revision.clone();
+        move || {
+            if session.stopping.load(Ordering::SeqCst) {
+                return Ok(Some(BuildCancellationReason::CallerCancelled));
+            }
+            if session.store.state().desired != revision {
+                return Ok(Some(BuildCancellationReason::Superseded));
+            }
+            Ok(None)
+        }
+    }
+
+    pub fn set_process_cancellation_probe(
+        &self,
+        probe: Option<Arc<dyn BuildProcessCancellationProbe>>,
+    ) {
+        *self
+            .process_cancellation_probe
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = probe;
+    }
+
+    pub fn process_cancellation_probe(&self) -> Option<Arc<dyn BuildProcessCancellationProbe>> {
+        self.process_cancellation_probe
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     pub fn is_current(&self) -> Result<bool> {
         Ok(!self.session.stopping.load(Ordering::SeqCst)
             && self.session.sync_inputs()? == self.scope.revision)
+    }
+
+    pub fn is_current_for_coordinated_work(&self) -> Result<bool> {
+        if let Some(probe) = self.process_cancellation_probe() {
+            return Ok(probe.should_abort()?.is_none());
+        }
+        self.is_current()
     }
 
     pub fn finish(&self, success: bool, error: Option<String>) {
