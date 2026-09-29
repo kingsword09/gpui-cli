@@ -1161,17 +1161,13 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .unwrap();
 
-        let subscribers_dir = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let attempt_id = read_record(&layout, BUILD_COORDINATOR_BUILD_KIND)
+            .unwrap()
+            .unwrap()
+            .attempt_id;
         loop {
-            let subscribed = match fs::read_dir(&subscribers_dir) {
-                Ok(entries) => entries
-                    .filter_map(std::result::Result::ok)
-                    .any(|entry| entry.path().is_file()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => panic!("cannot inspect coordinator subscribers: {error}"),
-            };
-            if subscribed {
+            if active_subscriber_count(&layout, &attempt_id).unwrap() > 1 {
                 break;
             }
             assert!(
