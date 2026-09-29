@@ -365,6 +365,13 @@ fn reset_generation_inner(expected_scenario_id: Option<&str>) -> Result<u64, Str
         ));
     }
     current.fixture = fixture;
+    #[cfg(all(debug_assertions, feature = "gpui-dev"))]
+    {
+        current.fixture_hash = format!(
+            "sha256:{}",
+            crate::live::sha256_hex(fixture_text.as_bytes())
+        );
+    }
     current.reset_generation = current
         .reset_generation
         .checked_add(1)
@@ -490,5 +497,14 @@ mod tests {
             ["list.viewport", "list.item.<stable-key>"]
         );
         assert_eq!(registry.manifest()["components"].as_array().unwrap().len(), 3);
+    }
+
+    #[cfg(all(debug_assertions, feature = "gpui-dev"))]
+    #[test]
+    fn reset_fixture_hash_uses_the_current_fixture_bytes() {
+        assert_eq!(
+            format!("sha256:{}", crate::live::sha256_hex(b"abc")),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

@@ -1595,6 +1595,12 @@ impl ScenarioRunner for DesktopCheckRunner {
             uncontrolled_inputs: self.ready_uncontrolled_inputs.clone(),
         })
     }
+
+    fn fixture_hash(&self) -> Option<String> {
+        self.ready_fixture_hash
+            .clone()
+            .or_else(|| self.fixture_hash.clone())
+    }
 }
 
 impl Drop for DesktopCheckRunner {
