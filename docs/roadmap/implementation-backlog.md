@@ -419,7 +419,9 @@ cache hit，记录见
 [M04 iOS Xcode/SDK fingerprint](../experiments/M04-ios-xcode-sdk-fingerprint-2026-09-28.md)。
 live preview builder 已接入 source-project target-specific output root，并在该 root 上取得跨进程
 `BuildOutputLock`；#169 又让 desktop preview 通过独立 verified artifact manifest 在验证成功时
-跳过 Cargo；这只覆盖 desktop preview，不等于 iOS/Android 命中、跨命令 ownership 或 coalescing。
+跳过 Cargo；#171 又让 iOS simulator live preview 在同一语义下验证完整 `.app` bundle 并跳过
+rustup/Cargo/XcodeGen/`xcodebuild`；这仍不等于 iOS physical/Android 命中、跨命令 ownership
+或 coalescing。
 这只串行进入该锁路径的输出变更，不等于构建已完成或可复用。snapshot build
 orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
 尚未接入。非 live 命令也已接入各自的临时 `FrozenInputs` 工作根；desktop 的切片见
@@ -474,6 +476,13 @@ manifest；下一次 preview 只有在 platform、key hash、文件集合、内�
 均验证通过时才跳过 Cargo，否则回退正常构建。该切片不覆盖 iOS/Android preview 命中、跨命令
 构建所有权或在途任务 coalescing，记录见
 [T06 desktop preview cache hit](../experiments/T06-desktop-preview-cache-hit-2026-09-29.md)。
+
+PR #171 将相同的 verified-manifest 语义接入 iOS simulator live preview：成功构建后发布完整
+`.app` bundle manifest，下一次 live build 只在 iOS platform、BuildKey、文件集合、内容 hash
+和预期 simulator app 根全部匹配时跳过 rustup/Cargo/XcodeGen/`xcodebuild`。physical-device
+路径仍每次重建，因为本机签名 identity、Provisioning Profile 等输入尚未纳入 BuildKey；该切片
+也不覆盖 Android preview、跨命令构建所有权或在途任务 coalescing，记录见
+[T06 iOS preview cache hit](../experiments/T06-ios-preview-cache-hit-2026-09-29.md)。
 
 ### S04 · 断言和 gpui check 执行器
 
