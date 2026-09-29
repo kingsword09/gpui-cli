@@ -34,6 +34,7 @@ use crate::devserver::protocol::{self, AssetManifestEntry, ServerMessage};
 use crate::devserver::session::{Build, Session};
 use crate::devserver::timing;
 use crate::devserver::{AssetReconciliation, DevServer};
+use crate::runner::build_cache::BuildOutputLock;
 use crate::runner::lease::DeviceLeaseSession;
 use serde_json::json;
 
@@ -85,6 +86,7 @@ enum Plan {
 /// directory and starts at reset_generation 1.
 #[derive(Clone, Debug)]
 pub struct PreviewBuildOutputs {
+    pub output_root: PathBuf,
     pub cargo_target_dir: PathBuf,
     pub jni_libs_dir: Option<PathBuf>,
     pub gradle_build_dir: Option<PathBuf>,
@@ -93,8 +95,10 @@ pub struct PreviewBuildOutputs {
 
 impl PreviewBuildOutputs {
     pub fn from_environment() -> Option<Self> {
+        let output_root = std::env::var_os("GPUI_PREVIEW_BUILD_OUTPUT_ROOT")?;
         let cargo_target_dir = std::env::var_os("GPUI_PREVIEW_CARGO_TARGET_DIR")?;
         Some(Self {
+            output_root: PathBuf::from(output_root),
             cargo_target_dir: PathBuf::from(cargo_target_dir),
             jni_libs_dir: std::env::var_os("GPUI_PREVIEW_JNI_LIBS_DIR").map(PathBuf::from),
             gradle_build_dir: std::env::var_os("GPUI_PREVIEW_GRADLE_BUILD_DIR").map(PathBuf::from),
@@ -332,6 +336,12 @@ fn run_iteration(
 ) -> Result<Iteration> {
     match plan {
         Plan::Desktop => {
+            let _output_lock = channel
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.build_outputs.as_ref())
+                .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
+                .transpose()?;
             let mut cmd = Command::new("cargo");
             cmd.current_dir(&project.root).args([
                 "build",
@@ -821,6 +831,9 @@ fn build_ios_app_live(
     build: &Build,
     outputs: Option<&PreviewBuildOutputs>,
 ) -> Result<Option<std::path::PathBuf>> {
+    let _output_lock = outputs
+        .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
+        .transpose()?;
     let rust_target = if physical {
         "aarch64-apple-ios"
     } else {
@@ -905,6 +918,9 @@ fn build_android_apk_live(
     build: &Build,
     outputs: Option<&PreviewBuildOutputs>,
 ) -> Result<Option<std::path::PathBuf>> {
+    let _output_lock = outputs
+        .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
+        .transpose()?;
     ensure_tool(
         "cargo-ndk",
         "Install it with `cargo install cargo-ndk`, then set ANDROID_NDK_HOME.",

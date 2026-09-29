@@ -24,7 +24,20 @@ impl BuildOutputLock {
     pub fn acquire(layout: &BuildOutputLayout) -> Result<Self> {
         fs::create_dir_all(&layout.root)
             .with_context(|| format!("creating BuildKey output root {}", layout.root.display()))?;
-        let path = layout.lock_file_path();
+        let lock = Self::acquire_at_root(&layout.root)?;
+        layout
+            .prepare()
+            .with_context(|| format!("preparing locked BuildKey output {}", layout.key_hash))?;
+        Ok(lock)
+    }
+
+    /// Acquires the persistent lock for an already planned BuildKey output
+    /// root. Preview builders use this form because their source workspace is
+    /// frozen elsewhere while outputs live under the source project.
+    pub fn acquire_at_root(root: &Path) -> Result<Self> {
+        fs::create_dir_all(root)
+            .with_context(|| format!("creating BuildKey output root {}", root.display()))?;
+        let path = root.join(super::output_layout::BUILD_OUTPUT_LOCK_FILE);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                 bail!(
@@ -47,10 +60,7 @@ impl BuildOutputLock {
             .open(&path)
             .with_context(|| format!("opening BuildKey output lock {}", path.display()))?;
         file.lock()
-            .with_context(|| format!("locking BuildKey output {}", layout.key_hash))?;
-        layout
-            .prepare()
-            .with_context(|| format!("preparing locked BuildKey output {}", layout.key_hash))?;
+            .with_context(|| format!("locking BuildKey output root {}", root.display()))?;
         Ok(Self { _file: file, path })
     }
 
@@ -583,6 +593,29 @@ mod tests {
             BuildCacheLookup::Hit(_)
         ));
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn preview_root_lock_is_released_after_the_guard_drops() {
+        let root = tempfile::tempdir().unwrap();
+        let first = BuildOutputLock::acquire_at_root(root.path()).unwrap();
+        assert!(
+            first
+                .path()
+                .ends_with(super::super::output_layout::BUILD_OUTPUT_LOCK_FILE)
+        );
+        let root_path = root.path().to_owned();
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let second = BuildOutputLock::acquire_at_root(&root_path).unwrap();
+            sender.send(()).unwrap();
+            drop(second);
+        });
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(first);
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(BuildOutputLock::acquire_at_root(root.path()).is_ok());
     }
 
     #[test]
