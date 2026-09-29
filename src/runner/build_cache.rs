@@ -2,20 +2,38 @@
 
 use super::build_key::BuildKey;
 use super::build_manifest::BuildArtifactManifest;
-use super::output_layout::{BuildOutputLayout, BuildPlatform};
+use super::output_layout::{BUILD_OUTPUT_OWNER_FILE, BuildOutputLayout, BuildPlatform};
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use std::fs::TryLockError;
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::NamedTempFile;
 
 const CACHE_PLATFORMS: &[&str] = &["desktop", "android", "ios"];
+pub const BUILD_OUTPUT_OWNER_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BuildOutputOwner {
+    pub schema_version: u32,
+    pub owner_id: String,
+    pub pid: u32,
+    pub started_at_ms: u64,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_hash: Option<String>,
+}
 
 /// A per-output-root advisory lock. The lock file is intentionally persistent:
 /// the operating system releases the lock when the process exits or crashes.
 pub struct BuildOutputLock {
     _file: File,
     path: PathBuf,
+    owner_path: PathBuf,
+    owner_id: String,
 }
 
 impl BuildOutputLock {
@@ -24,7 +42,7 @@ impl BuildOutputLock {
     pub fn acquire(layout: &BuildOutputLayout) -> Result<Self> {
         fs::create_dir_all(&layout.root)
             .with_context(|| format!("creating BuildKey output root {}", layout.root.display()))?;
-        let lock = Self::acquire_at_root(&layout.root)?;
+        let lock = Self::acquire_at_root_with_key(&layout.root, Some(layout.key_hash.clone()))?;
         layout
             .prepare()
             .with_context(|| format!("preparing locked BuildKey output {}", layout.key_hash))?;
@@ -35,6 +53,10 @@ impl BuildOutputLock {
     /// root. Preview builders use this form because their source workspace is
     /// frozen elsewhere while outputs live under the source project.
     pub fn acquire_at_root(root: &Path) -> Result<Self> {
+        Self::acquire_at_root_with_key(root, None)
+    }
+
+    fn acquire_at_root_with_key(root: &Path, key_hash: Option<String>) -> Result<Self> {
         fs::create_dir_all(root)
             .with_context(|| format!("creating BuildKey output root {}", root.display()))?;
         let path = root.join(super::output_layout::BUILD_OUTPUT_LOCK_FILE);
@@ -61,7 +83,32 @@ impl BuildOutputLock {
             .with_context(|| format!("opening BuildKey output lock {}", path.display()))?;
         file.lock()
             .with_context(|| format!("locking BuildKey output root {}", root.display()))?;
-        Ok(Self { _file: file, path })
+        Self::from_locked_file(root, path, file, key_hash)
+    }
+
+    fn from_locked_file(
+        root: &Path,
+        path: PathBuf,
+        file: File,
+        key_hash: Option<String>,
+    ) -> Result<Self> {
+        let owner_id = format!("{}-{}", process::id(), owner_timestamp_nanos());
+        let owner_path = root.join(BUILD_OUTPUT_OWNER_FILE);
+        let owner = BuildOutputOwner {
+            schema_version: BUILD_OUTPUT_OWNER_SCHEMA_VERSION,
+            owner_id: owner_id.clone(),
+            pid: process::id(),
+            started_at_ms: owner_timestamp_ms(),
+            state: "building".into(),
+            key_hash,
+        };
+        write_owner_record(&owner_path, &owner)?;
+        Ok(Self {
+            _file: file,
+            path,
+            owner_path,
+            owner_id,
+        })
     }
 
     fn try_acquire_at(root: &Path, create_lock: bool) -> Result<LockAttempt> {
@@ -109,10 +156,9 @@ impl BuildOutputLock {
             .open(&lock_path)
             .with_context(|| format!("opening BuildKey output lock {}", lock_path.display()))?;
         match file.try_lock() {
-            Ok(()) => Ok(LockAttempt::Acquired(Self {
-                _file: file,
-                path: lock_path,
-            })),
+            Ok(()) => Ok(LockAttempt::Acquired(Self::from_locked_file(
+                root, lock_path, file, None,
+            )?)),
             Err(TryLockError::WouldBlock) => Ok(LockAttempt::Busy),
             Err(TryLockError::Error(error)) => Err(error)
                 .with_context(|| format!("trying BuildKey output lock {}", root.display())),
@@ -122,6 +168,85 @@ impl BuildOutputLock {
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
+
+    pub fn owner_path(&self) -> &std::path::Path {
+        &self.owner_path
+    }
+}
+
+impl Drop for BuildOutputLock {
+    fn drop(&mut self) {
+        let Ok(metadata) = fs::symlink_metadata(&self.owner_path) else {
+            return;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return;
+        }
+        let Ok(bytes) = fs::read(&self.owner_path) else {
+            return;
+        };
+        let Ok(owner) = serde_json::from_slice::<BuildOutputOwner>(&bytes) else {
+            return;
+        };
+        if owner.owner_id == self.owner_id {
+            let _ = fs::remove_file(&self.owner_path);
+        }
+    }
+}
+
+fn owner_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn owner_timestamp_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+fn write_owner_record(path: &Path, owner: &BuildOutputOwner) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!(
+                "BuildKey output owner record is not a regular file: {}",
+                path.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("checking BuildKey output owner record {}", path.display())
+            });
+        }
+    }
+    let parent = path
+        .parent()
+        .context("BuildKey output owner record has no parent")?;
+    let mut temporary = NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "creating temporary BuildKey owner record in {}",
+            parent.display()
+        )
+    })?;
+    serde_json::to_writer_pretty(temporary.as_file_mut(), owner)
+        .context("serializing BuildKey output owner record")?;
+    temporary.as_file_mut().write_all(b"\n")?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| {
+        anyhow::anyhow!(
+            "publishing BuildKey output owner record {}: {}",
+            path.display(),
+            error.error
+        )
+    })?;
+    Ok(())
 }
 
 enum LockAttempt {
@@ -338,6 +463,9 @@ fn inspect_tree(root: &Path) -> Result<TreeStats> {
 }
 
 fn inspect_entry(path: &Path, stats: &mut TreeStats) -> Result<()> {
+    if path.file_name() == Some(std::ffi::OsStr::new(BUILD_OUTPUT_OWNER_FILE)) {
+        return Ok(());
+    }
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspecting cached build output {}", path.display()))?;
     stats.modified = stats
@@ -636,6 +764,50 @@ mod tests {
         assert!(lock_path.is_file());
         let reacquired = BuildOutputLock::acquire(&layout).unwrap();
         drop(reacquired);
+    }
+
+    #[test]
+    fn output_lock_publishes_owner_while_held_and_removes_it_on_drop() {
+        let base = tempfile::tempdir().unwrap();
+        let key = key();
+        let layout = layout(base.path(), &key);
+        let lock = BuildOutputLock::acquire(&layout).unwrap();
+        let owner_path = layout.root.join(BUILD_OUTPUT_OWNER_FILE);
+        let owner: BuildOutputOwner =
+            serde_json::from_slice(&fs::read(&owner_path).unwrap()).unwrap();
+        assert_eq!(owner.schema_version, BUILD_OUTPUT_OWNER_SCHEMA_VERSION);
+        assert_eq!(owner.key_hash.as_deref(), Some(key.key_hash()));
+        assert_eq!(owner.state, "building");
+        assert_eq!(owner.pid, std::process::id());
+        assert_eq!(lock.owner_path(), owner_path);
+        drop(lock);
+        assert!(!owner_path.exists());
+    }
+
+    #[test]
+    fn output_lock_replaces_a_stale_owner_record_after_acquiring_the_lock() {
+        let base = tempfile::tempdir().unwrap();
+        let key = key();
+        let layout = layout(base.path(), &key);
+        layout.prepare().unwrap();
+        let owner_path = layout.root.join(BUILD_OUTPUT_OWNER_FILE);
+        let stale = BuildOutputOwner {
+            schema_version: BUILD_OUTPUT_OWNER_SCHEMA_VERSION,
+            owner_id: "stale-owner".into(),
+            pid: 1,
+            started_at_ms: 1,
+            state: "building".into(),
+            key_hash: Some(key.key_hash().into()),
+        };
+        write_owner_record(&owner_path, &stale).unwrap();
+
+        let lock = BuildOutputLock::acquire(&layout).unwrap();
+        let current: BuildOutputOwner =
+            serde_json::from_slice(&fs::read(&owner_path).unwrap()).unwrap();
+        assert_ne!(current.owner_id, stale.owner_id);
+        assert_eq!(current.key_hash.as_deref(), Some(key.key_hash()));
+        drop(lock);
+        assert!(!owner_path.exists());
     }
 
     #[test]
