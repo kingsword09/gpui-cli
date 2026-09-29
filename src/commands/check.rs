@@ -9,12 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::run::{Project, bundle_id_of, bundle_id_of_android};
 use crate::device;
+use crate::devserver::OwnedChild;
 use crate::devserver::actions::Action;
 use crate::devserver::control::{self, Command as ControlCommand, Registration};
 use crate::devserver::events::{Event, Kind, Page};
@@ -616,7 +617,7 @@ fn print_report(report: &CheckReport, json_output: bool) -> Result<()> {
 }
 
 struct DesktopCheckRunner {
-    child: Child,
+    child: OwnedChild,
     project_root: PathBuf,
     registration: Registration,
     event_cursor: u64,
@@ -703,18 +704,18 @@ impl DesktopCheckRunner {
             child.env("GPUI_PREVIEW_PRELEASED", "1");
         }
         child.env("GPUI_PREVIEW_SESSION_KEY", &session_key);
-        child
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
-        let child = child.spawn().context("starting isolated desktop preview")?;
+        let mut child = OwnedChild::spawn_with_stdio(
+            &mut child,
+            Stdio::null(),
+            Stdio::null(),
+            Stdio::inherit(),
+        )
+        .context("starting isolated desktop preview")?;
         let registration =
             match wait_for_registration(project_root, &scenario.id, &session_key, deadline) {
                 Ok(registration) => registration,
                 Err(error) => {
-                    let mut child = child;
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    let _ = child.terminate();
                     return Err(error);
                 }
             };
@@ -740,8 +741,7 @@ impl DesktopCheckRunner {
             mobile_capture: None,
         };
         if let Err(error) = runner.wait_for_ready(deadline) {
-            let _ = runner.child.kill();
-            let _ = runner.child.wait();
+            let _ = runner.child.terminate();
             return Err(error);
         }
         Ok(runner)
@@ -1574,13 +1574,8 @@ impl ScenarioRunner for DesktopCheckRunner {
     fn cleanup(&mut self) -> Result<(), DriverError> {
         let child_result = self
             .child
-            .kill()
-            .map_err(|error| DriverError::failed("cleanup_failed", error.to_string()))
-            .and_then(|_| {
-                self.child
-                    .wait()
-                    .map_err(|error| DriverError::failed("cleanup_failed", error.to_string()))
-            });
+            .terminate()
+            .map_err(|error| DriverError::failed("cleanup_failed", error.to_string()));
         if let Some(mobile_capture) = self.mobile_capture.as_mut()
             && let Err(error) = mobile_capture.cleanup()
         {
@@ -1604,8 +1599,7 @@ impl ScenarioRunner for DesktopCheckRunner {
 
 impl Drop for DesktopCheckRunner {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.child.terminate();
         if let Some(mobile_capture) = self.mobile_capture.as_mut() {
             let _ = mobile_capture.cleanup();
         }

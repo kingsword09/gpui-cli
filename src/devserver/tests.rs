@@ -8,7 +8,9 @@ use gpui_dev_protocol::{ArtifactKind, ArtifactManifest};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
 use std::net::TcpStream;
+use std::process::Stdio;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1856,7 +1858,12 @@ fn compiler_diagnostics_arrive_before_exit_and_capture_both_pipes() {
 #[allow(clippy::zombie_processes)] // The supervisor under test must own cleanup.
 fn process_tree_fixture() {
     match std::env::var("GPUI_PROCESS_FIXTURE").as_deref() {
-        Ok("helper") => thread::sleep(Duration::from_secs(10)),
+        Ok("helper") => {
+            if let Ok(path) = std::env::var("GPUI_PROCESS_FIXTURE_READY") {
+                fs::write(path, std::process::id().to_string()).unwrap();
+            }
+            thread::sleep(Duration::from_secs(10));
+        }
         Ok("parent") => {
             process_tree_command("helper").spawn().unwrap();
             println!("parent stdout before exit");
@@ -1877,6 +1884,50 @@ fn process_tree_command(role: &str) -> std::process::Command {
         ])
         .env("GPUI_PROCESS_FIXTURE", role);
     command
+}
+
+#[test]
+fn custom_owned_child_cleanup_closes_descendant_pipes() {
+    let dir = tempfile::tempdir().unwrap();
+    let ready = dir.path().join("helper-ready");
+    let mut command = process_tree_command("parent");
+    command.env("GPUI_PROCESS_FIXTURE_READY", &ready);
+    let mut child = super::process::OwnedChild::spawn_with_stdio(
+        &mut command,
+        Stdio::null(),
+        Stdio::piped(),
+        Stdio::piped(),
+    )
+    .unwrap();
+    let stdout = child.stdout().unwrap();
+    let stderr = child.stderr().unwrap();
+    wait_until(|| ready.is_file());
+
+    let start = Instant::now();
+    let (status, stdout, stderr) = thread::scope(|scope| {
+        let stdout = scope.spawn(|| {
+            let mut bytes = Vec::new();
+            let mut stdout = stdout;
+            stdout.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let stderr = scope.spawn(|| {
+            let mut bytes = Vec::new();
+            let mut stderr = stderr;
+            stderr.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let status = child.terminate().unwrap();
+        (status, stdout.join().unwrap(), stderr.join().unwrap())
+    });
+
+    assert!(!status.success());
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "descendant pipes stayed open after owned-child termination"
+    );
+    assert!(String::from_utf8_lossy(&stdout).contains("parent stdout before exit"));
+    assert!(String::from_utf8_lossy(&stderr).contains("parent stderr before exit"));
 }
 
 #[test]
