@@ -372,6 +372,7 @@ fn preview_outputs_from_layout(layout: &BuildOutputLayout) -> PreviewBuildOutput
     PreviewBuildOutputs {
         output_root: layout.root.clone(),
         cargo_target_dir: layout.cargo_target_dir.clone(),
+        build_key_hash: Some(layout.key_hash.clone()),
         jni_libs_dir: layout.android_jni_dir.clone(),
         gradle_build_dir: layout.android_gradle_build_dir.clone(),
         ios_derived_data_dir: layout.ios_derived_data_dir.clone(),
@@ -948,6 +949,9 @@ impl DesktopCheckRunner {
         if let Some(outputs) = &build_outputs {
             child.env("GPUI_PREVIEW_BUILD_OUTPUT_ROOT", &outputs.output_root);
             child.env("GPUI_PREVIEW_CARGO_TARGET_DIR", &outputs.cargo_target_dir);
+            if let Some(key_hash) = &outputs.build_key_hash {
+                child.env("GPUI_PREVIEW_BUILD_KEY_HASH", key_hash);
+            }
             if let Some(path) = &outputs.jni_libs_dir {
                 child.env("GPUI_PREVIEW_JNI_LIBS_DIR", path);
             }
