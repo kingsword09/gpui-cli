@@ -9,7 +9,7 @@
 
 use super::baseline::BaselineKey;
 use super::{ScenarioDefinition, ScenarioStep, Selector};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -276,7 +276,7 @@ pub struct CleanupReport {
 /// Runtime context captured at scenario readiness and updated when the
 /// runner observes a new reset generation. This keeps fixture/environment
 /// evidence in the check report instead of requiring event-log reconstruction.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Serialize, PartialEq)]
 pub struct CheckContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset_generation: Option<u64>,

@@ -98,6 +98,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
                     message: "mobile process exited during runner launch".into(),
                 }),
                 artifact_ids: Vec::new(),
+                context: None,
             });
         }
 
@@ -153,6 +154,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             status,
             error,
             artifact_ids: vec![capture.artifact_id],
+            context: None,
         })
     }
 
