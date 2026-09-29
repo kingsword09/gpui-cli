@@ -35,7 +35,9 @@ use crate::devserver::session::{Build, Session};
 use crate::devserver::timing;
 use crate::devserver::{AssetReconciliation, DevServer};
 use crate::runner::build_cache::{BuildCacheLookup, BuildOutputLock, lookup_verified_at_path};
-use crate::runner::build_coordinator::coordinate_preview_build_with_verifier;
+use crate::runner::build_coordinator::{
+    BUILD_COORDINATOR_CANCELLED_ERROR, coordinate_preview_build_with_verifier_and_cancel,
+};
 use crate::runner::build_inputs::android_debug_keystore_hash;
 use crate::runner::build_manifest::BuildArtifactManifest;
 use crate::runner::lease::DeviceLeaseSession;
@@ -488,7 +490,9 @@ fn preview_control_error(error: &anyhow::Error) -> Option<Iteration> {
     let message = error.to_string();
     if message.contains(PREVIEW_BUILD_FAILED) {
         Some(Iteration::BuildFailed)
-    } else if message.contains(PREVIEW_BUILD_SUPERSEDED) {
+    } else if message.contains(PREVIEW_BUILD_SUPERSEDED)
+        || message.contains(BUILD_COORDINATOR_CANCELLED_ERROR)
+    {
         Some(Iteration::Superseded)
     } else {
         None
@@ -505,7 +509,7 @@ fn coordinate_desktop_preview_build(
         .as_deref()
         .context("desktop preview coordinator requires a BuildKey hash")?;
     let layout = preview_desktop_output_layout(outputs, key_hash);
-    coordinate_preview_build_with_verifier(
+    coordinate_preview_build_with_verifier_and_cancel(
         &layout,
         key_hash,
         || {
@@ -557,6 +561,7 @@ fn coordinate_desktop_preview_build(
             Ok(())
         },
         verify_preview_desktop_output,
+        || Ok(!build.is_current()?),
     )?;
     verified_preview_desktop_executable(&outputs.output_root, key_hash)
 }
@@ -1228,7 +1233,7 @@ fn build_ios_app_live(
             .context("iOS preview coordinator requires a DerivedData output directory")?;
         let app_path = xcode_app_path(derived_dir, &project.xcode_target(), false, false);
         let layout = preview_ios_output_layout(outputs, key_hash);
-        coordinate_preview_build_with_verifier(
+        coordinate_preview_build_with_verifier_and_cancel(
             &layout,
             key_hash,
             || {
@@ -1243,6 +1248,7 @@ fn build_ios_app_live(
                 Ok(())
             },
             |layout, key_hash| verify_preview_ios_output(layout, key_hash, &app_path),
+            || Ok(!build.is_current()?),
         )?;
         verify_preview_ios_output(&layout, key_hash, &app_path)?;
         return Ok(Some(app_path));
@@ -1420,7 +1426,7 @@ fn build_android_apk_live(
             }
             verify_preview_android_output(layout, key_hash, jni_libs_dir, &apk_output_dir)
         };
-        coordinate_preview_build_with_verifier(
+        coordinate_preview_build_with_verifier_and_cancel(
             &layout,
             key_hash,
             || {
@@ -1433,6 +1439,7 @@ fn build_android_apk_live(
                 Ok(())
             },
             verify,
+            || Ok(!build.is_current()?),
         )?;
         let apk = super::run::apk_path_at(project, false, Some(gradle_build_dir))?;
         verify(&layout, key_hash)?;

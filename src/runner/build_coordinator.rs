@@ -25,6 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 
 pub const BUILD_COORDINATOR_SCHEMA_VERSION: u32 = 1;
+pub const BUILD_COORDINATOR_CANCELLED_ERROR: &str = "coordinated BuildKey subscriber cancelled";
 const BUILD_COORDINATOR_BUILD_KIND: &str = "build";
 const BUILD_COORDINATOR_PREVIEW_KIND: &str = "preview";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -102,6 +103,7 @@ where
         BUILD_COORDINATOR_BUILD_KIND,
         build,
         verify_completed_output,
+        || Ok(false),
     )
 }
 
@@ -124,6 +126,7 @@ where
         BUILD_COORDINATOR_BUILD_KIND,
         build,
         verify,
+        || Ok(false),
     )
 }
 
@@ -145,23 +148,54 @@ where
         BUILD_COORDINATOR_PREVIEW_KIND,
         build,
         verify,
+        || Ok(false),
     )
 }
 
-fn coordinate_build_with_verifier_kind<F, V>(
+/// Coordinates a preview attempt while allowing a waiting caller to release
+/// its subscriber when the caller no longer needs the result. The leader is
+/// not cancelled by a follower releasing its subscription.
+pub fn coordinate_preview_build_with_verifier_and_cancel<F, V, C>(
+    layout: &BuildOutputLayout,
+    key_hash: &str,
+    build: F,
+    verify: V,
+    cancel: C,
+) -> Result<BuildCoordinatorOutcome>
+where
+    F: FnOnce() -> Result<()>,
+    V: Fn(&BuildOutputLayout, &str) -> Result<()>,
+    C: Fn() -> Result<bool>,
+{
+    coordinate_build_with_verifier_kind(
+        layout,
+        key_hash,
+        BUILD_COORDINATOR_PREVIEW_KIND,
+        build,
+        verify,
+        cancel,
+    )
+}
+
+fn coordinate_build_with_verifier_kind<F, V, C>(
     layout: &BuildOutputLayout,
     key_hash: &str,
     kind: &str,
     build: F,
     verify: V,
+    cancel: C,
 ) -> Result<BuildCoordinatorOutcome>
 where
     F: FnOnce() -> Result<()>,
     V: Fn(&BuildOutputLayout, &str) -> Result<()>,
+    C: Fn() -> Result<bool>,
 {
     let mut build = Some(build);
 
     loop {
+        if cancel()? {
+            bail!(BUILD_COORDINATOR_CANCELLED_ERROR);
+        }
         if let Some(record) = read_record(layout, kind)?
             && record.platform == layout.platform
             && record.kind == kind
@@ -169,7 +203,7 @@ where
         {
             match record.state {
                 BuildCoordinatorState::Building => {
-                    match wait_for_attempt(layout, key_hash, kind, &record, &verify)? {
+                    match wait_for_attempt(layout, key_hash, kind, &record, &verify, &cancel)? {
                         WaitOutcome::Completed(outcome) => return Ok(outcome),
                         WaitOutcome::Abandoned => continue,
                     }
@@ -280,10 +314,15 @@ fn wait_for_attempt(
     kind: &str,
     expected: &BuildCoordinatorRecord,
     verify: &impl Fn(&BuildOutputLayout, &str) -> Result<()>,
+    cancel: &impl Fn() -> Result<bool>,
 ) -> Result<WaitOutcome> {
     let subscription = subscribe(layout, &expected.attempt_id)?;
 
     loop {
+        if cancel()? {
+            drop(subscription);
+            bail!(BUILD_COORDINATOR_CANCELLED_ERROR);
+        }
         match read_record(layout, kind)? {
             Some(record)
                 if record.platform == layout.platform
@@ -713,6 +752,85 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_preview_follower_releases_subscriber_without_stopping_leader() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let (leader_started_tx, leader_started_rx) = std::sync::mpsc::channel();
+        let (allow_leader_tx, allow_leader_rx) = std::sync::mpsc::channel();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_layout = layout.clone();
+        let first_key_hash = key.key_hash().to_owned();
+        let first = std::thread::spawn(move || {
+            coordinate_preview_build_with_verifier(
+                &first_layout,
+                &first_key_hash,
+                || {
+                    leader_started_tx.send(()).unwrap();
+                    allow_leader_rx.recv().unwrap();
+                    publish_fake_artifact(&first_layout);
+                    Ok(())
+                },
+                verify_completed_output,
+            )
+            .unwrap()
+        });
+
+        leader_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let attempt_id = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+            .unwrap()
+            .unwrap()
+            .attempt_id;
+        let second_layout = layout.clone();
+        let second_key_hash = key.key_hash().to_owned();
+        let second_cancelled = cancelled.clone();
+        let second = std::thread::spawn(move || {
+            coordinate_preview_build_with_verifier_and_cancel(
+                &second_layout,
+                &second_key_hash,
+                || panic!("cancelled follower must not execute the build closure"),
+                verify_completed_output,
+                || Ok(second_cancelled.load(Ordering::SeqCst)),
+            )
+            .unwrap_err()
+            .to_string()
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let subscribers_dir = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
+        loop {
+            let subscribed = match fs::read_dir(&subscribers_dir) {
+                Ok(entries) => entries
+                    .filter_map(std::result::Result::ok)
+                    .any(|entry| entry.path().is_file()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => panic!("cannot inspect coordinator subscribers: {error}"),
+            };
+            if subscribed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled follower did not subscribe to the preview attempt"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        cancelled.store(true, Ordering::SeqCst);
+        assert!(
+            second
+                .join()
+                .unwrap()
+                .contains(BUILD_COORDINATOR_CANCELLED_ERROR)
+        );
+        assert!(!has_live_subscriber(&layout, &attempt_id).unwrap());
+
+        allow_leader_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap().role, BuildCoordinatorRole::Leader);
+    }
+
+    #[test]
     fn preview_attempt_does_not_join_an_ordinary_build_attempt() {
         let base = tempfile::tempdir().unwrap();
         let layout = layout(base.path());
@@ -810,19 +928,13 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .unwrap();
 
-        let attempt_id = read_record(&layout, BUILD_COORDINATOR_BUILD_KIND)
-            .unwrap()
-            .unwrap()
-            .attempt_id;
         let subscribers_dir = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let subscribed = match fs::read_dir(&subscribers_dir) {
                 Ok(entries) => entries
                     .filter_map(std::result::Result::ok)
-                    .filter_map(|entry| fs::read(entry.path()).ok())
-                    .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .any(|value| value["attempt_id"].as_str() == Some(&attempt_id)),
+                    .any(|entry| entry.path().is_file()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => panic!("cannot inspect coordinator subscribers: {error}"),
             };
