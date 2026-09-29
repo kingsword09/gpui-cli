@@ -30,7 +30,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、普通 build/run 与 desktop/iOS simulator/Android default-debug preview 的 BuildKey coordinator、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening | 语义激活、真实环境适配、完整 last-reference/terminal-state policy、heartbeat/fencing、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、普通 build/run 与 desktop/iOS simulator/Android default-debug preview 的 BuildKey coordinator、reference-aware caller-cancel coordinator API、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening | 真实 preview/check caller-cancel 接线与 owned process termination、独立 cancelled/partial terminal state、语义激活、真实环境适配、heartbeat/fencing、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture | 完整三端同快照矩阵、可靠日志归属、设备重连、repro 和 L2/L3 CI |
 | G4 | 普通构建缓存复用、desktop/iOS simulator/Android default-debug live preview verified cache hit 和显式清理 | 缓存输入遗漏、iOS physical/Android custom or signing-sensitive preview cache hit、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
@@ -63,6 +63,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `e6aeb62`（#189） | subscriber 文件名绑定 attempt identity；active count 以 OS lock probe 判定，不读取 locked JSON；failed attempt sharing 按 attempt 隔离 | active count 仍不是完整 last-reference cancellation/state machine；无 heartbeat/fencing |
 | `f4e10c2`（#190） | 记录 subscriber identity/count 状态与验证边界 | 状态文档，不增加运行时行为 |
 | `16cf04b`（#191） | preview coordinator 在 leader revision superseded 时终止 owned process tree 并发布 retryable terminal marker；follower 释放旧引用后重新竞争；state lock 串行化注册、计数、record 与 cache-clean subscriber 检查；follower 单独取消不停止 leader | 仍无 `cancelled`/`partial` 状态或完整 last-reference policy；current leader 即使没有 follower 仍可完成自己的构建；无 heartbeat/fencing |
+| `4b1a309`（#193） | coordinator 新增 caller-cancel reason；leader 在同一 state lock 内释放自身引用并统计剩余 subscribers，有 follower 时保留 terminal result，无 follower 时发布 retryable cancellation marker 并允许下一 leader；superseded reason 保持原有重建语义 | live preview/check 尚未接入 caller-cancel API；无自动 cooperative process termination、独立 `cancelled`/`partial` state 或 heartbeat/fencing |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
