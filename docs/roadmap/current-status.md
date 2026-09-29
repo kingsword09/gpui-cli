@@ -30,7 +30,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、普通 build/run 的跨进程 BuildKey coordinator、cleanup/fixture identity hardening | 语义激活、真实环境适配、preview 入口接入 coordinator、调用者取消引用/终止策略、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、普通 build/run 与 desktop/iOS simulator/Android default-debug preview 的 BuildKey coordinator、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening | 语义激活、真实环境适配、完整 last-reference/terminal-state policy、heartbeat/fencing、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture | 完整三端同快照矩阵、可靠日志归属、设备重连、repro 和 L2/L3 CI |
 | G4 | 普通构建缓存复用、desktop/iOS simulator/Android default-debug live preview verified cache hit 和显式清理 | 缓存输入遗漏、iOS physical/Android custom or signing-sensitive preview cache hit、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
@@ -60,6 +60,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `0c2771e`（#173） | Android live preview 将 cache policy、ABI 和 default debug keystore hash 传入 preview；在 output root 校验 JNI staging 与 debug APK 输出的完整 manifest，命中时跳过 rustup/cargo-ndk/Gradle | release/custom/sensitive signing、keystore 变化、工具链身份不可读或隐藏输入会 bypass；不覆盖跨命令构建所有权、在途任务 coalescing 或完整设备验收 |
 | `14339b5`（#175） | `BuildOutputLock` 在取得 OS 锁后原子写入 `.build-owner.json`，记录 schema、owner、PID、开始时间、状态和可选 BuildKey；释放时仅删除 owner_id 匹配的记录，stale 记录由下一个持锁者覆盖，cache size 统计排除该元数据 | 这是跨进程 ownership 证据，不是 coordinator、心跳/fencing 状态机、subscriber/取消引用或同 key 在途任务合并；OS 锁仍是活跃性唯一权威 |
 | `5f6859d`（#177） | 普通 desktop/iOS/Android build/run 的可复用 BuildKey 通过持久 coordinator record 选举单一 leader；同 key follower 持有订阅文件 OS 锁、等待终态并复核完整 artifact manifest，失败可共享、leader 消失可接管，cache clean 避开活跃 subscriber | 尚未接入 live preview/check 构建；无调用者取消引用计数、无订阅者归零后的终止策略、无 heartbeat/fencing/partial 状态机；含未建模输入的路径仍不共享 |
+| `e6aeb62`（#189） | subscriber 文件名绑定 attempt identity；active count 以 OS lock probe 判定，不读取 locked JSON；failed attempt sharing 按 attempt 隔离 | active count 仍不是完整 last-reference cancellation/state machine；无 heartbeat/fencing |
+| `f4e10c2`（#190） | 记录 subscriber identity/count 状态与验证边界 | 状态文档，不增加运行时行为 |
+| `16cf04b`（#191） | preview coordinator 在 leader revision superseded 时终止 owned process tree 并发布 retryable terminal marker；follower 释放旧引用后重新竞争；state lock 串行化注册、计数、record 与 cache-clean subscriber 检查；follower 单独取消不停止 leader | 仍无 `cancelled`/`partial` 状态或完整 last-reference policy；current leader 即使没有 follower 仍可完成自己的构建；无 heartbeat/fencing |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
