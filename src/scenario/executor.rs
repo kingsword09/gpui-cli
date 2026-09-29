@@ -402,6 +402,13 @@ pub trait ScenarioRunner {
     fn context(&self) -> Option<CheckContext> {
         None
     }
+
+    /// Returns the fixture identity observed by the runtime after prepare or
+    /// reset. Runners that cannot observe a runtime fixture keep the caller's
+    /// validated launch hash.
+    fn fixture_hash(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Execute a scenario through an injected runner and always attempt cleanup.
@@ -416,6 +423,7 @@ pub fn execute<R: ScenarioRunner>(
             let mut report = empty_report(scenario, fixture_hash, CheckStatus::Failed);
             report.primary_error = Some(error);
             report.context = runner.context();
+            refresh_fixture_hash(&mut report, runner);
             report.cleanup = cleanup_report(runner.cleanup());
             return report;
         }
@@ -427,6 +435,7 @@ pub fn execute<R: ScenarioRunner>(
         Err(error) => {
             set_driver_failure(&mut report, &error);
             report.context = runner.context();
+            refresh_fixture_hash(&mut report, runner);
             report.cleanup = cleanup_report(runner.cleanup());
             return report;
         }
@@ -463,12 +472,19 @@ pub fn execute<R: ScenarioRunner>(
     }
 
     report.context = runner.context();
+    refresh_fixture_hash(&mut report, runner);
     report.cleanup = cleanup_report(runner.cleanup());
     if !report.cleanup.succeeded && report.status == CheckStatus::Passed {
         report.status = CheckStatus::Failed;
         report.primary_error = report.cleanup.error.clone();
     }
     report
+}
+
+fn refresh_fixture_hash<R: ScenarioRunner>(report: &mut CheckReport, runner: &R) {
+    if let Some(fixture_hash) = runner.fixture_hash() {
+        report.fixture_hash = Some(fixture_hash);
+    }
 }
 
 fn empty_report(
@@ -1040,6 +1056,7 @@ mod tests {
         captures: VecDeque<Result<CaptureEvidence, DriverError>>,
         cleanup: Option<Result<(), DriverError>>,
         context: Option<CheckContext>,
+        runtime_fixture_hash: Option<String>,
         action_calls: usize,
         screenshot_resolutions: usize,
     }
@@ -1128,6 +1145,10 @@ mod tests {
 
         fn context(&self) -> Option<CheckContext> {
             self.context.clone()
+        }
+
+        fn fixture_hash(&self) -> Option<String> {
+            self.runtime_fixture_hash.clone()
         }
     }
 
@@ -1257,6 +1278,25 @@ mod tests {
             "cleanup_failed"
         );
         assert_eq!(report.steps[0].status, StepStatus::Passed);
+    }
+
+    #[test]
+    fn execute_reports_runtime_fixture_hash_over_the_launch_hash() {
+        let mut runner = FakeRunner {
+            prepared: Some(Ok(observation(
+                "o-1",
+                vec![node("counter.value", json!(0))],
+            ))),
+            runtime_fixture_hash: Some("sha256:updated".into()),
+            ..FakeRunner::default()
+        };
+        let report = execute(
+            &mut runner,
+            &scenario(vec![assert_step("initial", "value_equals", Some(json!(0)))]),
+            Some("sha256:initial".into()),
+        );
+
+        assert_eq!(report.fixture_hash.as_deref(), Some("sha256:updated"));
     }
 
     #[test]
