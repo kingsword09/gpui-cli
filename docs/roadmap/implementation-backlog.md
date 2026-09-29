@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-09-29，主分支 `5e5031a`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-09-29，主分支 `7283614`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -418,7 +418,9 @@ iOS key 另纳入当前 Xcode build 与目标 SDK version/build 指纹；身份�
 cache hit，记录见
 [M04 iOS Xcode/SDK fingerprint](../experiments/M04-ios-xcode-sdk-fingerprint-2026-09-28.md)。
 live preview builder 已接入 source-project target-specific output root，并在该 root 上取得跨进程
-`BuildOutputLock`；这只串行进入该锁路径的输出变更，不等于构建已完成或可复用。snapshot build
+`BuildOutputLock`；#169 又让 desktop preview 通过独立 verified artifact manifest 在验证成功时
+跳过 Cargo；这只覆盖 desktop preview，不等于 iOS/Android 命中、跨命令 ownership 或 coalescing。
+这只串行进入该锁路径的输出变更，不等于构建已完成或可复用。snapshot build
 orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
 尚未接入。非 live 命令也已接入各自的临时 `FrozenInputs` 工作根；desktop 的切片见
 [M04 desktop frozen build root](../experiments/M04-desktop-frozen-build-root-2026-09-27.md)，
@@ -466,6 +468,12 @@ Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次
 `gpui cache clean --max-bytes` 已提供按 BuildKey 大小预算的显式清理，
 活动锁和不安全目录会跳过，记录见
 [T06 cache cleanup](../experiments/T06-cache-cleanup-2026-09-28.md)。
+
+PR #169 又让 desktop preview 在受控 BuildKey output root 下写入独立 preview artifact
+manifest；下一次 preview 只有在 platform、key hash、文件集合、内容 hash 和唯一可执行文件
+均验证通过时才跳过 Cargo，否则回退正常构建。该切片不覆盖 iOS/Android preview 命中、跨命令
+构建所有权或在途任务 coalescing，记录见
+[T06 desktop preview cache hit](../experiments/T06-desktop-preview-cache-hit-2026-09-29.md)。
 
 ### S04 · 断言和 gpui check 执行器
 
