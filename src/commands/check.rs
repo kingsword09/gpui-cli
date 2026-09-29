@@ -11,13 +11,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::run::Project;
+use super::run::{Project, bundle_id_of, bundle_id_of_android};
 use crate::device;
 use crate::devserver::actions::Action;
 use crate::devserver::control::{self, Command as ControlCommand, Registration};
 use crate::devserver::events::{Event, Kind, Page};
+use crate::runner::android::AndroidRunner;
+use crate::runner::ios::IosSimulatorRunner;
+use crate::runner::lease::DeviceLeaseSession;
 use crate::runner::matrix::{
     MatrixCellError, MatrixCellSpec, MatrixCellState, MatrixReport, MatrixStatus,
 };
@@ -29,6 +32,7 @@ use crate::runner::matrix_executor::{
     MatrixCellExecution, MatrixCellRunner, execute_admitted_matrix_parallel,
 };
 use crate::runner::matrix_resources::MatrixResourcePool;
+use crate::runner::mobile::{CaptureArtifact, CaptureScope, MobileRunner, RunIdentity, RunRequest};
 use crate::scenario::baseline::{
     BaselineComparison, BaselineKey, BaselineLoad, DiffPng, MAX_IMAGE_BYTES, compare_png, diff_png,
     load_baseline,
@@ -148,6 +152,16 @@ fn handle_matrix_check(
             Ok((target.id.clone(), platform))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    let target_devices = matrix
+        .targets
+        .iter()
+        .map(|target| (target.id.clone(), target.device.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let target_abis = matrix
+        .targets
+        .iter()
+        .map(|target| (target.id.clone(), target.abi.clone()))
+        .collect::<BTreeMap<_, _>>();
     let scenario_by_id = scenarios
         .scenarios
         .iter()
@@ -175,29 +189,18 @@ fn handle_matrix_check(
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("matrix scenario '{}' disappeared", cell.scenario_id))?;
         let fixture_hash = fixture_hashes.get(&cell.scenario_id).cloned();
-        if matches!(
-            platform,
-            MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux
-        ) {
-            Ok(MatrixCheckRunner::Desktop(Box::new(
-                DesktopMatrixCheckRunner {
-                    project_root: project_root.clone(),
-                    scenario_file: scenario_path.clone(),
-                    scenario,
-                    fixture_hash,
-                    target: platform.label().into(),
-                    inner: None,
-                },
-            )))
-        } else {
-            Ok(MatrixCheckRunner::Unavailable {
-                code: "scenario_driver_unavailable".into(),
-                message: format!(
-                    "matrix scenario driver for '{}' is not connected to the mobile runtime yet",
-                    platform.label()
-                ),
-            })
-        }
+        Ok(MatrixCheckRunner::Control(Box::new(
+            ControlMatrixCheckRunner {
+                project_root: project_root.clone(),
+                scenario_file: scenario_path.clone(),
+                scenario,
+                fixture_hash,
+                target: platform.label().into(),
+                device: target_devices.get(&cell.target_id).cloned().flatten(),
+                platform,
+                abi: target_abis.get(&cell.target_id).cloned().flatten(),
+            },
+        )))
     };
     let report = execute_admitted_matrix_parallel(
         &admission,
@@ -283,40 +286,199 @@ fn print_matrix_report(report: &MatrixReport, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-enum MatrixCheckRunner {
-    Desktop(Box<DesktopMatrixCheckRunner>),
-    Unavailable { code: String, message: String },
+struct MobileCapture {
+    runner: Box<dyn MobileRunner + Send>,
+    lease: Option<DeviceLeaseSession>,
+    identity: RunIdentity,
+    artifact_root: PathBuf,
 }
 
-struct DesktopMatrixCheckRunner {
+impl MobileCapture {
+    fn new(
+        platform: MatrixPlatform,
+        device_id: &str,
+        abi: Option<&str>,
+        project_root: &Path,
+        cell_id: &str,
+    ) -> Result<Self> {
+        let lease = DeviceLeaseSession::acquire(project_root, device_id)
+            .context("acquiring mobile matrix scenario lease")?;
+        let bundle_id = match platform {
+            MatrixPlatform::Ios => bundle_id_of(&Project::load(Some(project_root.to_path_buf()))?),
+            MatrixPlatform::Android => {
+                bundle_id_of_android(&Project::load(Some(project_root.to_path_buf()))?)
+            }
+            _ => bail!("mobile capture requires an iOS or Android platform"),
+        };
+        let artifact_root = project_root
+            .join(".gpui")
+            .join("matrix-runs")
+            .join(safe_matrix_component(cell_id));
+        let run_id = format!("matrix-{}-{}", safe_matrix_component(cell_id), epoch_ms());
+        let request = RunRequest {
+            run_id,
+            project_id: project_root.to_string_lossy().into_owned(),
+            device_id: device_id.to_owned(),
+            bundle_id: bundle_id.clone(),
+            artifact_root: artifact_root.clone(),
+            abi: abi.map(str::to_owned),
+        };
+        let identity = request.prepare(&lease)?.identity;
+        let runner: Box<dyn MobileRunner + Send> = match platform {
+            MatrixPlatform::Ios => Box::new(IosSimulatorRunner::new(
+                device_id,
+                project_root.join(".gpui/matrix-placeholder.app"),
+                bundle_id.clone(),
+                artifact_root.clone(),
+            )),
+            MatrixPlatform::Android => Box::new(AndroidRunner::new(
+                device_id,
+                project_root.join(".gpui/matrix-placeholder.apk"),
+                bundle_id.clone(),
+                artifact_root.clone(),
+            )),
+            _ => unreachable!("validated mobile platform"),
+        };
+        Ok(Self {
+            runner,
+            lease: Some(lease),
+            identity,
+            artifact_root,
+        })
+    }
+
+    fn capture(&mut self, observation_id: &str, deadline: Instant) -> Result<ScreenshotEvidence> {
+        if Instant::now() >= deadline {
+            bail!("mobile screenshot deadline exceeded");
+        }
+        let output = self
+            .artifact_root
+            .join("captures")
+            .join(format!("{}.png", safe_matrix_component(observation_id)));
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let scope = CaptureScope {
+            identity: self.identity.clone(),
+            output,
+            attempt: 1,
+            orientation: None,
+            foreground_app: None,
+        };
+        let lease = self
+            .lease
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("mobile capture lease has been released"))?;
+        let artifact = self.runner.capture(&scope, lease)?;
+        Ok(screenshot_from_mobile_artifact(&artifact))
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        let stop_result = if let Some(lease) = self.lease.as_ref() {
+            self.runner
+                .stop_owned(&self.identity, lease)
+                .map(|_| ())
+                .map_err(|error| anyhow::anyhow!("{error:#}"))
+        } else {
+            Ok(())
+        };
+        let release_result = self
+            .lease
+            .take()
+            .map(|lease| lease.release().map_err(|error| anyhow::anyhow!("{error}")));
+        stop_result?;
+        if let Some(result) = release_result {
+            result?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MobileCapture {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+fn screenshot_from_mobile_artifact(artifact: &CaptureArtifact) -> ScreenshotEvidence {
+    ScreenshotEvidence {
+        artifact_id: Some(artifact.artifact_id.clone()),
+        baseline_id: None,
+        baseline_key: None,
+        diff: None,
+        scope: Some("device".into()),
+        provider: Some(artifact.provider.clone()),
+        pixel_width: Some(artifact.width),
+        pixel_height: Some(artifact.height),
+        logical_width: None,
+        logical_height: None,
+        scale_milli: None,
+        comparable: false,
+        matches: None,
+        reason: None,
+    }
+}
+
+fn safe_matrix_component(value: &str) -> String {
+    let mut result = value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+                byte as char
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if result.is_empty() {
+        result.push('_');
+    }
+    result.truncate(128);
+    result
+}
+
+fn epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+enum MatrixCheckRunner {
+    Control(Box<ControlMatrixCheckRunner>),
+}
+
+struct ControlMatrixCheckRunner {
     project_root: PathBuf,
     scenario_file: PathBuf,
     scenario: ScenarioDefinition,
     fixture_hash: Option<String>,
     target: String,
-    inner: Option<DesktopCheckRunner>,
+    device: Option<String>,
+    platform: MatrixPlatform,
+    abi: Option<String>,
 }
 
 impl MatrixCellRunner for MatrixCheckRunner {
     fn run_cell(
         &mut self,
-        _cell: &MatrixCellSpec,
+        cell: &MatrixCellSpec,
         deadline: Instant,
     ) -> Result<MatrixCellExecution> {
         match self {
-            Self::Unavailable { code, message } => Ok(MatrixCellExecution::unavailable(
-                code.clone(),
-                message.clone(),
-            )),
-            Self::Desktop(desktop) => {
-                let DesktopMatrixCheckRunner {
+            Self::Control(control) => {
+                let ControlMatrixCheckRunner {
                     project_root,
                     scenario_file,
                     scenario,
                     fixture_hash,
                     target,
-                    inner,
-                } = desktop.as_mut();
+                    device,
+                    platform,
+                    abi,
+                } = control.as_mut();
                 if Instant::now() >= deadline {
                     bail!("matrix desktop cell deadline exceeded before launch");
                 }
@@ -328,14 +490,33 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     .unwrap_or(u64::MAX)
                     .max(1);
                 bounded_scenario.timeout_ms = bounded_scenario.timeout_ms.min(remaining_ms);
+                let mut mobile_capture =
+                    if matches!(*platform, MatrixPlatform::Ios | MatrixPlatform::Android) {
+                        Some(MobileCapture::new(
+                            *platform,
+                            device.as_deref().ok_or_else(|| {
+                                anyhow::anyhow!("mobile matrix cell has no selected device")
+                            })?,
+                            abi.as_deref(),
+                            project_root,
+                            &cell.cell_id,
+                        )?)
+                    } else {
+                        None
+                    };
                 let mut runner = DesktopCheckRunner::launch_until(
                     project_root,
                     scenario_file,
                     &bounded_scenario,
                     fixture_hash.clone(),
                     target,
-                    deadline,
+                    CheckLaunchOptions {
+                        device: device.as_deref(),
+                        preleased: mobile_capture.is_some(),
+                        deadline,
+                    },
                 )?;
+                runner.mobile_capture = mobile_capture.take();
                 let report = crate::scenario::executor::execute(
                     &mut runner,
                     &bounded_scenario,
@@ -362,7 +543,6 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     .filter_map(|step| step.capture.as_ref())
                     .filter_map(|capture| capture.artifact_id.clone())
                     .collect();
-                *inner = None;
                 Ok(MatrixCellExecution {
                     status,
                     error,
@@ -373,14 +553,6 @@ impl MatrixCellRunner for MatrixCheckRunner {
     }
 
     fn cleanup_cell(&mut self, _cell: &MatrixCellSpec, _deadline: Instant) -> Result<()> {
-        if let Self::Desktop(desktop) = self
-            && let Some(runner) = desktop.inner.as_mut()
-        {
-            ScenarioRunner::cleanup(runner).map_err(|error| {
-                anyhow::anyhow!("desktop matrix cleanup failed: {}", error.message)
-            })?;
-            desktop.inner = None;
-        }
         Ok(())
     }
 }
@@ -453,6 +625,13 @@ struct DesktopCheckRunner {
     ready_environment: Value,
     default_requirements: Vec<String>,
     issue_floor: u64,
+    mobile_capture: Option<MobileCapture>,
+}
+
+struct CheckLaunchOptions<'a> {
+    device: Option<&'a str>,
+    preleased: bool,
+    deadline: Instant,
 }
 
 impl DesktopCheckRunner {
@@ -469,7 +648,11 @@ impl DesktopCheckRunner {
             scenario,
             fixture_hash,
             target,
-            Instant::now() + PREVIEW_START_TIMEOUT,
+            CheckLaunchOptions {
+                device: None,
+                preleased: false,
+                deadline: Instant::now() + PREVIEW_START_TIMEOUT,
+            },
         )
     }
 
@@ -479,25 +662,35 @@ impl DesktopCheckRunner {
         scenario: &ScenarioDefinition,
         fixture_hash: Option<String>,
         target: &str,
-        deadline: Instant,
+        options: CheckLaunchOptions<'_>,
     ) -> Result<Self> {
+        let CheckLaunchOptions {
+            device,
+            preleased,
+            deadline,
+        } = options;
         let executable = std::env::current_exe().context("locating the gpui executable")?;
         let scenario_file = scenario_file
             .strip_prefix(project_root)
             .unwrap_or(scenario_file);
         let mut child = Command::new(executable);
+        child.current_dir(project_root).args([
+            "preview",
+            &scenario.component,
+            "--scenario",
+            &scenario.id,
+            "--file",
+            &scenario_file.to_string_lossy(),
+            "--target",
+            target,
+        ]);
+        if let Some(device) = device {
+            child.args(["--device", device]);
+        }
+        if preleased {
+            child.env("GPUI_PREVIEW_PRELEASED", "1");
+        }
         child
-            .current_dir(project_root)
-            .args([
-                "preview",
-                &scenario.component,
-                "--scenario",
-                &scenario.id,
-                "--file",
-                &scenario_file.to_string_lossy(),
-                "--target",
-                "desktop",
-            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
@@ -528,8 +721,13 @@ impl DesktopCheckRunner {
             ready_environment: Value::Object(serde_json::Map::new()),
             default_requirements: observation_requirements(&scenario.requires),
             issue_floor: 0,
+            mobile_capture: None,
         };
-        runner.wait_for_ready(deadline)?;
+        if let Err(error) = runner.wait_for_ready(deadline) {
+            let _ = runner.child.kill();
+            let _ = runner.child.wait();
+            return Err(error);
+        }
         Ok(runner)
     }
 
@@ -683,13 +881,31 @@ impl DesktopCheckRunner {
         requirements: Vec<String>,
         deadline: Instant,
     ) -> Result<Observation, DriverError> {
+        let control_requirements = if self.mobile_capture.is_some() {
+            let mut filtered = requirements
+                .iter()
+                .filter(|requirement| {
+                    !matches!(
+                        requirement.as_str(),
+                        "screenshot" | "capture.scene" | "capture.window" | "capture.device"
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if filtered.is_empty() {
+                filtered.push("semantics".into());
+            }
+            filtered
+        } else {
+            requirements.clone()
+        };
         let reply = control::request(
             &self.registration,
             &control::next_request_id("check.observe"),
             ControlCommand::Observe {
                 sync: false,
                 window_id: None,
-                require: requirements.clone(),
+                require: control_requirements,
                 deadline_ms: remaining_ms(deadline),
             },
         )
@@ -703,13 +919,14 @@ impl DesktopCheckRunner {
             .ok_or_else(|| DriverError::failed("invalid_observe", "observe has no operation_id"))?;
         let operation = self.wait_operation(operation_id, deadline)?;
         let result = operation["result"].clone();
-        self.observation_from_result(result, &requirements)
+        self.observation_from_result(result, &requirements, deadline)
     }
 
     fn observation_from_result(
-        &self,
+        &mut self,
         result: Value,
         requirements: &[String],
+        deadline: Instant,
     ) -> Result<Observation, DriverError> {
         let observation_id = result["observation_id"]
             .as_str()
@@ -744,7 +961,24 @@ impl DesktopCheckRunner {
         } else {
             (None, None)
         };
-        let screenshot = screenshot_evidence(&result);
+        let mut screenshot = screenshot_evidence(&result);
+        if let Some(mobile_capture) = self.mobile_capture.as_mut()
+            && requirements.iter().any(|requirement| {
+                matches!(
+                    requirement.as_str(),
+                    "screenshot" | "capture.scene" | "capture.device"
+                )
+            })
+        {
+            screenshot = Some(mobile_capture.capture(&observation_id, deadline).map_err(
+                |error| {
+                    DriverError::unavailable(
+                        "mobile_capture_unavailable",
+                        format!("mobile capture failed: {error:#}"),
+                    )
+                },
+            )?);
+        }
         Ok(Observation {
             observation_id,
             window_id: result["window_id"].as_str().map(str::to_owned),
@@ -1311,12 +1545,24 @@ impl ScenarioRunner for DesktopCheckRunner {
     }
 
     fn cleanup(&mut self) -> Result<(), DriverError> {
-        self.child
+        let child_result = self
+            .child
             .kill()
-            .map_err(|error| DriverError::failed("cleanup_failed", error.to_string()))?;
-        self.child
-            .wait()
-            .map_err(|error| DriverError::failed("cleanup_failed", error.to_string()))?;
+            .map_err(|error| DriverError::failed("cleanup_failed", error.to_string()))
+            .and_then(|_| {
+                self.child
+                    .wait()
+                    .map_err(|error| DriverError::failed("cleanup_failed", error.to_string()))
+            });
+        if let Some(mobile_capture) = self.mobile_capture.as_mut()
+            && let Err(error) = mobile_capture.cleanup()
+        {
+            return Err(DriverError::failed(
+                "mobile_cleanup_failed",
+                error.to_string(),
+            ));
+        }
+        child_result?;
         Ok(())
     }
 }
@@ -1325,6 +1571,9 @@ impl Drop for DesktopCheckRunner {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(mobile_capture) = self.mobile_capture.as_mut() {
+            let _ = mobile_capture.cleanup();
+        }
     }
 }
 
