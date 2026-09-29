@@ -778,36 +778,68 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let layout = layout(base.path());
         let key = key();
+        let (build_started_tx, build_started_rx) = std::sync::mpsc::channel();
+        let (allow_failure_tx, allow_failure_rx) = std::sync::mpsc::channel();
         let first_layout = layout.clone();
         let first_key = key.clone();
         let first = std::thread::spawn(move || {
             coordinate_build(&first_layout, &first_key, || {
-                std::thread::sleep(Duration::from_millis(100));
+                build_started_tx.send(()).unwrap();
+                allow_failure_rx.recv().unwrap();
                 bail!("compiler failed")
             })
             .unwrap_err()
             .to_string()
         });
 
-        let state_path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
-        for _ in 0..100 {
-            if state_path.is_file() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        build_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
         let second_layout = layout.clone();
         let second_key = key.clone();
+        let (follower_started_tx, follower_started_rx) = std::sync::mpsc::channel();
         let second = std::thread::spawn(move || {
+            follower_started_tx.send(()).unwrap();
             coordinate_build(&second_layout, &second_key, || {
                 panic!("follower must not execute the failed build closure");
             })
             .unwrap_err()
             .to_string()
         });
+        follower_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        let attempt_id = read_record(&layout, BUILD_COORDINATOR_BUILD_KIND)
+            .unwrap()
+            .unwrap()
+            .attempt_id;
+        let subscribers_dir = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let subscribed = match fs::read_dir(&subscribers_dir) {
+                Ok(entries) => entries
+                    .filter_map(std::result::Result::ok)
+                    .filter_map(|entry| fs::read(entry.path()).ok())
+                    .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .any(|value| value["attempt_id"].as_str() == Some(&attempt_id)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => panic!("cannot inspect coordinator subscribers: {error}"),
+            };
+            if subscribed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "follower did not subscribe to the active build attempt"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        allow_failure_tx.send(()).unwrap();
 
         assert!(first.join().unwrap().contains("compiler failed"));
         assert!(second.join().unwrap().contains("compiler failed"));
+        let state_path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
         let state: BuildCoordinatorRecord =
             serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
         assert_eq!(state.state, BuildCoordinatorState::Failed);
