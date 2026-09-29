@@ -420,8 +420,9 @@ cache hit，记录见
 live preview builder 已接入 source-project target-specific output root，并在该 root 上取得跨进程
 `BuildOutputLock`；#169 又让 desktop preview 通过独立 verified artifact manifest 在验证成功时
 跳过 Cargo；#171 又让 iOS simulator live preview 在同一语义下验证完整 `.app` bundle 并跳过
-rustup/Cargo/XcodeGen/`xcodebuild`；这仍不等于 iOS physical/Android 命中、跨命令 ownership
-或 coalescing。
+rustup/Cargo/XcodeGen/`xcodebuild`；#173 又让 Android default-debug live preview 在同一语义下
+验证 JNI/APK 输出并跳过 rustup/cargo-ndk/Gradle；这仍不等于 iOS physical、Android custom/
+release/signing-sensitive 命中、跨命令 ownership 或 coalescing。
 这只串行进入该锁路径的输出变更，不等于构建已完成或可复用。snapshot build
 orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
 尚未接入。非 live 命令也已接入各自的临时 `FrozenInputs` 工作根；desktop 的切片见
@@ -483,6 +484,13 @@ PR #171 将相同的 verified-manifest 语义接入 iOS simulator live preview�
 路径仍每次重建，因为本机签名 identity、Provisioning Profile 等输入尚未纳入 BuildKey；该切片
 也不覆盖 Android preview、跨命令构建所有权或在途任务 coalescing，记录见
 [T06 iOS preview cache hit](../experiments/T06-ios-preview-cache-hit-2026-09-29.md)。
+
+PR #173 将 verified-manifest 语义接入 Android default-debug live preview：matrix 将 ABI、
+cache policy 和 default `~/.android/debug.keystore` 内容 hash 传入 preview；只有 policy 允许、
+keystore 未变化、Android platform/BuildKey/ABI 匹配，且 JNI staging 与 Gradle debug APK 输出
+目录的全部文件通过 hash/size 校验时才跳过 rustup/cargo-ndk/Gradle。release、custom 或敏感
+signing、工具链身份不可读和 keystore 变化均不命中；记录见
+[T06 Android preview cache hit](../experiments/T06-android-preview-cache-hit-2026-09-29.md)。
 
 ### S04 · 断言和 gpui check 执行器
 
