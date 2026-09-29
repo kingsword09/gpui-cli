@@ -237,6 +237,10 @@ where
         let attempt_id = unique_id("attempt");
         let owner_id = unique_id("coordinator");
         let started_at_ms = timestamp_ms();
+        // The leader is also a live subscriber. Keeping this OS-locked file
+        // until the terminal state is published prevents a concurrent caller
+        // from treating a still-returning failed leader as abandoned.
+        let _leader_subscription = subscribe(layout, &attempt_id)?;
         write_record(
             layout,
             &BuildCoordinatorRecord {
@@ -752,6 +756,33 @@ mod tests {
     }
 
     #[test]
+    fn leader_holds_a_subscriber_reference_until_terminal_state() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_layout = layout.clone();
+        let first_key = key.clone();
+        let leader = std::thread::spawn(move || {
+            coordinate_build(&first_layout, &first_key, || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                publish_fake_artifact(&first_layout);
+                Ok(())
+            })
+            .unwrap()
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let subscribers = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
+        assert_eq!(fs::read_dir(&subscribers).unwrap().count(), 1);
+        release_tx.send(()).unwrap();
+        assert_eq!(leader.join().unwrap().role, BuildCoordinatorRole::Leader);
+        assert!(fs::read_dir(subscribers).unwrap().next().is_none());
+    }
+
+    #[test]
     fn cancelled_preview_follower_releases_subscriber_without_stopping_leader() {
         let base = tempfile::tempdir().unwrap();
         let layout = layout(base.path());
@@ -779,10 +810,6 @@ mod tests {
         leader_started_rx
             .recv_timeout(Duration::from_secs(5))
             .unwrap();
-        let attempt_id = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
-            .unwrap()
-            .unwrap()
-            .attempt_id;
         let second_layout = layout.clone();
         let second_key_hash = key.key_hash().to_owned();
         let second_cancelled = cancelled.clone();
@@ -824,10 +851,11 @@ mod tests {
                 .unwrap()
                 .contains(BUILD_COORDINATOR_CANCELLED_ERROR)
         );
-        assert!(!has_live_subscriber(&layout, &attempt_id).unwrap());
+        assert_eq!(fs::read_dir(&subscribers_dir).unwrap().count(), 1);
 
         allow_leader_tx.send(()).unwrap();
         assert_eq!(first.join().unwrap().role, BuildCoordinatorRole::Leader);
+        assert!(fs::read_dir(subscribers_dir).unwrap().next().is_none());
     }
 
     #[test]
