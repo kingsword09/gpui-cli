@@ -99,6 +99,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
                 }),
                 artifact_ids: Vec::new(),
                 context: None,
+                check_report: None,
             });
         }
 
@@ -155,6 +156,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             error,
             artifact_ids: vec![capture.artifact_id],
             context: None,
+            check_report: None,
         })
     }
 

@@ -651,6 +651,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     &bounded_scenario,
                     fixture_hash.clone(),
                 );
+                let check_report = report.clone();
                 let status = match report.status {
                     crate::scenario::executor::CheckStatus::Passed => MatrixCellState::Passed,
                     crate::scenario::executor::CheckStatus::Failed => MatrixCellState::Failed,
@@ -677,6 +678,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     error,
                     artifact_ids,
                     context: report.context,
+                    check_report: Some(check_report),
                 })
             }
         }
