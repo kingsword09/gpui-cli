@@ -40,6 +40,8 @@ use serde_json::json;
 /// Source files watch out for asset-only changes under this directory; they
 /// can reload in the running app instead of triggering a rebuild.
 const ASSETS_DIR: &str = "assets";
+const ANDROID_PREVIEW_FIXTURE: &str = "gpui_preview_fixture.json";
+const ANDROID_PREVIEW_DATA_DIR: &str = "gpui_preview_data";
 /// How long the live loop waits for the app to hand over its snapshot.
 const SNAPSHOT_WAIT: Duration = Duration::from_millis(1500);
 /// Snapshots above this size are rejected (the frame cap is 1 MiB).
@@ -209,7 +211,7 @@ impl Channel {
     /// File contents for platforms with no environment to inherit (Android).
     fn device_config(&self) -> String {
         let session = self.session.as_deref().unwrap_or_default();
-        format!(
+        let mut config = format!(
             "project={}\naddr={}\ntoken={}\nsession={session}\nbuild_id={}\nrun_id={}\nsource_revision={}\nasset_revision={}\n",
             self.project,
             self.addr(),
@@ -218,7 +220,28 @@ impl Channel {
             self.scope.run_id.as_deref().unwrap_or_default(),
             self.scope.revision.source_revision,
             self.scope.revision.asset_revision,
-        )
+        );
+        if let Some(preview) = &self.preview {
+            config.push_str(&format!(
+                "preview_scenario_id={}\npreview_component={}\npreview_fixture={}\npreview_fixture_hash={}\npreview_data_dir={}\npreview_theme={}\npreview_locale={}\npreview_clock={}\npreview_uncontrolled_inputs={}\n",
+                preview.scenario_id,
+                preview.component,
+                ANDROID_PREVIEW_FIXTURE,
+                preview.fixture_hash,
+                ANDROID_PREVIEW_DATA_DIR,
+                preview.theme,
+                preview.locale,
+                preview.clock,
+                preview.uncontrolled_inputs.join(","),
+            ));
+            if let Some(clock_at) = &preview.clock_at {
+                config.push_str(&format!("preview_clock_at={clock_at}\n"));
+            }
+            if let Some(random_seed) = preview.random_seed {
+                config.push_str(&format!("preview_random_seed={random_seed}\n"));
+            }
+        }
+        config
     }
 }
 
@@ -383,6 +406,22 @@ fn run_iteration(
             observed_device_step(build, device_lease, "android.install", || {
                 android::install_apk(serial, &apk)
             })?;
+            if let Some(preview) = channel.preview.as_ref() {
+                let fixture = fs::read(&preview.fixture_path).with_context(|| {
+                    format!(
+                        "reading Android preview fixture {}",
+                        preview.fixture_path.display()
+                    )
+                })?;
+                observed_device_step(build, device_lease, "android.preview_fixture", || {
+                    android::write_device_config(
+                        serial,
+                        &bundle_id,
+                        ANDROID_PREVIEW_FIXTURE,
+                        &fixture,
+                    )
+                })?;
+            }
             push_android_assets(
                 project,
                 serial,
@@ -1377,6 +1416,7 @@ pub fn handle_preview(
         ),
         Plan::Android { serial, .. } => format!("android:{serial}"),
     };
+    let target_id = preview_target_id(target_id);
     let session = Session::start(&project.root, &project.name, &target_id)?;
     struct EndSession(Arc<Session>);
     impl Drop for EndSession {
@@ -1491,6 +1531,32 @@ pub fn handle_preview(
     }
     drop(child);
     Ok(())
+}
+
+fn preview_target_id(target_id: String) -> String {
+    let Some(key) = std::env::var_os("GPUI_PREVIEW_SESSION_KEY") else {
+        return target_id;
+    };
+    let key = safe_preview_component(&key.to_string_lossy());
+    format!("{target_id}::gpui-check:{key}")
+}
+
+fn safe_preview_component(value: &str) -> String {
+    let mut result = value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+                byte as char
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if result.is_empty() {
+        result.push('_');
+    }
+    result.truncate(128);
+    result
 }
 
 pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Result<()> {

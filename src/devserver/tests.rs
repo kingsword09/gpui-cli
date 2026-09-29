@@ -1707,7 +1707,7 @@ fn control_authentication_selection_and_long_poll_are_independent_of_builds() {
     assert_eq!(events["events"][0]["kind"], "diagnostic");
     assert_eq!(events["events"][0]["seq"], after + 1);
 
-    let other = Session::start(dir.path(), "test", "android:test").unwrap();
+    let other = Session::start(dir.path(), "test", "android:test::gpui-check:cell-2").unwrap();
     let second = ControlServer::start(other.clone()).unwrap();
     assert_eq!(
         control::discover(dir.path(), None).unwrap_err().code,
@@ -1719,6 +1719,12 @@ fn control_authentication_selection_and_long_poll_are_independent_of_builds() {
             .session_id,
         session.id
     );
+    assert_eq!(
+        control::discover_target_suffix(dir.path(), "::gpui-check:cell-2")
+            .unwrap()
+            .session_id,
+        other.id
+    );
     drop(second);
     assert_eq!(
         control::discover(dir.path(), None).unwrap().session_id,
@@ -1726,6 +1732,14 @@ fn control_authentication_selection_and_long_poll_are_independent_of_builds() {
     );
     let serialized = serde_json::to_string(&session.store.events(0, Duration::ZERO)).unwrap();
     assert!(!serialized.contains(&server.registration.token));
+}
+
+#[test]
+fn heartbeat_only_observation_requirement_is_valid_without_a_capture_provider() {
+    assert_eq!(
+        super::session::normalize_requirements(&["ui.heartbeat".into()]).unwrap(),
+        vec!["ui.heartbeat"]
+    );
 }
 
 #[test]

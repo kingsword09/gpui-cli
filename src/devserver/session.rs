@@ -1296,6 +1296,7 @@ impl Session {
         let missing = requirements
             .iter()
             .filter_map(|requirement| match requirement.as_str() {
+                "ui.heartbeat" => None,
                 "screenshot" if capture::window_capture_available() => None,
                 "capture.window" if capture::window_capture_available() => None,
                 "screenshot" => Some(json!({"requirement": requirement,
@@ -2220,6 +2221,7 @@ pub fn normalize_requirements(values: &[String]) -> Result<Vec<String>, Operatio
             .collect::<Vec<_>>()
     };
     let allowed = [
+        "ui.heartbeat",
         "screenshot",
         "semantics",
         "capture.scene",

@@ -68,6 +68,22 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
 - 没有完成 frozen snapshot build、真实 macOS+iOS simulator+Android emulator 矩阵报告、
   远程 runner 或完整设备故障矩阵；这些仍是 M02 后续验收。
 
+## 2026-09-29 Android 真实 capture 探针
+
+- 并行 cell 为每个 preview 注入唯一 session key，并按 registration target suffix 定向发现
+  control session；同一项目的多个 desktop/mobile preview 不再因 `ambiguous_session` 等到
+  cell deadline。
+- Android preview 将 scenario 元数据和 fixture 通过 app-private `gpui_live.txt`/
+  `gpui_preview_fixture.json` 传入；生成 runtime 在 Android 环境初始化 preview registry、
+  fixture state 和 `scenario_ready`，不再只启动普通 live app。
+- 本机 `emulator-5554`（arm64-v8a）真实运行 capture-only Counter scenario：安装、启动、
+  control 连接、heartbeat、native `adb exec-out screencap -p` 和 matrix report 均通过；
+  artifact `png-589ce43a376f287ae20e1b5de2e9e4114bebbbdb157bbf2042de129d6b6d31d9`，PNG
+  尺寸 1280×2856。该文件位于本机临时 probe 目录，不是 CI 或仓库内的持久验收产物。
+- 同一 emulator 的 semantics-required Counter scenario 返回
+  `unavailable: semantic capture is unavailable for the selected window`；这被保留为真实
+  capability 结果，没有用设备截图或 heartbeat 降级成 semantics 通过。
+
 ## 尚未覆盖
 
 同一冻结快照构建、远程 runner 和完整 macOS+iOS simulator+Android emulator 真实矩阵证据
