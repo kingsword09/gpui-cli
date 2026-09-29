@@ -270,13 +270,6 @@ fn coordinated_build(
 ) -> Result<Option<BuildCoordinatorRole>> {
     if reusable {
         let outcome = coordinate_build(layout, key, build)?;
-        if outcome.role == BuildCoordinatorRole::Follower {
-            println!(
-                "  {} reused coordinated BuildKey result {}",
-                "✓".green(),
-                key.key_hash()
-            );
-        }
         Ok(Some(outcome.role))
     } else {
         let _output_lock = BuildOutputLock::acquire(layout)?;
@@ -290,7 +283,7 @@ fn build_desktop_artifacts(
     plan: &DesktopBuildPlan,
     release: bool,
 ) -> Result<()> {
-    coordinated_build(
+    let role = coordinated_build(
         &plan.layout,
         &plan.key,
         plan.cache_hit_disabled_reason.is_none(),
@@ -327,6 +320,15 @@ fn build_desktop_artifacts(
             Ok(())
         },
     )?;
+    if role == Some(BuildCoordinatorRole::Follower)
+        && let BuildCacheLookup::Hit(manifest) = lookup_verified(&plan.layout, &plan.key)
+    {
+        println!(
+            "  {} BuildKey cache hit: {} verified artifact(s)",
+            "✓".green(),
+            manifest.files.len()
+        );
+    }
     Ok(())
 }
 
@@ -515,7 +517,7 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
     let app_path = xcode_app_path(derived_dir, &scheme, device, release);
 
     let reusable = plan.cache_hit_disabled_reason.is_none() && !device;
-    coordinated_build(layout, &plan.key, reusable, || {
+    let role = coordinated_build(layout, &plan.key, reusable, || {
         let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
             BuildCacheLookup::Miss(reason.clone())
         } else {
@@ -616,6 +618,16 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         println!("  {} {}", "✓".green(), app_path.display());
         Ok(())
     })?;
+    if role == Some(BuildCoordinatorRole::Follower)
+        && let BuildCacheLookup::Hit(manifest) =
+            lookup_ios_app_for_target(layout, &plan.key, &app_path, false)
+    {
+        println!(
+            "  {} iOS BuildKey cache hit: {} verified artifact(s)",
+            "✓".green(),
+            manifest.files.len()
+        );
+    }
     if device {
         match lookup_verified(layout, &plan.key) {
             BuildCacheLookup::Hit(_) => {}
@@ -1023,7 +1035,7 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     if reusable && let Some(identity) = &plan.debug_keystore_identity {
         identity.verify_unchanged()?;
     }
-    coordinated_build(layout, &plan.key, reusable, || {
+    let role = coordinated_build(layout, &plan.key, reusable, || {
         let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
             AndroidBuildCacheLookup::Miss(reason.clone())
         } else {
@@ -1113,6 +1125,16 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
         println!("  {} {}", "✓".green(), apk.display());
         Ok(())
     })?;
+    if role == Some(BuildCoordinatorRole::Follower)
+        && let AndroidBuildCacheLookup::Hit { manifest } =
+            lookup_verified_android_apk(project, layout, &plan.key, release)
+    {
+        println!(
+            "  {} Android BuildKey cache hit: {} verified artifact(s)",
+            "✓".green(),
+            manifest.files.len()
+        );
+    }
     if reusable && let Some(identity) = &plan.debug_keystore_identity {
         identity.verify_unchanged()?;
     }
