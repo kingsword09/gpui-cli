@@ -434,8 +434,8 @@ iOS 的切片见
 [M04 desktop artifact manifest](../experiments/M04-desktop-artifact-manifest-2026-09-28.md)。
 M04 仍未完成：live builder、snapshot build orchestration、同 key 在途任务合并和
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。`check → preview → live` 仍从可变项目构建；
-matrix 的 `source_mode=frozen` 校验不能代替实际冻结。环境键遗漏 `CARGO_ENCODED_RUSTFLAGS`
-的问题仍有效，见[当前审计](current-status.md)。
+matrix 的 `source_mode=frozen` 校验不能代替实际冻结。`CARGO_ENCODED_RUSTFLAGS` 的已确认
+allowlist 遗漏已由 #149 修复，但其他输入遗漏和冻结执行边界仍有效，见[当前审计](current-status.md)。
 
 T06 的 desktop 首个缓存切片以 BuildKey 级 OS 文件锁串行请求，manifest 完整校验后跳过
 Rust 编译；记录见

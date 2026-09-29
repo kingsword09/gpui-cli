@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-09-29（Asia/Shanghai）。核查代码：`a1395d3ed7539c9c519165b35632e3602ab85746`。
+更新日期：2026-09-29（Asia/Shanghai）。核查代码：`1256bb3`（PR #149 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -37,6 +37,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `b405cca`（#145） | 移动 matrix 通过 preview/control 执行场景并接 native capture | 单场景 `check --target ios/android` 仍不支持；移动入口是 matrix |
 | `14f81fe`（#146） | 单场景和 matrix preview 专属 session key、定向发现；Android preview 元数据/fixture 接入 | 修复旧会话误绑定路径；不同时修复桌面进程清理或 fixture hash |
 | `a1395d3`（#147） | `CheckReport.context` 保存 reset generation、environment、uncontrolled inputs | 单场景 JSON 可见；matrix 汇总尚未传递 context，报告值也不等于实际环境已受控 |
+| `1256bb3`（#149） | BuildKey 环境 allowlist 纳入 `CARGO_ENCODED_RUSTFLAGS`，并增加 hash 回归测试 | 修复该已确认的缓存键遗漏；不等于所有 build.rs/Gradle/NDK/Xcode 隐藏输入或整个 M04/T06 已完成 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -65,7 +66,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | S02 | in_progress | Counter/LoginForm/VirtualList preview/reset；Android preview 已接入，fixture 身份及环境适配仍有缺口 |
 | S03 | in_progress | click/type/key/scroll、正常事件路径、owner/scope 和 unknown 语义；真实输入/遮挡/污染及持久幂等验收未齐 |
 | M03 | in_progress | 主机 OS 锁、owner/fencing、heartbeat，run/live/capture 和移动 matrix 已接入；重连和真实竞争矩阵未齐 |
-| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；check/matrix 未冻结，缓存环境输入遗漏 |
+| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；`CARGO_ENCODED_RUSTFLAGS` 已纳入 key，check/matrix 未冻结且仍有未建模输入 |
 | S04 | in_progress | executor、desktop check、baseline/diff/approve、移动 matrix 场景 driver、报告 context；清理/fixture/环境及三夹具各 20 次真实验收未齐 |
 | A01 | planned | CLI/control 可复用；无 MCP 只读适配、JSON-RPC server 或独立 Agent service |
 | A02 | planned | action/operation/check 可复用；无 MCP 动作/取消/owner 适配 |
@@ -87,11 +88,11 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 ## 4. 旧审计问题的当前状态
 
 以下编号延续原报告的七项问题。本轮使用当前二进制/模板和隔离夹具重新核查，
-问题 2 的旧触发不再出现，其余六项仍可复现；不将局部修复扩大为整个工作包完成。
+问题 1、2 的旧触发已有局部修复，其余五项仍可复现；不将局部修复扩大为整个工作包完成。
 
 | 编号 | 结论 | 代码与影响 |
 | --- | --- | --- |
-| 1 缓存环境键 | 未解决 | [build_inputs.rs](../../src/runner/build_inputs.rs) 的 allowlist 仍缺 `CARGO_ENCODED_RUSTFLAGS`；可能复用错误产物 |
+| 1 缓存环境键 | 已修复该已确认遗漏 | #149 在 [build_inputs.rs](../../src/runner/build_inputs.rs) 的 allowlist 加入 `CARGO_ENCODED_RUSTFLAGS`，并用不同 encoded flag 值证明环境 hash 改变；其他未建模输入仍不因此解决 |
 | 2 check 误绑定旧 preview | 已修复该路径 | #146 为单场景和 matrix 注入 session key；[control](../../src/devserver/control.rs) 按 target suffix 定向发现；复测旧 preview 未收到 check reset 且仍存活 |
 | 3 桌面 cleanup 假成功 | 未解决 | [check cleanup/Drop](../../src/commands/check.rs) 仍直接 kill/wait supervisor；不能据此证明独立应用进程组退出 |
 | 4 fixture 变化但 hash 不变 | 未解决 | [preview reset](../../templates/app/src/previews.rs) 重读文件但不重算 hash；#147 的 context 不修复该身份问题 |
@@ -112,7 +113,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 
 ## 5. 验证记录与证据范围
 
-本轮验证针对上述 `a1395d3` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
+本轮验证针对上述 `1256bb3` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
 `artifacts/progress-audit-2026-09-29/`（忽略的本机产物目录，不是已发布验收证据）。
 测试独立设置 `GPUI_DEVICE_LEASE_DIR`，避免与其他 worktree 的租约测试互相影响。
 
@@ -120,7 +121,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- |
 | `cargo fmt --check` | 通过 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | 通过 |
-| `cargo test --workspace --locked` | 358 passed，0 failed |
+| `cargo test --workspace --locked` | 359 passed，0 failed |
 | `cargo build --locked` | 通过 |
 | `cargo x check-design-docs`、`git diff --check` | 通过；仅验证文档/示例一致性 |
 | 两份 35 项状态表逐项比对 | 相同；1 done、21 in_progress、13 planned |
@@ -130,7 +131,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 
 | 探针 | 观察结果 | 本机记录 |
 | --- | --- | --- |
-| encoded Rust flags | 改编译参数后仍 cache hit；缓存程序 `flag-off`，直接 Cargo `flag-on` | `cli-probes.json` |
+| encoded Rust flags | 修复前探针曾在改编译参数后仍 cache hit；#149 已将变量纳入 allowlist，回归测试证明 encoded flag 改变 hash；尚未重跑合并后的 end-to-end CLI probe | `cli-probes.json`、[M04 encoded Rust flags](../experiments/M04-cargo-encoded-rustflags-2026-09-29.md) |
 | check 会话归属 | 旧 preview 收到的 reset 数为 0，旧 preview 仍运行 | `check-probes.json` |
 | check 清理 | 报告 `cleanup.succeeded=true`，测试应用仍存活且 PPID=1；探针结束后已清理 | `check-probes.json` |
 | fixture 身份 | 初值 0→42、generation 1→2，报告 hash 仍为初始值 | `runtime-probes.json` |
