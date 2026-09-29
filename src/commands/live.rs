@@ -441,6 +441,45 @@ fn verify_preview_ios_output(
     Ok(())
 }
 
+fn preview_android_output_layout(
+    outputs: &PreviewBuildOutputs,
+    key_hash: &str,
+) -> BuildOutputLayout {
+    BuildOutputLayout {
+        platform: BuildPlatform::Android,
+        key_hash: key_hash.to_owned(),
+        root: outputs.output_root.clone(),
+        cargo_target_dir: outputs.cargo_target_dir.clone(),
+        native_staging_dir: outputs.output_root.join("native-staging"),
+        android_jni_dir: outputs.jni_libs_dir.clone(),
+        android_gradle_build_dir: outputs.gradle_build_dir.clone(),
+        ios_derived_data_dir: None,
+    }
+}
+
+fn verify_preview_android_output(
+    layout: &BuildOutputLayout,
+    key_hash: &str,
+    jni_libs_dir: &Path,
+    apk_output_dir: &Path,
+) -> Result<()> {
+    let manifest = match lookup_verified_at_path(
+        &layout.preview_artifact_manifest_path(),
+        &layout.root,
+        BuildPlatform::Android,
+        key_hash,
+    ) {
+        BuildCacheLookup::Hit(manifest) => manifest,
+        BuildCacheLookup::Miss(reason) => {
+            bail!("preview Android artifact manifest is not verified: {reason}")
+        }
+    };
+    if !preview_manifest_contains_roots(&manifest, &layout.root, &[jni_libs_dir, apk_output_dir]) {
+        bail!("preview Android artifact manifest does not identify the expected outputs");
+    }
+    Ok(())
+}
+
 fn verify_preview_desktop_output(layout: &BuildOutputLayout, key_hash: &str) -> Result<()> {
     verified_preview_desktop_executable(&layout.root, key_hash).map(|_| ())
 }
@@ -780,16 +819,22 @@ fn run_iteration(
         }
         Plan::Android { serial, label } => {
             let bundle_id = bundle_id_of_android(project);
-            let Some(apk) = build_android_apk_live(
+            let apk = match build_android_apk_live(
                 project,
                 build,
                 channel
                     .preview
                     .as_ref()
                     .and_then(|preview| preview.build_outputs.as_ref()),
-            )?
-            else {
-                return Ok(Iteration::BuildFailed);
+            ) {
+                Ok(Some(apk)) => apk,
+                Ok(None) => return Ok(Iteration::BuildFailed),
+                Err(error) => {
+                    if let Some(control) = preview_control_error(&error) {
+                        return Ok(control);
+                    }
+                    return Err(error);
+                }
             };
             if !build.is_current()? {
                 return Ok(Iteration::Superseded);
@@ -1350,35 +1395,84 @@ fn build_android_apk_live(
     outputs: Option<&PreviewBuildOutputs>,
 ) -> Result<Option<std::path::PathBuf>> {
     let outputs = outputs.cloned();
-    let _output_lock = outputs
-        .as_ref()
-        .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
-        .transpose()?;
+    if let Some(outputs) = &outputs
+        && let Some(key_hash) = outputs.build_key_hash.as_deref()
+        && let Some(expected_keystore_hash) = outputs.android_debug_keystore_hash.as_deref()
+        && outputs.cache_hit_disabled_reason.is_none()
+    {
+        let jni_libs_dir = outputs
+            .jni_libs_dir
+            .as_deref()
+            .context("Android preview coordinator requires a JNI output directory")?;
+        let gradle_build_dir = outputs
+            .gradle_build_dir
+            .as_deref()
+            .context("Android preview coordinator requires a Gradle output directory")?;
+        let apk_output_dir = gradle_build_dir.join("outputs/apk/debug");
+        let layout = preview_android_output_layout(outputs, key_hash);
+        let verify = |layout: &BuildOutputLayout, key_hash: &str| {
+            let current_keystore_hash = android_debug_keystore_hash()?
+                .context("default Android debug keystore is unavailable for preview reuse")?;
+            if current_keystore_hash != expected_keystore_hash {
+                bail!(
+                    "Android debug keystore changed after the preview BuildKey was planned; restart the preview"
+                );
+            }
+            verify_preview_android_output(layout, key_hash, jni_libs_dir, &apk_output_dir)
+        };
+        coordinate_preview_build_with_verifier(
+            &layout,
+            key_hash,
+            || {
+                if build_android_apk_live_once(project, build, Some(outputs), false)?.is_none() {
+                    bail!(PREVIEW_BUILD_FAILED);
+                }
+                if !build.is_current()? {
+                    bail!(PREVIEW_BUILD_SUPERSEDED);
+                }
+                Ok(())
+            },
+            verify,
+        )?;
+        let apk = super::run::apk_path_at(project, false, Some(gradle_build_dir))?;
+        verify(&layout, key_hash)?;
+        return Ok(Some(apk));
+    }
+
+    build_android_apk_live_once(project, build, outputs.as_ref(), true)
+}
+
+fn build_android_apk_live_once(
+    project: &Project,
+    build: &Build,
+    outputs: Option<&PreviewBuildOutputs>,
+    acquire_output_lock: bool,
+) -> Result<Option<std::path::PathBuf>> {
+    let _output_lock = if acquire_output_lock {
+        outputs
+            .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
+            .transpose()?
+    } else {
+        None
+    };
     let abis = android_abis()?;
     let jni_libs_dir = outputs
-        .as_ref()
         .and_then(|outputs| outputs.jni_libs_dir.clone())
         .unwrap_or_else(|| project.android_jni_libs_dir());
-    let gradle_build_dir = outputs
-        .as_ref()
-        .and_then(|outputs| outputs.gradle_build_dir.clone());
-    let cache_key = outputs
-        .as_ref()
-        .and_then(|outputs| outputs.build_key_hash.as_deref());
-    let cache_hit_enabled = outputs.as_ref().is_some_and(|outputs| {
+    let gradle_build_dir = outputs.and_then(|outputs| outputs.gradle_build_dir.clone());
+    let cache_key = outputs.and_then(|outputs| outputs.build_key_hash.as_deref());
+    let cache_hit_enabled = outputs.is_some_and(|outputs| {
         outputs.cache_hit_disabled_reason.is_none()
             && outputs.android_debug_keystore_hash.is_some()
             && cache_key.is_some()
     });
-    if let Some(outputs) = &outputs
+    if let Some(outputs) = outputs
         && let Some(reason) = &outputs.cache_hit_disabled_reason
     {
         println!("  {} Android preview cache miss: {reason}", "→".blue());
     }
     if cache_hit_enabled {
-        let outputs = outputs
-            .as_ref()
-            .expect("cache hit requires preview outputs");
+        let outputs = outputs.expect("cache hit requires preview outputs");
         let expected_keystore_hash = outputs
             .android_debug_keystore_hash
             .as_deref()
@@ -1458,7 +1552,7 @@ fn build_android_apk_live(
         "--features",
         "gpui-dev",
     ]);
-    if let Some(outputs) = &outputs {
+    if let Some(outputs) = outputs {
         ndk.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
     }
     if !error::run_cargo_json(&mut ndk, build, "cargo.ndk")?.success {
@@ -1481,8 +1575,11 @@ fn build_android_apk_live(
         build,
     )?;
 
+    if !build.is_current()? {
+        bail!(PREVIEW_BUILD_SUPERSEDED);
+    }
     let apk = super::run::apk_path_at(project, false, gradle_build_dir.as_deref())?;
-    if let Some(outputs) = &outputs
+    if let Some(outputs) = outputs
         && let Some(key_hash) = outputs.build_key_hash.as_deref()
     {
         if let Some(expected_keystore_hash) = outputs.android_debug_keystore_hash.as_deref() {
@@ -2687,5 +2784,45 @@ mod tests {
         assert_eq!(manifest.platform, BuildPlatform::Android);
         assert_eq!(manifest.files.len(), 3);
         manifest.verify(root.path()).unwrap();
+    }
+
+    #[test]
+    fn android_preview_coordinator_verifies_jni_and_apk_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let key_hash = "f".repeat(64);
+        let jni = root
+            .path()
+            .join("native-staging/android/jni-libs/arm64-v8a");
+        let apk_dir = root.path().join("gradle-build/outputs/apk/debug");
+        fs::create_dir_all(&jni).unwrap();
+        fs::create_dir_all(&apk_dir).unwrap();
+        fs::write(jni.join("libdemo.so"), b"native library").unwrap();
+        fs::write(apk_dir.join("app-debug.apk"), b"debug package").unwrap();
+        publish_preview_android_manifest(
+            root.path(),
+            &key_hash,
+            &jni,
+            &apk_dir.join("app-debug.apk"),
+        )
+        .unwrap();
+
+        let layout = BuildOutputLayout {
+            platform: BuildPlatform::Android,
+            key_hash: key_hash.clone(),
+            root: root.path().to_path_buf(),
+            cargo_target_dir: root.path().join("cargo-target"),
+            native_staging_dir: root.path().join("native-staging"),
+            android_jni_dir: Some(jni.clone()),
+            android_gradle_build_dir: Some(root.path().join("gradle-build")),
+            ios_derived_data_dir: None,
+        };
+        verify_preview_android_output(&layout, &key_hash, &jni, &apk_dir).unwrap();
+        assert!(
+            verify_preview_android_output(&layout, &key_hash, &jni, &root.path().join("other-apk"))
+                .is_err()
+        );
+
+        fs::write(jni.join("libdemo.so"), b"tampered native library").unwrap();
+        assert!(verify_preview_android_output(&layout, &key_hash, &jni, &apk_dir).is_err());
     }
 }
