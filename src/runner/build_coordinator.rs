@@ -1218,19 +1218,40 @@ mod tests {
             .spawn()
             .unwrap();
 
+        let ready_path = base.path().join("coordinator-child-ready");
+        let release_path = base.path().join("coordinator-child-release");
         let state_path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
-        for _ in 0..100 {
-            if state_path.is_file() {
-                break;
-            }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready_path.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "coordinator child did not enter its build closure; state exists: {}",
+                state_path.is_file()
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(state_path.is_file());
 
-        let outcome = coordinate_build(&layout, &key, || {
-            panic!("cross-process follower must not execute the build closure");
-        })
-        .unwrap();
+        let follower_layout = layout.clone();
+        let follower_key = key.clone();
+        let follower = std::thread::spawn(move || {
+            coordinate_build(&follower_layout, &follower_key, || {
+                panic!("cross-process follower must not execute the build closure");
+            })
+        });
+        let attempt_id = read_record(&layout, BUILD_COORDINATOR_BUILD_KIND)
+            .unwrap()
+            .unwrap()
+            .attempt_id;
+        while active_subscriber_count(&layout, &attempt_id).unwrap() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cross-process follower did not register its subscriber"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::write(&release_path, b"continue").unwrap();
+
+        let outcome = follower.join().unwrap().unwrap();
         assert_eq!(outcome.role, BuildCoordinatorRole::Follower);
         assert!(child.wait().unwrap().success());
     }
@@ -1244,7 +1265,17 @@ mod tests {
         let layout = layout(&base);
         let key = key();
         let outcome = coordinate_build(&layout, &key, || {
-            std::thread::sleep(Duration::from_millis(250));
+            let ready_path = base.join("coordinator-child-ready");
+            let release_path = base.join("coordinator-child-release");
+            fs::write(&ready_path, b"ready").unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !release_path.is_file() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cross-process parent did not release the coordinator child"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
             publish_fake_artifact(&layout);
             Ok(())
         })
