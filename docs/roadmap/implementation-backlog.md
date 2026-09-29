@@ -443,8 +443,10 @@ iOS 的切片见
 普通 `build`/`run` 的 snapshot BuildKey orchestration 与同 key 在途任务合并已由 #177 接入：可复用
 desktop/iOS/Android 路径以 `.build-coordinator.json` 选举 leader，follower 以 OS-locked subscriber
 等待并复核 artifact manifest；leader 消失可接管，failed attempt 在无活跃 subscriber 后可重试。
-含未建模输入的路径继续不共享。preview/check 仍未接入该 coordinator。
-M04 仍未完成：preview/check orchestration 和
+#179 又让 desktop live preview/check 使用独立的 `.preview-build-coordinator.json` 与 preview manifest
+verifier；它与普通 build/run attempt 隔离，同时共享 output lock 串行访问 Cargo target。iOS/Android
+preview 仍只有 verified manifest/output lock 路径，尚未接入 coordinator；含未建模输入的路径继续不共享。
+M04 仍未完成：iOS/Android preview coordinator、preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
@@ -458,7 +460,8 @@ owner、PID、开始时间、状态和可选 key hash；guard 释放时仅删除
 record 会在下一个持锁者取得 OS 锁后被覆盖，cache clean 会排除该记录的大小。该文件只是跨进程
 ownership 证据，OS 锁仍是活跃性唯一权威，不提供 heartbeat/fencing 或订阅者取消协调；普通
 build/run 的 coordinator 记录、subscriber 锁和 manifest 复核见
-[S04 BuildKey coordinator](../experiments/S04-build-coordinator-2026-09-29.md)。
+[S04 BuildKey coordinator](../experiments/S04-build-coordinator-2026-09-29.md) 与
+[S04 desktop preview coordinator](../experiments/S04-preview-build-coordinator-2026-09-30.md)。
 local `build.rs`
 等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
 allowlist 遗漏已由 #149 修复，但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
