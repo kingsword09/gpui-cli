@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-09-29，主分支 `5b63656`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-09-29，主分支 `3e8b874`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -288,7 +288,8 @@ assertion 参数，并输出规范化 scenario_hash。缺少 `.gpui/registry-man
 `scenario_ready`。生成 runtime 已按 fixture 选择并渲染 Counter、LoginForm、VirtualList 三种
 surface，分别提供稳定语义节点；`gpui dev reset --scenario <id>` 已通过有界控制队列送到
 runtime UI 线程，fixture 重新读取并发出新的 `scenario_ready`/`scenario_reset_result`；每次
-新进程从 generation 1 开始。
+新进程从 generation 1 开始。reset 现在也按当前 fixture bytes 重新计算 SHA-256，ready 事件
+和单场景 CheckReport 使用 runtime fixture identity；真实环境适配和 matrix 报告传播仍需补齐。
 
 1. 用显式 registry 声明组件、fixture schema、create/reset 和环境适配，不反射构造任意 Render 类型。
 2. 编译输出 registry manifest；preview 选择组件并使用独立数据目录，首次构建后直接进入组件。
@@ -489,8 +490,9 @@ backend/font fingerprint、baseline 缺失或不可比仍保持 `inconclusive`�
 修复误连已有 preview 的路径；移动场景经 `gpui check --matrix` 接入，单场景入口仍限
 desktop。`CheckReport.context` 已保留 runtime ready/reset generation、environment 和
 uncontrolled inputs。#151 已让 desktop check 通过 process group/Windows Job Object
-终止 owned process tree，并覆盖后代持有输出管道的回归测试；完整 GUI check cleanup probe、
-fixture 重读不更新 hash、真实环境适配和冻结构建仍需补齐，不能据该局部修复标记 S04 完成。
+终止 owned process tree，并覆盖后代持有输出管道的回归测试；#153 已让 reset/runtime/report
+保持 fixture identity 一致。完整 GUI check cleanup/reset probe、真实环境适配和冻结构建仍需补齐，
+不能据这些局部修复标记 S04 完成。
 当前 context 只随单场景 `CheckReport` 输出；matrix 汇总仍只投影 status、primary error
 和 capture step artifact IDs，完整步骤、context 与 cleanup 详情尚未保留。
 
