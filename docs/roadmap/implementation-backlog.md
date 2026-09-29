@@ -435,11 +435,13 @@ iOS 的切片见
 [M04 desktop artifact manifest](../experiments/M04-desktop-artifact-manifest-2026-09-28.md)。
 M04 仍未完成：live builder、snapshot build orchestration、同 key 在途任务合并和
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
-`desktop_build_plan`，从重核验后的 workspace snapshot 读取 scenario/fixture，并从 snapshot
-root 启动 preview；原项目 root 仅用于 baseline/diff 输出，snapshot hash 和 BuildKey 进入
-`CheckContext`。local `build.rs` 等未建模输入会让严格路径直接不可用，不回退到可变目录。
-matrix 的 `source_mode=frozen` 校验仍不能代替实际冻结，也尚未共享该 snapshot。`CARGO_ENCODED_RUSTFLAGS`
-的已确认 allowlist 遗漏已由 #149 修复，但其他输入遗漏和冻结执行边界仍有效，见[当前审计](current-status.md)。
+`desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
+从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
+用于 baseline/diff、移动 artifact 和 lease 路径。单场景 context 保留 snapshot hash/BuildKey，
+matrix 当前只保留 shared snapshot hash，不伪造 target-specific BuildKey。local `build.rs`
+等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
+allowlist 遗漏已由 #149 修复，但其他输入遗漏、target-specific 构建编排和冻结执行边界仍有效，
+见[当前审计](current-status.md)。
 
 T06 的 desktop 首个缓存切片以 BuildKey 级 OS 文件锁串行请求，manifest 完整校验后跳过
 Rust 编译；记录见
@@ -494,11 +496,13 @@ backend/font fingerprint、baseline 缺失或不可比仍保持 `inconclusive`�
 desktop。`CheckReport.context` 已保留 runtime ready/reset generation、environment 和
 uncontrolled inputs。#151 已让 desktop check 通过 process group/Windows Job Object
 终止 owned process tree，并覆盖后代持有输出管道的回归测试；#153 已让 reset/runtime/report
-保持 fixture identity 一致。#155 又让单场景 desktop check 使用重核验的冻结 workspace snapshot，
-并在 context 中写入 snapshot hash/BuildKey；matrix 仍未消费同一 snapshot。
-完整 GUI check cleanup/reset probe、真实环境适配、matrix 冻结执行和报告传播仍需补齐，不能据
-这些局部修复标记 S04 完成。记录见
-[S04 frozen single check](../experiments/S04-frozen-single-check-2026-09-29.md)。
+保持 fixture identity 一致。#155 让单场景 desktop check 使用重核验的冻结 workspace snapshot，
+并在 context 中写入 snapshot hash/BuildKey；#157 让 matrix 在 admission 前创建一个共享
+snapshot，所有 cell 复用其 runtime root/hash。完整 GUI check cleanup/reset probe、真实环境
+适配、target-specific 构建、matrix context/report 传播仍需补齐，不能据这些局部修复标记 S04
+完成。记录见
+[S04 frozen single check](../experiments/S04-frozen-single-check-2026-09-29.md) 和
+[S04 frozen matrix snapshot](../experiments/S04-frozen-matrix-snapshot-2026-09-29.md)。
 当前 context 只随单场景 `CheckReport` 输出；matrix 汇总仍只投影 status、primary error
 和 capture step artifact IDs，完整步骤、context 与 cleanup 详情尚未保留。
 
@@ -582,7 +586,8 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 代码落点：`src/runner/matrix.rs` 已交付 plan/scheduler/report 契约，
 `src/runner/matrix_admission.rs` 已交付配置展开与 admission，`matrix_executor.rs` 已交付
 并行执行与资源锁；`src/commands/check.rs` 已接入 matrix CLI 和 desktop/mobile control
-scenario driver。M04 的同一冻结快照构建仍未接入。
+scenario driver。#157 已接入 M04 的共享冻结 snapshot 输入边界；target-specific BuildKey、
+构建输出编排和完整 cell context/report 仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
