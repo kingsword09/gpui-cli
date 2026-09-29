@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-09-29，主分支 `cca46b3`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-09-29，主分支 `5e5031a`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -505,15 +505,17 @@ uncontrolled inputs。#151 已让 desktop check 通过 process group/Windows Job
 保持 fixture identity 一致。#155 让单场景 desktop check 使用重核验的冻结 workspace snapshot，
 并在 context 中写入 snapshot hash/BuildKey；#157 让 matrix 在 admission 前创建一个共享
 snapshot，所有 cell 复用其 runtime root/hash。完整 GUI check cleanup/reset probe、真实环境
-适配、跨命令共享构建、matrix steps/cleanup 详情仍需补齐，不能据这些局部修复标记 S04
+适配、跨命令共享构建仍需补齐，不能据这些局部修复标记 S04
 完成。记录见
 [S04 frozen single check](../experiments/S04-frozen-single-check-2026-09-29.md) 和
 [S04 frozen matrix snapshot](../experiments/S04-frozen-matrix-snapshot-2026-09-29.md) 以及
 [S04 matrix context](../experiments/S04-matrix-context-2026-09-29.md) 和
 [S04 matrix target BuildKey](../experiments/S04-matrix-target-build-key-2026-09-29.md) 以及
-[S04 matrix build output layout](../experiments/S04-matrix-build-output-layout-2026-09-29.md)。
-当前 context 已随单场景 `CheckReport` 和每个 matrix `MatrixCellResult` 输出；matrix 汇总仍只
-投影 status、primary error 和 capture step artifact IDs，完整步骤与 cleanup 详情尚未保留。
+[S04 matrix build output layout](../experiments/S04-matrix-build-output-layout-2026-09-29.md) 以及
+[S04 matrix cell reports](../experiments/S04-matrix-cell-reports-2026-09-29.md)。
+当前 context 已随单场景 `CheckReport` 和每个 control scenario `MatrixCellResult` 输出；
+matrix control cell 现在也保留完整 steps/证据/cleanup，admission-unavailable 与 capture-only
+mobile lifecycle cell 不生成伪造 scenario report。
 
 视觉 baseline 静态契约已单独交付：`src/scenario/baseline.rs` 读取项目内
 `dev/baselines/<target>/<baseline_id>/manifest.json`，拒绝越界/符号链接/超限文件，校验
@@ -597,8 +599,9 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 并行执行与资源锁；`src/commands/check.rs` 已接入 matrix CLI 和 desktop/mobile control
 scenario driver。#157 已接入 M04 的共享冻结 snapshot 输入边界，#159 已将 per-cell context
 传入 MatrixReport，#161 已将 target-specific BuildKey 写入 context，#163 已绑定 source-project
-output layout 并串行同 key cell，#165 已让 preview builder 锁定对应 output root；跨命令共享构建
-所有权和完整 cell steps/cleanup report 仍未接入。
+output layout 并串行同 key cell，#165 已让 preview builder 锁定对应 output root，#167 已让
+control scenario cell 保留完整 CheckReport；跨命令共享构建所有权、移动完整 scenario 证据和真实矩阵
+仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
