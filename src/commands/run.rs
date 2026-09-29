@@ -711,10 +711,6 @@ pub(crate) fn gradle_task(release: bool) -> &'static str {
     }
 }
 
-pub(crate) fn apk_path(project: &Project, release: bool) -> Result<PathBuf> {
-    apk_path_at(project, release, None)
-}
-
 pub(crate) fn apk_path_at(
     project: &Project,
     release: bool,
@@ -768,6 +764,11 @@ pub(crate) fn apk_path_at(
     Ok(apk)
 }
 
+#[cfg(test)]
+pub(crate) fn apk_path(project: &Project, release: bool) -> Result<PathBuf> {
+    apk_path_at(project, release, None)
+}
+
 fn ensure_installable_apk(apk: &Path) -> Result<()> {
     if apk
         .file_name()
@@ -779,10 +780,6 @@ fn ensure_installable_apk(apk: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-pub(crate) fn gradle_command(project: &Project, release: bool, abis: &[String]) -> Command {
-    gradle_command_with_outputs(project, release, abis, None, None)
 }
 
 pub(crate) fn gradle_command_with_outputs(
@@ -799,6 +796,11 @@ pub(crate) fn gradle_command_with_outputs(
         jni_libs_dir,
         gradle_build_dir,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn gradle_command(project: &Project, release: bool, abis: &[String]) -> Command {
+    gradle_command_with_outputs(project, release, abis, None, None)
 }
 
 fn gradle_command_at(
@@ -827,14 +829,6 @@ fn gradle_command_at(
     cmd
 }
 
-pub(crate) fn check_android_libraries(project: &Project, abis: &[String]) -> Result<()> {
-    check_android_libraries_at(
-        &project.android_jni_libs_dir(),
-        &project.app_lib_name(),
-        abis,
-    )
-}
-
 pub(crate) fn check_android_libraries_at(
     jni_libs_dir: &Path,
     app_lib_name: &str,
@@ -850,6 +844,15 @@ pub(crate) fn check_android_libraries_at(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn check_android_libraries(project: &Project, abis: &[String]) -> Result<()> {
+    check_android_libraries_at(
+        &project.android_jni_libs_dir(),
+        &project.app_lib_name(),
+        abis,
+    )
 }
 
 fn publish_android_build_manifest(

@@ -21,9 +21,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::error;
 use super::run::{
-    IosTarget, Project, android_abis, android_rust_target, apk_path, bundle_id_of,
-    bundle_id_of_android, check_android_libraries, ensure_tool, gradle_command, gradle_task,
-    leased_device_step, resolve_ios_target, xcode_app_path, xcode_destination,
+    IosTarget, Project, android_abis, android_rust_target, bundle_id_of, bundle_id_of_android,
+    check_android_libraries_at, ensure_tool, gradle_task, leased_device_step, resolve_ios_target,
+    xcode_app_path, xcode_destination,
 };
 use crate::device::{self, DeviceFlags, android, inventory, ios};
 use crate::devserver::control::ControlServer;
@@ -84,6 +84,27 @@ enum Plan {
 /// preview path never carries a Live snapshot; every launch gets its own data
 /// directory and starts at reset_generation 1.
 #[derive(Clone, Debug)]
+pub struct PreviewBuildOutputs {
+    pub cargo_target_dir: PathBuf,
+    pub jni_libs_dir: Option<PathBuf>,
+    pub gradle_build_dir: Option<PathBuf>,
+    pub ios_derived_data_dir: Option<PathBuf>,
+}
+
+impl PreviewBuildOutputs {
+    pub fn from_environment() -> Option<Self> {
+        let cargo_target_dir = std::env::var_os("GPUI_PREVIEW_CARGO_TARGET_DIR")?;
+        Some(Self {
+            cargo_target_dir: PathBuf::from(cargo_target_dir),
+            jni_libs_dir: std::env::var_os("GPUI_PREVIEW_JNI_LIBS_DIR").map(PathBuf::from),
+            gradle_build_dir: std::env::var_os("GPUI_PREVIEW_GRADLE_BUILD_DIR").map(PathBuf::from),
+            ios_derived_data_dir: std::env::var_os("GPUI_PREVIEW_IOS_DERIVED_DATA_DIR")
+                .map(PathBuf::from),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct PreviewLaunch {
     pub scenario_id: String,
     pub component: String,
@@ -97,6 +118,7 @@ pub struct PreviewLaunch {
     pub clock_at: Option<String>,
     pub random_seed: Option<i64>,
     pub uncontrolled_inputs: Vec<String>,
+    pub build_outputs: Option<PreviewBuildOutputs>,
 }
 
 /// Dev-channel credentials handed to the app at every launch.
@@ -318,6 +340,13 @@ fn run_iteration(
                 "--features",
                 "gpui-dev",
             ]);
+            if let Some(outputs) = channel
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.build_outputs.as_ref())
+            {
+                cmd.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
+            }
             let outcome = error::run_cargo_json(&mut cmd, build, "cargo.build")?;
             if !outcome.success {
                 return Ok(Iteration::BuildFailed);
@@ -353,7 +382,17 @@ fn run_iteration(
             label,
         } => {
             let bundle_id = bundle_id_of(project);
-            let Some(app) = build_ios_app_live(project, *physical, id, build)? else {
+            let Some(app) = build_ios_app_live(
+                project,
+                *physical,
+                id,
+                build,
+                channel
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| preview.build_outputs.as_ref()),
+            )?
+            else {
                 return Ok(Iteration::BuildFailed);
             };
             if !build.is_current()? {
@@ -391,7 +430,15 @@ fn run_iteration(
         }
         Plan::Android { serial, label } => {
             let bundle_id = bundle_id_of_android(project);
-            let Some(apk) = build_android_apk_live(project, build)? else {
+            let Some(apk) = build_android_apk_live(
+                project,
+                build,
+                channel
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| preview.build_outputs.as_ref()),
+            )?
+            else {
                 return Ok(Iteration::BuildFailed);
             };
             if !build.is_current()? {
@@ -772,6 +819,7 @@ fn build_ios_app_live(
     physical: bool,
     udid: &str,
     build: &Build,
+    outputs: Option<&PreviewBuildOutputs>,
 ) -> Result<Option<std::path::PathBuf>> {
     let rust_target = if physical {
         "aarch64-apple-ios"
@@ -795,6 +843,9 @@ fn build_ios_app_live(
         "--features",
         "gpui-dev",
     ]);
+    if let Some(outputs) = outputs {
+        cargo.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
+    }
     let outcome = error::run_cargo_json(&mut cargo, build, "cargo.build")?;
     if !outcome.success {
         println!(
@@ -815,7 +866,9 @@ fn build_ios_app_live(
     )?;
 
     let scheme = project.xcode_target();
-    let derived_dir = ios_dir.join("build");
+    let derived_dir = outputs
+        .and_then(|outputs| outputs.ios_derived_data_dir.clone())
+        .unwrap_or_else(|| ios_dir.join("build"));
 
     let mut xcodebuild = Command::new("xcodebuild");
     xcodebuild
@@ -847,7 +900,11 @@ fn build_ios_app_live(
 
 /// Android build with Cargo JSON diagnostics and streaming Gradle output.
 /// `Ok(None)` means the Rust build failed.
-fn build_android_apk_live(project: &Project, build: &Build) -> Result<Option<std::path::PathBuf>> {
+fn build_android_apk_live(
+    project: &Project,
+    build: &Build,
+    outputs: Option<&PreviewBuildOutputs>,
+) -> Result<Option<std::path::PathBuf>> {
     ensure_tool(
         "cargo-ndk",
         "Install it with `cargo install cargo-ndk`, then set ANDROID_NDK_HOME.",
@@ -865,7 +922,10 @@ fn build_android_apk_live(project: &Project, build: &Build) -> Result<Option<std
     for abi in &abis {
         ndk.args(["-t", abi]);
     }
-    ndk.arg("-o").arg(project.android_jni_libs_dir()).args([
+    let jni_libs_dir = outputs
+        .and_then(|outputs| outputs.jni_libs_dir.clone())
+        .unwrap_or_else(|| project.android_jni_libs_dir());
+    ndk.arg("-o").arg(&jni_libs_dir).args([
         "--platform",
         "31",
         "build",
@@ -874,19 +934,32 @@ fn build_android_apk_live(project: &Project, build: &Build) -> Result<Option<std
         "--features",
         "gpui-dev",
     ]);
+    if let Some(outputs) = outputs {
+        ndk.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
+    }
     if !error::run_cargo_json(&mut ndk, build, "cargo.ndk")?.success {
         return Ok(None);
     }
 
-    check_android_libraries(project, &abis)?;
+    check_android_libraries_at(&jni_libs_dir, &project.app_lib_name(), &abis)?;
 
     run_tool(
         &format!("gradlew {}", gradle_task(false)),
-        &mut gradle_command(project, false, &abis),
+        &mut super::run::gradle_command_with_outputs(
+            project,
+            false,
+            &abis,
+            Some(&jni_libs_dir),
+            outputs.and_then(|outputs| outputs.gradle_build_dir.as_deref()),
+        ),
         build,
     )?;
 
-    let apk = apk_path(project, false)?;
+    let apk = super::run::apk_path_at(
+        project,
+        false,
+        outputs.and_then(|outputs| outputs.gradle_build_dir.as_deref()),
+    )?;
     println!("  {} {}", "✓".green(), apk.display());
     Ok(Some(apk))
 }

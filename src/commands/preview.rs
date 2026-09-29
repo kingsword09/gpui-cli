@@ -84,6 +84,7 @@ pub fn handle_preview(args: PreviewArgs) -> Result<()> {
         clock_at: selected.clock_at.clone(),
         random_seed: selected.random_seed,
         uncontrolled_inputs: uncontrolled_inputs(selected),
+        build_outputs: super::live::PreviewBuildOutputs::from_environment(),
     };
     if args.json {
         println!(
