@@ -113,6 +113,12 @@ pub struct AndroidBuildPlan {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AndroidPreviewCachePolicy {
+    pub disabled_reason: Option<String>,
+    pub debug_keystore_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AndroidDebugKeystoreIdentity {
     path: PathBuf,
     sha256: String,
@@ -336,6 +342,42 @@ pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<
         toolchain_fingerprint,
         Some(abi_set),
     )
+}
+
+/// Returns the cache-safety inputs needed by a live Android preview. The
+/// preview receives its BuildKey from the check planner, so this helper only
+/// carries the policy decision and the external debug-keystore identity that
+/// must remain unchanged while the preview build runs.
+pub fn android_preview_cache_policy(
+    root: &Path,
+    release: bool,
+) -> Result<AndroidPreviewCachePolicy> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving Android preview root: {}", root.display()))?;
+    let mut native = NativeInputs::scan(&root)?;
+    let build_script_disabled_reason = local_build_script_cache_disabled_reason(&root)?;
+    let (signing_disabled_reason, debug_keystore_identity) =
+        android_cache_signing_policy(&root, release, &mut native)?;
+    let (_, rustc_fingerprint) = rustc_identity()?;
+    let (_, toolchain_disabled_reason) = bind_android_toolchain_identity(
+        &mut native,
+        &rustc_fingerprint,
+        android_toolchain_fingerprint(),
+    );
+    Ok(AndroidPreviewCachePolicy {
+        disabled_reason: combine_cache_hit_disabled_reasons([
+            toolchain_disabled_reason,
+            signing_disabled_reason,
+            build_script_disabled_reason,
+        ]),
+        debug_keystore_hash: debug_keystore_identity.map(|identity| identity.sha256),
+    })
+}
+
+/// Reads the current default Android debug-keystore content hash without
+/// exposing its path or bytes.
+pub fn android_debug_keystore_hash() -> Result<Option<String>> {
+    Ok(default_android_debug_keystore_identity()?.map(|identity| identity.sha256))
 }
 
 /// Freezes the Android workspace before deriving its BuildKey and output
