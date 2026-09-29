@@ -1,9 +1,9 @@
 # 设计契约：版本绑定的 UI 观察协议
 
-状态：O01 窗口注册/UI heartbeat、O02 资源 ACK、O03 有界产物库、scene_completed
-事件、supervisor build request、有界 operation 状态机和 observe 提交已实现；
-scene readback、完整语义导出与成功观察编排仍拟议；O05/O06 已提供受控语义树产物
-和只读查询第一切片。基线：`1550bf3`。
+状态核查（2026-09-29，`a1395d3`）：窗口/UI heartbeat、资源 ACK、产物库、scene_completed、
+build request、operation、macOS best-effort window observe 和受控 query/diff 已有实现。
+scene readback、完整语义/在线 v1 兼容和全故障验收仍未完成；scene_completed 不证明屏幕
+呈现。完整边界见[当前进度](../roadmap/current-status.md)，下文保留完整设计契约。
 任务：F02、O01–O06、A01。
 上位文档：[总路线](../ROADMAP-agent-native-development.md)。
 

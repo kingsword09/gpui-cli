@@ -94,8 +94,8 @@ sessions are running, select one with `--session <id>`.
 and process. A failed build keeps the previous process and marks its version
 stale. Cargo diagnostics, including warnings, source spans and suggestions,
 arrive during compilation; desktop stdout/stderr and process exits are also
-recorded. Each launch has its own credentials, so older app templates still
-get correctly attributed logs and panic reports.
+recorded. Each launch has its own credentials. The current app/control transport
+requires v2; protocol-v1 templates do not yet have an online compatibility path.
 
 Events and raw output are retained under `.gpui/live/<session_id>/`. The live
 event cursor covers up to 2,048 events / 4 MiB; an expired cursor returns
@@ -103,12 +103,35 @@ event cursor covers up to 2,048 events / 4 MiB; an expired cursor returns
 use up to 8 MiB and raw output up to 32 MiB per session. Ended sessions remain
 on disk for inspection; the query commands only connect to a live supervisor.
 
-This implements D1 of the [agent feedback design](docs/DESIGN-agent-live-feedback.md).
-UI responsiveness, screenshots, semantic inspection and automated interaction
-are later phases and are reported as unavailable. Version freshness does not
-confirm that a new frame has rendered; resource delivery is also reported
-without a rendering acknowledgment. Native mobile log collection remains
-outside D1.
+The [agent feedback design](docs/DESIGN-agent-live-feedback.md) now has partial
+observation and scenario implementations beyond D1: window/UI heartbeats,
+macOS window screenshots, controlled semantic query/diff, input actions, preview,
+checks and visual baselines. These depend on the connected runtime's capabilities;
+window screenshots are best effort and resource acknowledgments do not prove GPU
+presentation. Mobile runners provide native capture and log evidence with explicit
+ownership limits.
+
+The following command paths are implemented in the source tree audited on
+2026-09-29 (`a1395d3`):
+
+```bash
+gpui scenario validate --file gpui.scenarios.toml --json
+gpui preview Counter --scenario counter-basic
+gpui check --scenario counter-basic --target desktop --json
+gpui check --matrix matrix.toml --file gpui.scenarios.toml --json
+```
+
+Use scenario IDs and files defined by your project. Single-scenario checks support
+desktop; mobile checks use matrix targets. Matrix execution includes admission,
+parallel scheduling, resource locks and mobile control/native capture. Single-scenario
+check reports include runtime context when available; matrix summaries do not yet
+retain it. Full frozen-snapshot execution, reliable
+desktop cleanup and fixture/environment identity still need work; a successful
+device screenshot does not establish semantic or interaction support.
+
+See the [current progress and handoff record](docs/roadmap/current-status.md) for
+all 35 work packages, known issues and the distinction between code, CI and real
+GUI/device acceptance.
 
 | Target | Prerequisites |
 | --- | --- |
@@ -217,7 +240,9 @@ changing them.
 The [agent-native development roadmap](docs/ROADMAP-agent-native-development.md)
 contains detailed designs, PR-sized tasks, acceptance cases and configuration
 drafts for cross-platform observation, scenarios, performance and Agent tooling.
-These are planned capabilities, not commands available in the current release.
+It contains both implemented slices and proposed capabilities. Consult the
+[current status](docs/roadmap/current-status.md) and command help before using a
+design example; MCP, repro and application performance tooling remain planned.
 
 ## License
 

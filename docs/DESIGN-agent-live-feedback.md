@@ -1,11 +1,13 @@
 # 设计：面向 Agent 的 Live 错误反馈与界面观察
 
-状态：D1 已实现；D2–D4 待实现。`gpui dev status / diagnostics / events` 已可用，`observe / act / check` 仍为拟议接口。D1 的交付范围与验证见第 9 节。
+状态核查（2026-09-29，`a1395d3`）：D1 已实现，D2–D4 已有 observe/query/act、根命令
+check 和本地 matrix 切片，完整验收未完成。最新事实见[当前进度](roadmap/current-status.md)。
+本文保留早期设计与 D1 记录；下文未落地的示意 API 不构成当前能力声明。
 日期：2026-09-20
 设计事实基线：本仓库 `c5b0c7f`；模板锁定的 `gpui-pre 0.3.5` 源码。第 2 节保留实施前基线。
 前置设计：[Live 模式](DESIGN-live-mode.md)。沿用 L0 重建重启、L1 资源重载、L0.5 状态恢复。
 
-后续详细计划（2026-09-21，基线 `6d091b6`）：[Agent-native 总路线](ROADMAP-agent-native-development.md)、[实施任务清单](roadmap/implementation-backlog.md)、[验收矩阵](roadmap/acceptance-matrix.md)。本文保留 D1 的历史背景与实现记录；D2–D4 的版本契约、命令和执行顺序以新专项设计为准。例如正式场景入口拟为根命令 `gpui check`，下文早期 `gpui dev check` 示意不构成兼容承诺。
+后续详细计划（2026-09-21，基线 `6d091b6`）：[Agent-native 总路线](ROADMAP-agent-native-development.md)、[实施任务清单](roadmap/implementation-backlog.md)、[验收矩阵](roadmap/acceptance-matrix.md)。本文保留 D1 的历史背景与实现记录；D2–D4 的版本契约、命令和执行顺序以新专项设计为准。正式场景入口已为根命令 `gpui check`，下文早期 `gpui dev check` 示意不构成兼容承诺。
 
 ## 1. 目标与关键决定
 

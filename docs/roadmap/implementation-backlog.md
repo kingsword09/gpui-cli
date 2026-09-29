@@ -1,15 +1,16 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态：任务表反映当前实现进度；F02、T04 已进入 `in_progress`，本文不是已完成
-功能列表。基线：`6d091b6`；日期：2026-09-21。
+状态核查：2026-09-29，主分支 `a1395d3`。35 项中 1 done、21 in_progress、13 planned；
+完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
+原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
 入口：[总路线](../ROADMAP-agent-native-development.md)。验收编号的完整步骤见 [验收矩阵](acceptance-matrix.md)，接口语义以各 [专项设计](../ROADMAP-agent-native-development.md) 为准。
 
 ## 1. 如何执行
 
-每个任务是一个可审查的工作包，不要求硬塞进一个大 PR。表中的依赖是完成该工作包的硬前置；可以提前做不改变能力声明的类型/测试准备。字段中的路径是建议落点，新路径尚未存在，不应为凑目录提前创建空实现。
+每个任务是一个可审查的工作包，不要求硬塞进一个大 PR。表中的依赖是完成该工作包的硬前置；可以提前做不改变能力声明的类型/测试准备。字段中的路径包含最初设计建议；部分已实现，以当前代码为准，不应为凑目录提前创建空实现。
 
-- `planned`：尚未开工；`in_progress`：有负责人、分支和失败用例；`in_review`：代码与证据齐全；`done`：合并且列明的验收通过。
+- `planned`：工作包尚未开工，可已有共用基础；`in_progress`：已有实现切片或实验，但工作包仍缺实现/验收；`in_review`：工作包代码与证据齐全，等待审查；`done`：合并且列明的验收通过。
 - `blocked_by_experiment`：上游/平台实验没有通过，附实验记录和重试条件；`deferred`：明确延后，不能被统计为已交付。
 - S = 0.5–1、M = 1–3、L = 3–5 个有效人日；不含等待设备、上游、签名和 review。超过 L 必须继续拆 PR，估计不是交付日期承诺。
 - 优先级 `core` 是该门槛的必需内容；`optional` 必须独立声明 provider/平台支持，不阻塞核心门槛。
@@ -20,12 +21,12 @@
 
 | ID | 门槛 | 优先级 | 规模 | 前置任务 | 验收 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
-| F01 | G0 | core | M | — | P-01, P-02 | in_review |
-| T01 | G0 | core | M | — | T-01, T-02, T-03 | in_review |
-| P01 | G0 | core | L | F01, T01 | O-05, O-10, O-11, P-03 | in_review |
-| T02 | G1 | core | M | F01 | T-04 | in_review |
+| F01 | G0 | core | M | — | P-01, P-02 | in_progress |
+| T01 | G0 | core | M | — | T-01, T-02, T-03 | in_progress |
+| P01 | G0 | core | L | F01, T01 | O-05, O-10, O-11, P-03 | in_progress |
+| T02 | G1 | core | M | F01 | T-04 | in_progress |
 | F02 | G1 | core | L | P01, T02 | C-01, C-02, C-03, C-04, C-05 | in_progress |
-| T03 | G1 | core | M | T02 | T-04, T-05 | in_review |
+| T03 | G1 | core | M | T02 | T-04, T-05 | in_progress |
 | T04 | G1 | core | L | T03, F02 | T-06, T-07, C-02 | in_progress |
 | O01 | G1 | core | M | F02, P01 | O-04, O-05 | in_progress |
 | O02 | G1 | core | M | F02 | O-06, O-07 | in_progress |
@@ -33,24 +34,24 @@
 | O04 | G1 | core | L | O01, O02, O03 | O-01, O-02, O-03, O-04, O-08, O-09, O-10 | in_progress |
 | O05 | G2 | core | L | P01, F02, O01 | O-10, O-11 | in_progress |
 | O06 | G2 | core | M | O05, O03 | O-11, A-03 | in_progress |
-| S01 | G2 | core | M | F02 | S-01, S-09 | planned |
+| S01 | G2 | core | M | F02 | S-01, S-09 | in_progress |
 | S02 | G2 | core | L | S01, O04 | S-02, S-09 | in_progress |
 | S03 | G2 | core | L | O06, O04 | S-03, S-04, S-05, S-06, S-08 | in_progress |
-| M03 | G2 | core | M | T01, F02 | M-04, M-05, M-06 | planned |
+| M03 | G2 | core | M | T01, F02 | M-04, M-05, M-06 | in_progress |
 | M04 | G2 | core | L | T01, F01 | M-07, M-08 | in_progress |
 | S04 | G2 | core | L | S01, S02, S03, M04 | S-02, S-03, S-07, S-08, S-09, R-05 | in_progress |
 | A01 | G2 | core | M | O04, O03 | A-01, A-02, A-03 | planned |
 | A02 | G2 | core | M | A01, S04, M03 | A-01, A-04 | planned |
 | A03 | G2 | core | M | T02, S01, F02 | A-05 | planned |
 | S05 | G2 | optional | M | S02, S04 | S-10 | planned |
-| M01 | G3 | core | L | O04, T01, M03 | M-01, M-02, O-08, O-10 | planned |
+| M01 | G3 | core | L | O04, T01, M03 | M-01, M-02, O-08, O-10 | in_progress |
 | M02 | G3 | core | L | S04, M01, M03, M04 | M-03, M-06, M-08, R-05 | in_progress |
 | M05 | G3 | core | L | M02, O03 | R-01, R-02, R-03, R-04, R-05 | planned |
 | Q01 | G3 | core | M | F01, O04, S04, M01 | C-02, O-01, O-11, S-03, M-01, M-02, R-04 | planned |
 | G01 | G4 | core | L | F01, P01, O01 | P-03, P-04 | planned |
 | G02 | G4 | core | L | G01, S04, M04, M03 | P-05, P-06 | planned |
 | T05 | G4 | core | M | F01, M04 | T-08, T-09, P-02 | planned |
-| T06 | G4 | core | L | T05, M04 | T-10, M-08, P-02 | planned |
+| T06 | G4 | core | L | T05, M04 | T-10, M-08, P-02 | in_progress |
 | Q02 | G4 | core | M | F01, A02, M02 | A-07, A-08 | planned |
 | G03 | G4 | optional | L | G01, M03, O03, S04 | P-07, P-08 | planned |
 | M06 | G4 | optional | L | M02, M03, M04, M05 | M-09, M-10 | planned |
@@ -274,8 +275,8 @@ S01 提供静态 validate 命令，preview/check 执行挂载由 S02/S04 完成�
 当前代码已交付 `gpui scenario validate` 静态入口：schema v1 使用 deny-unknown-fields，
 校验场景/step ID、路径边界、fixture 内容与哈希、timeout/viewport/clock、selector 和
 assertion 参数，并输出规范化 scenario_hash。缺少 `.gpui/registry-manifest.json` 时报告
-`registry_unavailable` 警告，不冒充已检查组件；desktop preview/check 的运行接线由 S02/S04
-后续切片提供，移动端和完整矩阵仍未接入。
+`registry_unavailable` 警告，不冒充已检查组件；desktop preview/check 已由 S02/S04 接入，
+移动场景已通过 M02 matrix/control driver 接入。静态校验不证明运行环境确定性或真实平台验收。
 
 ### S02 · 原生组件 preview 与 reset
 
@@ -394,8 +395,8 @@ sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化�
 FrozenInputs 现对 local.properties/keystore.properties 只保留相对路径声明，不读取内容
 或复制进快照；该精确文件名过滤不是通用 secret scanner，记录见
 [M04 frozen sensitive input filter](../experiments/M04-frozen-sensitive-input-filter-2026-09-28.md)。
-`src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要的独立证据切片，但尚未接入
-构建缓存或执行器。当前 desktop `build`/`run` 已通过
+`src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要，并已接入普通构建路径与 T06
+产物缓存；check/matrix 的冻结执行器仍未接入。当前 desktop `build`/`run` 已通过
 `src/runner/build_inputs.rs` 组合稳定源码 manifest、Cargo.lock、NativeInputs、
 `rustc -vV` 和显式环境 allowlist，使用真实 BuildKey 生成
 `.gpui/builds/desktop/<key>/cargo-target` 并设置 `CARGO_TARGET_DIR`；见
@@ -432,7 +433,9 @@ iOS 的切片见
 非 live desktop 构建也已登记 Cargo JSON 返回的实际 package binary；记录见
 [M04 desktop artifact manifest](../experiments/M04-desktop-artifact-manifest-2026-09-28.md)。
 M04 仍未完成：live builder、snapshot build orchestration、同 key 在途任务合并和
-`build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。
+`build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。`check → preview → live` 仍从可变项目构建；
+matrix 的 `source_mode=frozen` 校验不能代替实际冻结。环境键遗漏 `CARGO_ENCODED_RUSTFLAGS`
+的问题仍有效，见[当前审计](current-status.md)。
 
 T06 的 desktop 首个缓存切片以 BuildKey 级 OS 文件锁串行请求，manifest 完整校验后跳过
 Rust 编译；记录见
@@ -481,6 +484,14 @@ mismatch 在可解码时另生成 `.gpui/checks/` diff；缺少
 backend/font fingerprint、baseline 缺失或不可比仍保持 `inconclusive`，不自动批准或更新。
 记录见
 [S04 desktop check](../experiments/S04-check-desktop-2026-09-28.md)。
+
+2026-09-29 增量：单场景和 matrix 的 preview 已使用唯一 session key 定向发现 control，
+修复误连已有 preview 的路径；移动场景经 `gpui check --matrix` 接入，单场景入口仍限
+desktop。`CheckReport.context` 已保留 runtime ready/reset generation、environment 和
+uncontrolled inputs。桌面 supervisor 的 kill/wait 仍不能证明应用进程树清理成功；fixture
+重读不更新 hash、真实环境适配和冻结构建仍需补齐，不能据新增报告字段标记 S04 完成。
+当前 context 只随单场景 `CheckReport` 输出；matrix 汇总仍只投影 status、primary error
+和 capture step artifact IDs，完整步骤、context 与 cleanup 详情尚未保留。
 
 视觉 baseline 静态契约已单独交付：`src/scenario/baseline.rs` 读取项目内
 `dev/baselines/<target>/<baseline_id>/manifest.json`，拒绝越界/符号链接/超限文件，校验
@@ -560,8 +571,9 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 ### M02 · 本地 matrix orchestration
 
 代码落点：`src/runner/matrix.rs` 已交付 plan/scheduler/report 契约，
-`src/runner/matrix_admission.rs` 已交付 matrix 配置展开和分发前 admission；后续接入 check
-的 matrix 入口并复用 S04/M03/M04。
+`src/runner/matrix_admission.rs` 已交付配置展开与 admission，`matrix_executor.rs` 已交付
+并行执行与资源锁；`src/commands/check.rs` 已接入 matrix CLI 和 desktop/mobile control
+scenario driver。M04 的同一冻结快照构建仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
@@ -572,7 +584,7 @@ PR 拆分：matrix plan/status/summary 契约与纯 scheduler（已交付）→ 
 （已交付）→ target/scenario admission 与 host/ABI/toolchain preflight（已交付）→
 跨目标并行与 supervisor 内资源锁（已交付）→ mobile runner cell lifecycle（已交付）→
 matrix CLI 与 desktop scenario factory（已交付）→移动 scenario driver 的
-control/native capture 边界（当前切片）→ frozen build、host inventory 完整重连和真实矩阵
+control/native capture、session fencing 和 report context（已交付切片）→ frozen build、host inventory 完整重连和真实矩阵
 验收。
 
 当前契约、移动 scenario driver 边界与 admission 记录见
@@ -643,7 +655,9 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 
 ### T06 · 构建缓存与有界预热
 
-代码落点：拟议 `src/runner/build_cache.rs`、build coordinator、native staging；遵循 M04 BuildKey。
+代码落点：`src/runner/build_cache.rs`、`src/commands/cache.rs` 已实现产物缓存/清理；
+build coordinator 和有界预热仍拟议。遵循 M04 BuildKey；现有切片与输入遗漏见 M04 和
+[当前审计](current-status.md)。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。

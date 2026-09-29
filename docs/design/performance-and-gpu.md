@@ -1,6 +1,9 @@
 # 设计契约：开发延迟、场景性能与 GPU 证据
 
-状态：拟议，未实现。任务：F01、G01–G03、Q02。依赖：[场景](scenarios-and-checks.md)、[平台矩阵](platform-matrix-and-repro.md)。
+状态核查（2026-09-29，`a1395d3`）：F01 的 supervisor span 和 headless 基线已有实现；
+应用性能指标、预算统计、GPU provider 和 Agent 基准仍未实现。详见
+[当前进度](../roadmap/current-status.md)。任务：F01、G01–G03、Q02。
+依赖：[场景](scenarios-and-checks.md)、[平台矩阵](platform-matrix-and-repro.md)。
 
 ## 1. 三类性能问题分别测量
 

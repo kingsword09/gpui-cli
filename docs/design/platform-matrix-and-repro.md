@@ -1,6 +1,10 @@
 # 设计契约：平台 runner、设备租约、矩阵与复现包
 
-状态：拟议，未实现。任务：M01–M06、Q01。依赖：[场景](scenarios-and-checks.md)、[观察协议](observation-protocol.md)。
+状态核查（2026-09-29，`a1395d3`）：移动 runner、主机租约、普通构建冻结/缓存、matrix
+admission/并行执行及 desktop/mobile 场景 CLI 已有实现；同快照矩阵、完整真实跨端验收、
+repro 和远程 runner 未完成。详见[当前进度](../roadmap/current-status.md)。
+下文为完整设计契约，示意 trait 不等于当前 Rust API。任务：M01–M06、Q01。
+依赖：[场景](scenarios-and-checks.md)、[观察协议](observation-protocol.md)。
 
 ## 1. 平台能力必须独立验收
 

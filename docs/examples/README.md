@@ -1,8 +1,9 @@
 # 配置与响应草案
 
-这些文件是路线设计的可解析示例，不是当前 CLI 的完整配置教程。desktop `preview`/`check`
-和静态 `scenario validate` 已有受限实现；matrix/perf/repro/完整 upgrade 工作流仍未实现，
-不能复制文件后就期待所有字段都被当前程序识别。
+这些文件是路线设计的可解析示例，不是当前 CLI 的完整配置教程。静态 `scenario validate`、
+desktop `preview`/`check`、`check --matrix` 及移动 control/native capture 已有受限实现；
+同快照矩阵、perf/repro/完整历史 upgrade 工作流仍未完成。不能复制文件后就期待所有字段和
+平台能力均可用。最新边界见[当前进度](../roadmap/current-status.md)。
 
 | 文件 | 用途 | 实现任务/契约 |
 | --- | --- | --- |

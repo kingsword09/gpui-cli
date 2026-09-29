@@ -15,8 +15,8 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 - required cell 的 failed/cancelled/inconclusive/unavailable 都不能汇总为 passed；required
   全部通过但 optional cell 缺失或失败时汇总为 partial，并保留 cell artifact ids。
 - `MatrixCellRunner` execution boundary 已接入：runner error 变成 failed cell，cleanup error
-  覆盖原本的 passed，cell deadline 传入 adapter；当前 harness 仍按序执行，保留后续并行
-  executor 的相同 report contract。
+  覆盖原本的 passed，cell deadline 传入 adapter；初版顺序 harness 保留为测试/兼容入口，
+  当前 CLI 已使用下述 parallel executor。
 - executor 会在 cleanup 后再次检查 deadline；即使 adapter 迟到地返回 passed，cell 仍记为
   cancelled，已有 artifact id 保留供诊断。Windows CI 曾暴露一项既有 heartbeat/semantics
   socket 测试的帧顺序假设，测试现会有界地应答 heartbeat 并继续等目标 semantics query。
@@ -83,9 +83,10 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
 - 同一 emulator 的 semantics-required Counter scenario 返回
   `unavailable: semantic capture is unavailable for the selected window`；这被保留为真实
   capability 结果，没有用设备截图或 heartbeat 降级成 semantics 通过。
-- check report 现在保留 runner 提供的 `context`：ready/reset generation、实际环境和
-  `uncontrolled_inputs`；Android reset probe 的 generation 1→2 不必再只从 event journal
-  反查。
+- #147 的内部 `CheckReport` 保留 runner 提供的 `context`：ready/reset generation、
+  runtime 自报环境和 `uncontrolled_inputs`。2026-09-29 状态复核发现，matrix CLI 仍将其
+  投影为 status/error/capture artifact IDs，未把 context 或完整步骤写入 `MatrixReport`；
+  因此不能声称 Android matrix JSON 已提供 generation 1→2，仍需事件或额外报告证据。
 
 ## 尚未覆盖
 

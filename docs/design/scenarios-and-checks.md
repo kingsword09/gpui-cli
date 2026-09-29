@@ -1,7 +1,9 @@
 # 设计契约：组件场景、输入与可重复检查
 
-状态：S01 静态 schema 校验已实现；S02 已开始交付 desktop Counter preview/runtime 契约，完整
-preview/check 执行仍未实现。任务：S01–S05、O05/O06、Q01。依赖：[观察协议](observation-protocol.md)。
+状态核查（2026-09-29，`a1395d3`）：静态 schema、三个内置 preview/reset、query/diff、
+输入、desktop check/baseline 和移动 matrix control driver 已有实现；完整环境控制、
+冻结构建与真实连续场景验收未完成。详见[当前进度](../roadmap/current-status.md)。
+下文仍为完整设计契约。任务：S01–S05、O05/O06、Q01。依赖：[观察协议](observation-protocol.md)。
 
 ## 1. 场景是预览、测试和性能测量的共同输入
 

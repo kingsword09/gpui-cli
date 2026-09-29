@@ -1,6 +1,9 @@
 # 设计契约：CLI、MCP、版本知识与 Agent 工作流
 
-状态：拟议，未实现。任务：A01–A04、Q02。核心依赖：[观察](observation-protocol.md)、[场景](scenarios-and-checks.md)。
+状态核查（2026-09-29，`a1395d3`）：A01–A04、Q02 仍未实现；现有 CLI/control/check JSON
+及 report context 是可复用基础，不等于 MCP、context 命令或报告界面已交付。
+详见[当前进度](../roadmap/current-status.md)。下文接口仍为提案。
+核心依赖：[观察](observation-protocol.md)、[场景](scenarios-and-checks.md)。
 
 ## 1. 一套服务，多种入口
 
