@@ -44,6 +44,7 @@ pub enum BuildCoordinatorState {
     Building,
     Succeeded,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -228,11 +229,7 @@ impl BuildCoordinatorLeaderControl {
     fn terminal_record(&self, error: Option<String>) -> BuildCoordinatorRecord {
         let mut record = self.inner.building.clone();
         record.finished_at_ms = Some(timestamp_ms());
-        record.state = if error.is_none() {
-            BuildCoordinatorState::Succeeded
-        } else {
-            BuildCoordinatorState::Failed
-        };
+        record.state = terminal_state(error.as_deref());
         record.error = error;
         record
     }
@@ -508,6 +505,7 @@ where
                         );
                     }
                 }
+                BuildCoordinatorState::Cancelled => {}
             }
         }
 
@@ -621,6 +619,7 @@ where
                         );
                     }
                 }
+                BuildCoordinatorState::Cancelled => {}
             }
         }
 
@@ -716,11 +715,7 @@ where
             pid: process::id(),
             started_at_ms,
             finished_at_ms: Some(timestamp_ms()),
-            state: if result.is_ok() {
-                BuildCoordinatorState::Succeeded
-            } else {
-                BuildCoordinatorState::Failed
-            },
+            state: terminal_state(result.as_ref().err().map(format_error).as_deref()),
             error: result.as_ref().err().map(format_error),
         };
         let state_result = match terminal_state_lock.as_ref() {
@@ -835,6 +830,10 @@ fn wait_for_attempt(
                             .unwrap_or_else(|| "coordinated build failed without an error".into());
                         drop(subscription);
                         bail!("coordinated BuildKey build failed: {reason}");
+                    }
+                    BuildCoordinatorState::Cancelled => {
+                        drop(subscription);
+                        return Ok(WaitOutcome::Abandoned);
                     }
                 }
             }
@@ -1188,6 +1187,14 @@ fn format_error(error: &anyhow::Error) -> String {
     message
 }
 
+fn terminal_state(error: Option<&str>) -> BuildCoordinatorState {
+    match error {
+        None => BuildCoordinatorState::Succeeded,
+        Some(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR) => BuildCoordinatorState::Cancelled,
+        Some(_) => BuildCoordinatorState::Failed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,7 +1461,7 @@ mod tests {
         let cancelled = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
             .unwrap()
             .unwrap();
-        assert_eq!(cancelled.state, BuildCoordinatorState::Failed);
+        assert_eq!(cancelled.state, BuildCoordinatorState::Cancelled);
         assert_eq!(
             cancelled.error.as_deref(),
             Some(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR)
