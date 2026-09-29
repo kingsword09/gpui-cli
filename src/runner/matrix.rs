@@ -5,7 +5,7 @@
 //! never become a passing matrix by omission. Runner creation and platform
 //! side effects remain in the execution adapters.
 
-use crate::scenario::executor::CheckContext;
+use crate::scenario::executor::{CheckContext, CheckReport};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -166,7 +166,7 @@ pub struct MatrixCellError {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MatrixCellResult {
     pub cell_id: String,
     pub target_id: String,
@@ -179,9 +179,11 @@ pub struct MatrixCellResult {
     pub artifact_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<CheckContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_report: Option<CheckReport>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MatrixReport {
     pub plan_id: String,
     pub status: MatrixStatus,
@@ -373,6 +375,7 @@ impl MatrixScheduler {
             error,
             artifact_ids,
             context,
+            check_report: None,
         };
         self.states.insert(cell_id.to_string(), status);
         self.results.insert(cell_id.to_string(), result);
@@ -380,6 +383,22 @@ impl MatrixScheduler {
         if status == MatrixCellState::Failed && self.plan.config.fail_fast {
             self.fail_fast_triggered = true;
             self.request_cancel("fail_fast_after_failure");
+        }
+        Ok(())
+    }
+
+    /// Attaches the complete scenario report after the stable matrix summary
+    /// has been committed.
+    pub fn attach_check_report(
+        &mut self,
+        cell_id: &str,
+        check_report: Option<CheckReport>,
+    ) -> Result<()> {
+        if let Some(check_report) = check_report {
+            self.results
+                .get_mut(cell_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown matrix cell '{cell_id}'"))?
+                .check_report = Some(check_report);
         }
         Ok(())
     }
@@ -409,6 +428,7 @@ impl MatrixScheduler {
                 error: Some(error),
                 artifact_ids: Vec::new(),
                 context: None,
+                check_report: None,
             },
         );
         Ok(())
@@ -531,6 +551,7 @@ impl MatrixScheduler {
                 }),
                 artifact_ids: Vec::new(),
                 context: None,
+                check_report: None,
             },
         );
     }
@@ -640,6 +661,7 @@ mod tests {
             error: Some(error("simulator_missing")),
             artifact_ids: Vec::new(),
             context: None,
+            check_report: None,
         }];
         assert_eq!(summarize_cells(&cells).unwrap(), MatrixStatus::Unavailable);
         cells[0].status = MatrixCellState::Inconclusive;

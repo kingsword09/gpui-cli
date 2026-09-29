@@ -17,12 +17,13 @@ use super::matrix::{
 use super::matrix_admission::MatrixAdmission;
 use super::matrix_resources::MatrixResourcePool;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MatrixCellExecution {
     pub status: MatrixCellState,
     pub error: Option<MatrixCellError>,
     pub artifact_ids: Vec<String>,
     pub context: Option<crate::scenario::executor::CheckContext>,
+    pub check_report: Option<crate::scenario::executor::CheckReport>,
 }
 
 impl MatrixCellExecution {
@@ -32,6 +33,7 @@ impl MatrixCellExecution {
             error: None,
             artifact_ids,
             context: None,
+            check_report: None,
         }
     }
 
@@ -44,11 +46,20 @@ impl MatrixCellExecution {
             }),
             artifact_ids: Vec::new(),
             context: None,
+            check_report: None,
         }
     }
 
     pub fn with_context(mut self, context: crate::scenario::executor::CheckContext) -> Self {
         self.context = Some(context);
+        self
+    }
+
+    pub fn with_check_report(
+        mut self,
+        check_report: crate::scenario::executor::CheckReport,
+    ) -> Self {
+        self.check_report = Some(check_report);
         self
     }
 }
@@ -103,6 +114,7 @@ pub fn execute_matrix<R: MatrixCellRunner>(
                     }),
                     artifact_ids: Vec::new(),
                     context: None,
+                    check_report: None,
                 },
             };
             let cleanup_error = runner.cleanup_cell(cell, deadline).err();
@@ -126,6 +138,7 @@ pub fn execute_matrix<R: MatrixCellRunner>(
                 (execution.status, execution.error)
             };
             let context = execution.context;
+            let check_report = execution.check_report;
             scheduler.complete_with_context(
                 &cell_id,
                 status,
@@ -134,6 +147,7 @@ pub fn execute_matrix<R: MatrixCellRunner>(
                 execution.artifact_ids,
                 context,
             )?;
+            scheduler.attach_check_report(&cell_id, check_report)?;
         }
         if scheduler.is_complete() {
             return scheduler.report();
@@ -230,6 +244,7 @@ where
                         }),
                         artifact_ids: Vec::new(),
                         context: None,
+                        check_report: None,
                     });
                     let _ = sender.send(result);
                 });
@@ -265,6 +280,7 @@ struct ParallelWorkerResult {
     error: Option<MatrixCellError>,
     artifact_ids: Vec<String>,
     context: Option<crate::scenario::executor::CheckContext>,
+    check_report: Option<crate::scenario::executor::CheckReport>,
 }
 
 fn run_parallel_cell<R, F>(
@@ -289,6 +305,7 @@ where
                 }),
                 artifact_ids: Vec::new(),
                 context: None,
+                check_report: None,
             };
         }
     };
@@ -305,6 +322,7 @@ where
                 }),
                 artifact_ids: Vec::new(),
                 context: None,
+                check_report: None,
             };
         }
     };
@@ -318,6 +336,7 @@ where
             }),
             artifact_ids: Vec::new(),
             context: None,
+            check_report: None,
         },
         Err(_) => MatrixCellExecution {
             status: MatrixCellState::Failed,
@@ -327,6 +346,7 @@ where
             }),
             artifact_ids: Vec::new(),
             context: None,
+            check_report: None,
         },
     };
     let cleanup_error = match catch_unwind(AssertUnwindSafe(|| runner.cleanup_cell(cell, deadline)))
@@ -354,6 +374,7 @@ where
         (execution.status, execution.error)
     };
     let context = execution.context;
+    let check_report = execution.check_report;
     let artifact_ids = execution.artifact_ids;
     drop(resource_guard);
     ParallelWorkerResult {
@@ -362,6 +383,7 @@ where
         error,
         artifact_ids,
         context,
+        check_report,
     }
 }
 
@@ -390,7 +412,8 @@ fn complete_parallel_result(
         error,
         result.artifact_ids,
         result.context,
-    )
+    )?;
+    scheduler.attach_check_report(&result.cell_id, result.check_report)
 }
 
 fn dispatch_is_empty(scheduler: &MatrixScheduler, plan: &MatrixPlan) -> bool {
@@ -412,7 +435,9 @@ mod tests {
     use super::*;
     use crate::runner::matrix::{MatrixCellSpec, MatrixConfig, MatrixStatus};
     use crate::runner::matrix_resources::MatrixResourcePool;
-    use crate::scenario::executor::CheckContext;
+    use crate::scenario::executor::{
+        CheckContext, CheckError, CheckReport, CheckStatus, CleanupReport, StepReport, StepStatus,
+    };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::{
@@ -480,6 +505,49 @@ mod tests {
         }
     }
 
+    fn check_report() -> CheckReport {
+        CheckReport {
+            schema_version: 1,
+            scenario_id: "smoke".into(),
+            component: "Counter".into(),
+            fixture_hash: Some("fixture-hash".into()),
+            context: None,
+            status: CheckStatus::Failed,
+            steps: vec![StepReport {
+                id: "assert-count".into(),
+                kind: "assert".into(),
+                status: StepStatus::Failed,
+                duration_ms: 7,
+                before_observation_id: Some("obs-before".into()),
+                after_observation_id: Some("obs-after".into()),
+                before_log_seq: Some(10),
+                after_log_seq: Some(11),
+                action: None,
+                assertion: None,
+                capture: None,
+                error: Some(CheckError {
+                    code: "assertion_failed".into(),
+                    message: "count did not match".into(),
+                    details: None,
+                }),
+            }],
+            primary_error: Some(CheckError {
+                code: "assertion_failed".into(),
+                message: "count did not match".into(),
+                details: None,
+            }),
+            cleanup: CleanupReport {
+                attempted: true,
+                succeeded: false,
+                error: Some(CheckError {
+                    code: "cleanup_failed".into(),
+                    message: "preview did not exit".into(),
+                    details: None,
+                }),
+            },
+        }
+    }
+
     #[test]
     fn executor_preserves_artifacts_and_optional_unavailable_is_partial() {
         let mut runner = FakeRunner {
@@ -530,6 +598,37 @@ mod tests {
             json["cells"][0]["context"]["snapshot_hash"],
             "snapshot-hash"
         );
+    }
+
+    #[test]
+    fn executor_preserves_complete_check_report_and_json_round_trips_it() {
+        let check_report = check_report();
+        let mut runner = FakeRunner {
+            outcomes: BTreeMap::from([(
+                "required".into(),
+                MatrixCellExecution::passed(vec!["capture-a".into()])
+                    .with_check_report(check_report.clone()),
+            )]),
+            cleanup_failures: BTreeMap::new(),
+            cleaned: Vec::new(),
+        };
+        let mut one_cell_plan = plan();
+        one_cell_plan.cells.truncate(1);
+
+        let report = execute_matrix(one_cell_plan, &mut runner, Instant::now()).unwrap();
+
+        assert_eq!(report.cells[0].check_report, Some(check_report.clone()));
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["cells"][0]["check_report"]["steps"][0]["id"],
+            "assert-count"
+        );
+        assert_eq!(
+            json["cells"][0]["check_report"]["cleanup"]["succeeded"],
+            false
+        );
+        let decoded: MatrixReport = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.cells[0].check_report, Some(check_report));
     }
 
     #[test]

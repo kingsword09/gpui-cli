@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 /// Final status of a scenario check.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     Passed,
@@ -25,7 +25,7 @@ pub enum CheckStatus {
 }
 
 /// Status recorded for an individual scenario step.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     Passed,
@@ -37,7 +37,7 @@ pub enum StepStatus {
 }
 
 /// Result of delivering a normal GPUI input action.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionStatus {
     Succeeded,
@@ -105,7 +105,7 @@ impl DriverError {
 }
 
 /// Error information attached to a step or the primary report outcome.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CheckError {
     pub code: String,
     pub message: String,
@@ -114,7 +114,7 @@ pub struct CheckError {
 }
 
 /// A bounded semantic node from one immutable observation.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SemanticNode {
     pub logical_id: Option<String>,
     pub role: Option<String>,
@@ -128,7 +128,7 @@ pub struct SemanticNode {
 }
 
 /// Evidence produced by a screenshot provider for a scenario observation.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ScreenshotEvidence {
     pub artifact_id: Option<String>,
     pub baseline_id: Option<String>,
@@ -149,7 +149,7 @@ pub struct ScreenshotEvidence {
 }
 
 /// A local diagnostic diff written by a check after a visual mismatch.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct DiffEvidence {
     pub path: String,
     pub bytes: u64,
@@ -161,7 +161,7 @@ pub struct DiffEvidence {
 }
 
 /// The smallest observation contract needed by the check core.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Observation {
     pub observation_id: String,
     pub window_id: Option<String>,
@@ -176,14 +176,14 @@ pub struct Observation {
 }
 
 /// Action evidence stored in the per-step report.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ActionEvidence {
     pub status: ActionStatus,
     pub operation_id: Option<String>,
 }
 
 /// Evidence stored when a capture provider publishes an artifact.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CaptureEvidence {
     pub artifact_id: Option<String>,
     pub kinds: Vec<String>,
@@ -233,7 +233,7 @@ impl ActionResult {
 }
 
 /// The normalized result of one assertion evaluation.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AssertionEvaluation {
     pub assertion: String,
     pub status: StepStatus,
@@ -243,7 +243,7 @@ pub struct AssertionEvaluation {
 
 /// One durable check step record. Observation ids and log sequence numbers
 /// make the report useful even when a later step fails.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct StepReport {
     pub id: String,
     pub kind: String,
@@ -265,7 +265,7 @@ pub struct StepReport {
 
 /// Cleanup is reported separately so a cleanup failure cannot overwrite the
 /// original failed/unknown step and make diagnosis ambiguous.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CleanupReport {
     pub attempted: bool,
     pub succeeded: bool,
@@ -291,7 +291,7 @@ pub struct CheckContext {
 }
 
 /// Structured result of one scenario execution.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CheckReport {
     pub schema_version: u32,
     pub scenario_id: String,
