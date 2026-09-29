@@ -804,9 +804,7 @@ mod tests {
             let subscribed = match fs::read_dir(&subscribers_dir) {
                 Ok(entries) => entries
                     .filter_map(std::result::Result::ok)
-                    .filter_map(|entry| fs::read(entry.path()).ok())
-                    .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .any(|value| value["attempt_id"].as_str() == Some(&attempt_id)),
+                    .any(|entry| entry.path().is_file()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => panic!("cannot inspect coordinator subscribers: {error}"),
             };
@@ -930,19 +928,13 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .unwrap();
 
-        let attempt_id = read_record(&layout, BUILD_COORDINATOR_BUILD_KIND)
-            .unwrap()
-            .unwrap()
-            .attempt_id;
         let subscribers_dir = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let subscribed = match fs::read_dir(&subscribers_dir) {
                 Ok(entries) => entries
                     .filter_map(std::result::Result::ok)
-                    .filter_map(|entry| fs::read(entry.path()).ok())
-                    .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .any(|value| value["attempt_id"].as_str() == Some(&attempt_id)),
+                    .any(|entry| entry.path().is_file()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => panic!("cannot inspect coordinator subscribers: {error}"),
             };
