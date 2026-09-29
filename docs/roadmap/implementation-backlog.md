@@ -433,15 +433,17 @@ iOS 的切片见
 [M04 iOS artifact manifest](../experiments/M04-ios-artifact-manifest-2026-09-28.md)。
 非 live desktop 构建也已登记 Cargo JSON 返回的实际 package binary；记录见
 [M04 desktop artifact manifest](../experiments/M04-desktop-artifact-manifest-2026-09-28.md)。
-M04 仍未完成：live builder、snapshot build orchestration、同 key 在途任务合并和
+M04 仍未完成：snapshot build orchestration、同 key 在途任务合并和
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
 用于 baseline/diff、移动 artifact 和 lease 路径。单场景 context 保留 snapshot hash/BuildKey，
 matrix per-cell context 现在也保留 shared snapshot hash、runtime environment 和 #161 的
-target-specific BuildKey，但不把 key evidence 伪造成构建完成或复用。local `build.rs`
+target-specific BuildKey；#163 又让 preview builder 使用 source-project 的 target/JNI/Gradle/
+DerivedData 输出布局，并在同一 supervisor 内串行同 key cell，但不把 key/layout evidence
+伪造成构建完成或复用。local `build.rs`
 等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
-allowlist 遗漏已由 #149 修复，但其他输入遗漏、target-specific 构建编排和冻结执行边界仍有效，
+allowlist 遗漏已由 #149 修复，但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
 见[当前审计](current-status.md)。
 
 T06 的 desktop 首个缓存切片以 BuildKey 级 OS 文件锁串行请求，manifest 完整校验后跳过
@@ -500,12 +502,13 @@ uncontrolled inputs。#151 已让 desktop check 通过 process group/Windows Job
 保持 fixture identity 一致。#155 让单场景 desktop check 使用重核验的冻结 workspace snapshot，
 并在 context 中写入 snapshot hash/BuildKey；#157 让 matrix 在 admission 前创建一个共享
 snapshot，所有 cell 复用其 runtime root/hash。完整 GUI check cleanup/reset probe、真实环境
-适配、target-specific 输出编排、matrix steps/cleanup 详情仍需补齐，不能据这些局部修复标记 S04
+适配、跨命令共享构建、matrix steps/cleanup 详情仍需补齐，不能据这些局部修复标记 S04
 完成。记录见
 [S04 frozen single check](../experiments/S04-frozen-single-check-2026-09-29.md) 和
 [S04 frozen matrix snapshot](../experiments/S04-frozen-matrix-snapshot-2026-09-29.md) 以及
 [S04 matrix context](../experiments/S04-matrix-context-2026-09-29.md) 和
-[S04 matrix target BuildKey](../experiments/S04-matrix-target-build-key-2026-09-29.md)。
+[S04 matrix target BuildKey](../experiments/S04-matrix-target-build-key-2026-09-29.md) 以及
+[S04 matrix build output layout](../experiments/S04-matrix-build-output-layout-2026-09-29.md)。
 当前 context 已随单场景 `CheckReport` 和每个 matrix `MatrixCellResult` 输出；matrix 汇总仍只
 投影 status、primary error 和 capture step artifact IDs，完整步骤与 cleanup 详情尚未保留。
 
@@ -590,8 +593,8 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 `src/runner/matrix_admission.rs` 已交付配置展开与 admission，`matrix_executor.rs` 已交付
 并行执行与资源锁；`src/commands/check.rs` 已接入 matrix CLI 和 desktop/mobile control
 scenario driver。#157 已接入 M04 的共享冻结 snapshot 输入边界，#159 已将 per-cell context
-传入 MatrixReport，#161 已将 target-specific BuildKey 写入 context；构建输出编排、共享构建
-和完整 cell steps/cleanup report 仍未接入。
+传入 MatrixReport，#161 已将 target-specific BuildKey 写入 context，#163 已绑定 source-project
+output layout 并串行同 key cell；跨命令共享构建和完整 cell steps/cleanup report 仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
