@@ -4,6 +4,7 @@ use super::build_key::BuildKey;
 use super::build_manifest::BuildArtifactManifest;
 use super::output_layout::{BUILD_OUTPUT_OWNER_FILE, BuildOutputLayout, BuildPlatform};
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs::TryLockError;
 use std::fs::{self, File, OpenOptions};
@@ -111,7 +112,30 @@ impl BuildOutputLock {
         })
     }
 
-    fn try_acquire_at(root: &Path, create_lock: bool) -> Result<LockAttempt> {
+    /// Tries to become the coordinator leader for one BuildKey output root.
+    ///
+    /// This is deliberately non-blocking. A caller that observes `None` can
+    /// subscribe to the coordinator record and wait for the current leader.
+    pub fn try_acquire(layout: &BuildOutputLayout) -> Result<Option<Self>> {
+        fs::create_dir_all(&layout.root)
+            .with_context(|| format!("creating BuildKey output root {}", layout.root.display()))?;
+        match Self::try_acquire_at(&layout.root, true, Some(layout.key_hash.clone()))? {
+            LockAttempt::Acquired(lock) => {
+                layout.prepare().with_context(|| {
+                    format!("preparing locked BuildKey output {}", layout.key_hash)
+                })?;
+                Ok(Some(lock))
+            }
+            LockAttempt::Busy => Ok(None),
+            LockAttempt::Missing => Ok(None),
+        }
+    }
+
+    fn try_acquire_at(
+        root: &Path,
+        create_lock: bool,
+        key_hash: Option<String>,
+    ) -> Result<LockAttempt> {
         let lock_path = root.join(super::output_layout::BUILD_OUTPUT_LOCK_FILE);
         match fs::symlink_metadata(root) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -157,7 +181,7 @@ impl BuildOutputLock {
             .with_context(|| format!("opening BuildKey output lock {}", lock_path.display()))?;
         match file.try_lock() {
             Ok(()) => Ok(LockAttempt::Acquired(Self::from_locked_file(
-                root, lock_path, file, None,
+                root, lock_path, file, key_hash,
             )?)),
             Err(TryLockError::WouldBlock) => Ok(LockAttempt::Busy),
             Err(TryLockError::Error(error)) => Err(error)
@@ -350,7 +374,7 @@ pub fn clean_build_cache(
             continue;
         }
 
-        let attempt = BuildOutputLock::try_acquire_at(&candidate.root, !dry_run)?;
+        let attempt = BuildOutputLock::try_acquire_at(&candidate.root, !dry_run, None)?;
         let lock = match attempt {
             LockAttempt::Acquired(lock) => Some(lock),
             LockAttempt::Busy => {
@@ -371,6 +395,11 @@ pub fn clean_build_cache(
             .saturating_add(current.bytes);
         if current.unsafe_entries {
             report.unsafe_keys_skipped += 1;
+            drop(lock);
+            continue;
+        }
+        if coordinator_is_active(&candidate.root)? {
+            report.active_keys_skipped += 1;
             drop(lock);
             continue;
         }
@@ -463,7 +492,15 @@ fn inspect_tree(root: &Path) -> Result<TreeStats> {
 }
 
 fn inspect_entry(path: &Path, stats: &mut TreeStats) -> Result<()> {
-    if path.file_name() == Some(std::ffi::OsStr::new(BUILD_OUTPUT_OWNER_FILE)) {
+    if matches!(
+        path.file_name(),
+        Some(
+            name
+        ) if name == std::ffi::OsStr::new(BUILD_OUTPUT_OWNER_FILE)
+            || name == std::ffi::OsStr::new(super::output_layout::BUILD_COORDINATOR_STATE_FILE)
+            || name == std::ffi::OsStr::new(super::output_layout::BUILD_COORDINATOR_LOCK_FILE)
+            || name == std::ffi::OsStr::new(super::output_layout::BUILD_COORDINATOR_SUBSCRIBERS_DIR)
+    ) {
         return Ok(());
     }
     let metadata = fs::symlink_metadata(path)
@@ -501,6 +538,54 @@ fn clear_candidate_contents(root: &Path) -> Result<u64> {
         removed_bytes = removed_bytes.saturating_add(remove_cache_entry(&path)?);
     }
     Ok(removed_bytes)
+}
+
+fn coordinator_is_active(root: &Path) -> Result<bool> {
+    let directory = root.join(super::output_layout::BUILD_COORDINATOR_SUBSCRIBERS_DIR);
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "checking BuildKey coordinator subscribers {}",
+                    directory.display()
+                )
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(true);
+    }
+
+    for entry in fs::read_dir(&directory)? {
+        let path = entry?.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading coordinator subscriber {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        let file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Ok(true),
+        };
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                let _ = file.unlock();
+                let _ = fs::remove_file(&path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(true),
+            Err(_) => return Ok(true),
+        }
+    }
+    Ok(false)
 }
 
 fn remove_cache_entry(path: &Path) -> Result<u64> {
@@ -913,6 +998,87 @@ mod tests {
         assert_eq!(report.keys_cleaned, 1);
         assert!(payload.is_file());
         assert!(!layout.lock_file_path().exists());
+    }
+
+    #[test]
+    fn cache_clean_excludes_coordinator_metadata_from_size() {
+        let base = tempfile::tempdir().unwrap();
+        let builds_root = base.path().join(".gpui/builds");
+        let layout = layout(&builds_root, &key());
+        layout.prepare().unwrap();
+        let payload = add_cache_file(&layout, "debug/app", b"cached output");
+        fs::write(
+            layout
+                .root
+                .join(super::super::output_layout::BUILD_OUTPUT_OWNER_FILE),
+            b"owner metadata",
+        )
+        .unwrap();
+        fs::write(
+            layout
+                .root
+                .join(super::super::output_layout::BUILD_COORDINATOR_STATE_FILE),
+            b"coordinator state",
+        )
+        .unwrap();
+        fs::write(
+            layout
+                .root
+                .join(super::super::output_layout::BUILD_COORDINATOR_LOCK_FILE),
+            b"coordinator lock",
+        )
+        .unwrap();
+        let subscribers = layout
+            .root
+            .join(super::super::output_layout::BUILD_COORDINATOR_SUBSCRIBERS_DIR);
+        fs::create_dir_all(&subscribers).unwrap();
+        fs::write(subscribers.join("subscriber.json"), b"subscriber").unwrap();
+
+        let report = clean_build_cache(&builds_root, 0, false).unwrap();
+
+        assert_eq!(report.initial_bytes, b"cached output".len() as u64);
+        assert_eq!(report.evicted_bytes, report.initial_bytes);
+        assert!(!payload.exists());
+        assert!(layout.lock_file_path().is_file());
+    }
+
+    #[test]
+    fn cache_clean_skips_a_key_with_an_active_coordinator_subscriber() {
+        use std::sync::mpsc;
+
+        let base = tempfile::tempdir().unwrap();
+        let builds_root = base.path().join(".gpui/builds");
+        let layout = layout(&builds_root, &key());
+        layout.prepare().unwrap();
+        let payload = add_cache_file(&layout, "debug/app", b"active output");
+        let subscribers = layout
+            .root
+            .join(super::super::output_layout::BUILD_COORDINATOR_SUBSCRIBERS_DIR);
+        fs::create_dir_all(&subscribers).unwrap();
+        let subscriber = subscribers.join("subscriber.json");
+        fs::write(&subscriber, br#"{"attempt_id":"attempt"}"#).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let thread_subscriber = subscriber.clone();
+        let holder = thread::spawn(move || {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(thread_subscriber)
+                .unwrap();
+            file.lock_exclusive().unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        // The channel guarantees the file lock is held before cleanup starts.
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let report = clean_build_cache(&builds_root, 0, false).unwrap();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        assert_eq!(report.active_keys_skipped, 1);
+        assert_eq!(report.keys_cleaned, 0);
+        assert!(payload.is_file());
     }
 
     #[test]
