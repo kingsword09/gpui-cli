@@ -397,7 +397,7 @@ FrozenInputs 现对 local.properties/keystore.properties 只保留相对路径�
 或复制进快照；该精确文件名过滤不是通用 secret scanner，记录见
 [M04 frozen sensitive input filter](../experiments/M04-frozen-sensitive-input-filter-2026-09-28.md)。
 `src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要，并已接入普通构建路径与 T06
-产物缓存；check/matrix 的冻结执行器仍未接入。当前 desktop `build`/`run` 已通过
+产物缓存。当前 desktop `build`/`run` 已通过
 `src/runner/build_inputs.rs` 组合稳定源码 manifest、Cargo.lock、NativeInputs、
 `rustc -vV` 和显式环境 allowlist，使用真实 BuildKey 生成
 `.gpui/builds/desktop/<key>/cargo-target` 并设置 `CARGO_TARGET_DIR`；见
@@ -434,9 +434,12 @@ iOS 的切片见
 非 live desktop 构建也已登记 Cargo JSON 返回的实际 package binary；记录见
 [M04 desktop artifact manifest](../experiments/M04-desktop-artifact-manifest-2026-09-28.md)。
 M04 仍未完成：live builder、snapshot build orchestration、同 key 在途任务合并和
-`build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。`check → preview → live` 仍从可变项目构建；
-matrix 的 `source_mode=frozen` 校验不能代替实际冻结。`CARGO_ENCODED_RUSTFLAGS` 的已确认
-allowlist 遗漏已由 #149 修复，但其他输入遗漏和冻结执行边界仍有效，见[当前审计](current-status.md)。
+`build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
+`desktop_build_plan`，从重核验后的 workspace snapshot 读取 scenario/fixture，并从 snapshot
+root 启动 preview；原项目 root 仅用于 baseline/diff 输出，snapshot hash 和 BuildKey 进入
+`CheckContext`。local `build.rs` 等未建模输入会让严格路径直接不可用，不回退到可变目录。
+matrix 的 `source_mode=frozen` 校验仍不能代替实际冻结，也尚未共享该 snapshot。`CARGO_ENCODED_RUSTFLAGS`
+的已确认 allowlist 遗漏已由 #149 修复，但其他输入遗漏和冻结执行边界仍有效，见[当前审计](current-status.md)。
 
 T06 的 desktop 首个缓存切片以 BuildKey 级 OS 文件锁串行请求，manifest 完整校验后跳过
 Rust 编译；记录见
@@ -491,8 +494,11 @@ backend/font fingerprint、baseline 缺失或不可比仍保持 `inconclusive`�
 desktop。`CheckReport.context` 已保留 runtime ready/reset generation、environment 和
 uncontrolled inputs。#151 已让 desktop check 通过 process group/Windows Job Object
 终止 owned process tree，并覆盖后代持有输出管道的回归测试；#153 已让 reset/runtime/report
-保持 fixture identity 一致。完整 GUI check cleanup/reset probe、真实环境适配和冻结构建仍需补齐，
-不能据这些局部修复标记 S04 完成。
+保持 fixture identity 一致。#155 又让单场景 desktop check 使用重核验的冻结 workspace snapshot，
+并在 context 中写入 snapshot hash/BuildKey；matrix 仍未消费同一 snapshot。
+完整 GUI check cleanup/reset probe、真实环境适配、matrix 冻结执行和报告传播仍需补齐，不能据
+这些局部修复标记 S04 完成。记录见
+[S04 frozen single check](../experiments/S04-frozen-single-check-2026-09-29.md)。
 当前 context 只随单场景 `CheckReport` 输出；matrix 汇总仍只投影 status、primary error
 和 capture step artifact IDs，完整步骤、context 与 cleanup 详情尚未保留。
 

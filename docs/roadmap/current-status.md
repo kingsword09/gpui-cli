@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-09-29（Asia/Shanghai）。核查代码：`3e8b874`（PR #153 squash merge）。
+更新日期：2026-09-29（Asia/Shanghai）。核查代码：`12b1338`（PR #155 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -10,8 +10,9 @@
 ## 1. 当前结论
 
 基础 CLI/Live 已有实现，macOS 窗口观察有限可用；场景、输入、check、视觉基线和本地 matrix
-已接入代码。iOS simulator/Android runner、移动 matrix control driver 也已落地。
-现阶段仍未完成同一冻结快照的场景矩阵、完整移动语义/输入验收、MCP、复现包或性能验证闭环。
+已接入代码。单场景 desktop check 已接入严格冻结输入路径；iOS simulator/Android runner、移动
+matrix control driver 也已落地。现阶段仍未完成同一冻结快照的场景矩阵、完整移动语义/输入验收、
+MCP、复现包或性能验证闭环。
 
 35 项工作包更新为 **1 done、21 in_progress、13 planned、0 in_review**。
 O03 保留已有 `done`；S01/M01/M03/T06 从过时的 `planned` 改为 `in_progress`；
@@ -22,7 +23,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、cleanup/fixture identity hardening | 语义激活、真实环境适配、冻结 check、真实连续场景验收及 MCP |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景 desktop frozen check、cleanup/fixture identity hardening | 语义激活、真实环境适配、matrix 共享冻结快照、真实连续场景验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture | 完整三端同快照矩阵、可靠日志归属、设备重连、repro 和 L2/L3 CI |
 | G4 | 普通构建的缓存复用和显式清理 | 缓存输入遗漏、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
@@ -40,6 +41,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `1256bb3`（#149） | BuildKey 环境 allowlist 纳入 `CARGO_ENCODED_RUSTFLAGS`，并增加 hash 回归测试 | 修复该已确认的缓存键遗漏；不等于所有 build.rs/Gradle/NDK/Xcode 隐藏输入或整个 M04/T06 已完成 |
 | `5b63656`（#151） | desktop check preview 使用 process-group/Windows Job Object 归属，cleanup/Drop 终止整个 owned process tree；新增后代管道回归测试 | 修复 supervisor-only cleanup 路径；真实 GPUI check 的完整 GUI 进程验收、fixture hash 和其他 S04 门槛仍未完成 |
 | `3e8b874`（#153） | reset 重新计算当前 fixture SHA-256，新的 `scenario_ready` 和单场景 `CheckReport` 使用 runtime fixture identity | 修复 reset 后报告仍保留启动 hash 的路径；真实 GUI reset probe、matrix report 传播和冻结构建仍未完成 |
+| `12b1338`（#155） | 单场景 desktop check 通过 `desktop_build_plan` 创建并校验冻结 workspace snapshot，从 snapshot root 启动 preview；`CheckContext` 暴露 snapshot hash 和 BuildKey | matrix check 保持旧路径，尚未共享同一冻结 snapshot；local `build.rs` 等未建模输入会让严格 check 直接不可用，不回退到可变目录 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -68,8 +70,8 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | S02 | in_progress | Counter/LoginForm/VirtualList preview/reset；Android preview 已接入，真实环境适配仍有缺口 |
 | S03 | in_progress | click/type/key/scroll、正常事件路径、owner/scope 和 unknown 语义；真实输入/遮挡/污染及持久幂等验收未齐 |
 | M03 | in_progress | 主机 OS 锁、owner/fencing、heartbeat，run/live/capture 和移动 matrix 已接入；重连和真实竞争矩阵未齐 |
-| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；`CARGO_ENCODED_RUSTFLAGS` 已纳入 key，check/matrix 未冻结且仍有未建模输入 |
-| S04 | in_progress | executor、desktop check、baseline/diff/approve、移动 matrix 场景 driver、报告 context、owned process-tree/fixture identity cleanup；环境及三夹具各 20 次真实验收未齐 |
+| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；单场景 desktop check 已消费冻结 snapshot 和 BuildKey，matrix 仍未共享冻结快照且仍有未建模输入 |
+| S04 | in_progress | executor、desktop check、单场景 frozen inputs、baseline/diff/approve、移动 matrix 场景 driver、报告 context、owned process-tree/fixture identity cleanup；matrix、环境及三夹具各 20 次真实验收未齐 |
 | A01 | planned | CLI/control 可复用；无 MCP 只读适配、JSON-RPC server 或独立 Agent service |
 | A02 | planned | action/operation/check 可复用；无 MCP 动作/取消/owner 适配 |
 | A03 | planned | pin/manifest/registry 可复用；无 context 命令、版本知识索引或工作流包 |
@@ -104,8 +106,11 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 
 另外两条旧缺口继续有效，并补记本轮确认的 matrix 报告边界：
 
-- `check → preview → live` 仍在可变项目根执行构建；matrix 接受 `source_mode = "frozen"`
-  不表示已创建或消费同一个冻结快照。普通 `build/run` 的冻结能力不能外推到这条路径。
+- 单场景 desktop `check` 已通过 `desktop_build_plan` 创建并重核验独立 FrozenInputs snapshot，
+  从 snapshot root 启动 preview，并把原项目 root 仅用于 baseline/diff 输出；严格路径遇到
+  local `build.rs` 等未建模输入会直接不可用。matrix check 仍在可变项目根执行，接受
+  `source_mode = "frozen"` 不表示已创建或消费同一个冻结快照；普通 `build/run` 的冻结能力也
+  不能外推到 matrix 路径。
 - [桌面模板](../../templates/desktop/src/main.rs) 仍固定 Light 主题及窗口注册尺寸；
   `ready_environment` 中 theme/locale/clock/seed 来自配置。报告保留这些值改善了追踪性，
   不能代替真实 viewport/DPI、环境控制、字体/backend 和语义 provider 的验证。
@@ -115,7 +120,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 
 ## 5. 验证记录与证据范围
 
-本轮验证针对上述 `3e8b874` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
+本轮验证针对上述 `12b1338` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
 `artifacts/progress-audit-2026-09-29/`（忽略的本机产物目录，不是已发布验收证据）。
 测试独立设置 `GPUI_DEVICE_LEASE_DIR`，避免与其他 worktree 的租约测试互相影响。
 
@@ -128,6 +133,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `cargo x check-design-docs`、`git diff --check` | 通过；仅验证文档/示例一致性 |
 | 两份 35 项状态表逐项比对 | 相同；1 done、21 in_progress、13 planned |
 | PR #151 CI | required checks 全部通过；首次 Windows 并发测试波动重跑后通过，三 OS check、desktop-template、android-template、baseline-driver 均通过 |
+| PR #155 CI | required checks 全部通过；三 OS check、两组 desktop-template、两组 android-template、baseline-driver 均通过；无 release/tag | [PR #155](https://github.com/kingsword09/gpui-cli/pull/155) |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
@@ -137,6 +143,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | check 会话归属 | 旧 preview 收到的 reset 数为 0，旧 preview 仍运行 | `check-probes.json` |
 | check 清理 | 旧探针记录了 supervisor-only cleanup 的问题；#151 已改用 process group/Job Object，并用后代持有管道回归测试验证终止传播；尚未重跑完整 GUI check cleanup probe | `check-probes.json`、[S04 process-tree cleanup](../experiments/S04-process-tree-cleanup-2026-09-29.md) |
 | fixture 身份 | 修复前探针记录初值 0→42、generation 1→2，报告 hash 仍为初始值；#153 已接入 runtime hash 刷新和报告传播，尚未重跑完整 GUI probe | `runtime-probes.json`、[S04 fixture identity](../experiments/S04-fixture-hash-2026-09-29.md) |
+| 单场景 frozen check | #155 已让 desktop 单场景从重核验后的 workspace snapshot 读取 scenario/fixture，并在 context 中保留 snapshot hash/BuildKey；matrix 未纳入本切片 | [S04 frozen single check](../experiments/S04-frozen-single-check-2026-09-29.md) |
 | v1 兼容 | app proto 1 为 `unsupported_version`；control schema 1 为 `invalid_schema`；schema 2 可用 | `cli-probes.json` |
 | 历史升级 | 复制上次用 `3df7a6c` CLI 生成的未修改项目，执行 `upgrade plan --to agent-native-v1-draft --json`，仍退出 1、`baseline_unavailable` | `upgrade-probe.json`、`old-t02-upgrade.json` |
 | doctor 版本 | shim 输出不可解析版本但退出 0，doctor 仍 overall=pass | `runtime-probes.json` |
@@ -152,7 +159,7 @@ PNG 仅有临时路径和记录 hash，未形成持久 CI 产物。本轮没有�
 
 ## 6. 后续接续顺序
 
-1. 让 check/matrix 消费同一冻结快照，并补齐真实环境身份/viewport/DPI 与 matrix report 传播。
+1. 将 #155 的冻结路径扩展到 matrix，使同一组 targets/scenarios 共享一个重核验 snapshot，并补齐真实环境身份/viewport/DPI 与 matrix report 传播。
 2. 补齐 v1 在线兼容、不可变历史模板基线和 doctor 版本解析；保留现有拒绝/降级边界。
 3. 完成 macOS 三夹具各连续 20 次及故障变体，再收口移动语义/输入和完整三端矩阵。
 4. 按依赖继续 MCP、repro、L2/L3 CI；性能、索引/预热、Agent 基准按各自验收推进。
