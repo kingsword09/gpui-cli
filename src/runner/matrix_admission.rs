@@ -184,7 +184,19 @@ impl MatrixAdmissionContext {
         .into_iter()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-        let mobile_capabilities = BTreeSet::from(["capture.device".to_string()]);
+        let mobile_capabilities = [
+            "screenshot",
+            "capture.device",
+            "semantics",
+            "semantics.read",
+            "semantics.bounds",
+            "scenario.reset",
+            "input.pointer",
+            "input.keyboard",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
         Self {
             project_targets: Some(
                 project_targets
@@ -949,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_semantics_requirement_is_unavailable_without_a_mobile_scenario_driver() {
+    fn unsupported_mobile_scene_requirement_is_unavailable() {
         let matrix: MatrixFile = toml::from_str(
             r#"
                 schema_version = 1
@@ -965,7 +977,7 @@ mod tests {
         .unwrap();
         let admission = admit_matrix(
             matrix,
-            scenarios(vec!["semantics", "capture.device"]),
+            scenarios(vec!["capture.scene", "capture.device"]),
             None,
             &local_context(MatrixPlatform::Android),
         )

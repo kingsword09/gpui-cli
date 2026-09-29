@@ -364,8 +364,9 @@ scroll（当前已交付）→ 通用滚动容器显式声明契约（当前已�
 后台 heartbeat 和 owner mismatch 防护；路径 symlink、跨项目同设备争用、Android TCP serial
 文件名和 fencing lost 已有纯 Rust 验证。`commands/run.rs` 与 `commands/live.rs` 已将
 iOS/Android 的安装、启动、Android 配置/资源写入包进 lease fencing；iOS/Android 原生 PNG
-截图命令及 `gpui device capture` 也已通过同一 lease 接入，但 scenario check、设备重连状态机、
-截图 artifact manifest 和矩阵调度仍未接入，不能把当前测试写成 M01/M02 的真实设备验收。记录见
+截图命令及 `gpui device capture` 也已通过同一 lease 接入。`gpui check --matrix` 的移动
+scenario driver 现在复用该 lease 做 native capture；设备重连状态机、完整截图 artifact
+manifest 和真实设备矩阵证据仍未完成，不能把当前测试写成 M01/M02 的真实设备验收。记录见
 [M03 device lease](../experiments/M03-device-lease-2026-09-28.md)。
 
 ### M04 · 冻结源码与确定构建键
@@ -570,13 +571,16 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 PR 拆分：matrix plan/status/summary 契约与纯 scheduler（已交付）→ runner execution adapter
 （已交付）→ target/scenario admission 与 host/ABI/toolchain preflight（已交付）→
 跨目标并行与 supervisor 内资源锁（已交付）→ mobile runner cell lifecycle（已交付）→
-matrix CLI 与 desktop scenario factory（已交付）→移动 scenario driver、host lease/
-inventory 完整接入与矩阵验收。
+matrix CLI 与 desktop scenario factory（已交付）→移动 scenario driver 的
+control/native capture 边界（当前切片）→ frozen build、host inventory 完整重连和真实矩阵
+验收。
 
-当前契约与 admission 记录见
+当前契约、移动 scenario driver 边界与 admission 记录见
 [M02 matrix contract](../experiments/M02-matrix-contract-2026-09-28.md)。
 
-验收 M-03/M-06/M-08/R-05。输出 macOS+iOS simulator+Android emulator 矩阵与不可用 Windows cell。回退：用户可单目标运行，不能用本机交叉编译替代 Windows 运行。
+验收 M-03/M-06/M-08/R-05。后续需要输出 macOS+iOS simulator+Android emulator 矩阵与不可用
+Windows cell；当前 control/native capture 接线不等于这些真实设备验收。回退：用户可单目标
+运行，不能用本机交叉编译替代 Windows 运行。
 
 ### M05 · Repro export/inspect/run
 

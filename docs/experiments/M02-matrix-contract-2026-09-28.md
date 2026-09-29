@@ -2,7 +2,8 @@
 
 状态：in_progress。本切片先固定本地 matrix 的 cell lifecycle、deadline、fail-fast、
 required/optional 汇总和 artifact 保留接口；当前已加入配置展开、分发前 admission、
-并行 executor、mobile lifecycle adapter 和 matrix CLI；真实移动 scenario driver 仍未接入。
+并行 executor、mobile lifecycle adapter、matrix CLI 和移动 scenario driver 的 control/native
+capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 
 ## 已交付
 
@@ -36,14 +37,42 @@ required/optional 汇总和 artifact 保留接口；当前已加入配置展开�
 - mobile cleanup 即使 prepare/launch/capture 中途失败也会尝试 stop_owned，随后释放本次
   host lease；它不关闭用户启动的 simulator/emulator，也不把 lease 丢失当作成功。
 - gpui check --matrix <file> 已接入 admission、并行 executor 和本机 desktop scenario
-  runner；它输出完整 matrix report，required 非 passed 会以失败退出。当前移动 cell 只有
-  设备截图/原生日志 runner，缺少 semantics/input/reset 的 scenario driver 时明确返回
-  unavailable，不把设备截图当作完整 check 通过。
+  runner；它输出完整 matrix report，required 非 passed 会以失败退出。移动 cell 现在通过
+  control-driven scenario runner 执行同一套 step/observation/action/reset 边界，并由父进程
+  持有 host lease，子 preview 复用该 lease 保护的 control session。
+- mobile scenario 的 screenshot/`capture.device` requirement 会保留 control observation，
+  再通过 iOS simulator 或 Android runner 的 native PNG capture 补回
+  `ScreenshotEvidence`；设备截图仍明确标记为 device scope、不可与 scene baseline 比较，
+  不会被当作 `capture.scene`。
+- 移动 admission 只将 screenshot、`capture.device`、semantics、bounds、reset 和 pointer/
+  keyboard 能力纳入本地 driver 的候选范围；`capture.scene`、`capture.window` 和 runtime
+  未声明的完整语义/输入能力仍按 capability 返回 unavailable/inconclusive。
+
+## 2026-09-29 mobile scenario driver 边界
+
+`gpui check --matrix` 的移动 cell 现在会将 target 的显式 device/ABI 传给 `gpui preview`，
+通过 devserver control registration 等待 `scenario_ready`，执行 scenario executor 的
+observation、action、wait、reset 和 assertion。scenario runner 仍是 control-driven：
+原生 runner 负责 device lease fencing 与 PNG capture，control runtime 负责 GPUI 窗口内的
+语义和动作路由。
+
+本切片的证据边界如下：
+
+- 本地有可用 simulator/emulator、toolchain 和 runtime capability 时，driver 可以执行真实
+  的移动 preview 路径；本仓库当前 CI 和纯 Rust 测试没有这样的设备运行证据。
+- native device screenshot 包含系统 UI，provider/dimensions/artifact id 会进入 check
+  observation，但 `capture.scene` 仍在 admission 阶段 unavailable，不能用设备截图冒充
+  scene capture 或视觉 baseline 通过。
+- semantics、input 和 reset 必须由当前移动 runtime/control provider 实际声明并成功响应；
+  admission 或 screenshot 成功不会替它们伪造通过。
+- 没有完成 frozen snapshot build、真实 macOS+iOS simulator+Android emulator 矩阵报告、
+  远程 runner 或完整设备故障矩阵；这些仍是 M02 后续验收。
 
 ## 尚未覆盖
 
-移动端 scenario step driver、同一冻结快照构建、远程 runner 和完整 macOS+iOS simulator+
-Android emulator 真实矩阵证据属于后续 M02 子 PR。
+同一冻结快照构建、远程 runner 和完整 macOS+iOS simulator+Android emulator 真实矩阵证据
+属于后续 M02 子 PR。
 当前 resource pool 只负责单一 supervisor 的调度互斥，不替代 host-shared
 DeviceLeaseSession；真实设备竞争仍必须经过 OS lease、fencing 和 runner cleanup。当前还
-没有完整 macOS+iOS simulator+Android emulator 运行证据。
+没有完整 macOS+iOS simulator+Android emulator 运行证据，也没有把当前纯 Rust/无设备 CI
+结果写成移动 L2 验收。

@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::live::PreviewLaunch;
 use super::run::Project;
+use crate::DeviceArgs;
 use crate::scenario::{self, ScenarioDefinition, ScenarioFile};
 
 #[derive(Args)]
@@ -21,9 +22,11 @@ pub struct PreviewArgs {
     /// Scenario file, relative to the current project by default
     #[arg(long, default_value = "gpui.scenarios.toml")]
     pub file: PathBuf,
-    /// Preview target; the first runtime slice supports desktop
+    /// Preview target: desktop, ios, or android
     #[arg(long, default_value = "desktop")]
     pub target: String,
+    #[command(flatten)]
+    pub device: DeviceArgs,
     /// Emit the launch envelope as JSON before attaching to the preview
     #[arg(long)]
     pub json: bool,
@@ -103,7 +106,8 @@ pub fn handle_preview(args: PreviewArgs) -> Result<()> {
             launch.data_dir.display()
         );
     }
-    super::live::handle_preview(&project, &args.target, launch)
+    let device_flags: crate::device::DeviceFlags = args.device.into();
+    super::live::handle_preview(&project, &args.target, launch, &device_flags)
 }
 
 fn resolve_project_path(root: &Path, path: PathBuf) -> PathBuf {

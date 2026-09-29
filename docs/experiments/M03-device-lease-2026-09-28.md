@@ -1,8 +1,9 @@
 # M03：host device lease/fencing 原语（2026-09-28）
 
 状态：in_progress。本切片把 host-level lease 接入 iOS/Android 的非 live 与 live
-安装、启动、Android 配置/资源写入，以及平台截图原语；不宣称已经接入 scenario
-check 或矩阵调度。
+安装、启动、Android 配置/资源写入，以及平台截图原语；`gpui check --matrix` 的移动
+scenario driver 已在后续 M02 子 PR 复用该 lease 做 native capture，但完整设备矩阵仍未
+完成。
 
 ## 契约
 
@@ -36,7 +37,9 @@ check 或矩阵调度。
 
 ## 尚未覆盖
 
-Lease 仍未接入 device inventory 的重连状态机、scenario check 的移动端 driver、截图 artifact
- manifest 或 M01/M02 的真实 simulator/emulator 故障矩阵；这些属于后续切片。`gpui run` 的
- 非 live 命令在启动完成后释放 lease，因为它当前不监督 app 进程；live 命令则在整个 live
- session 内持有 lease。
+Lease 仍未接入 device inventory 的重连状态机、完整截图 artifact manifest 或 M01/M02 的真实
+simulator/emulator 故障矩阵；这些属于后续切片。M02 的移动 scenario driver 只把 lease
+fencing 与 native capture 接到 control-driven check 边界，不把本地无设备测试写成真实设备
+验收。`gpui run` 的
+非 live 命令在启动完成后释放 lease，因为它当前不监督 app 进程；live 命令则在整个 live
+session 内持有 lease。

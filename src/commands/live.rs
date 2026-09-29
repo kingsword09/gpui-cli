@@ -1346,15 +1346,37 @@ fn resolve_plan(project: &Project, target: &str, flags: &DeviceFlags) -> Result<
 /// Runs one non-watching preview launch. Preview intentionally starts without
 /// a Live snapshot and keeps the process attached until the user interrupts
 /// it, so the runtime's `scenario_ready` event belongs to one isolated run.
-pub fn handle_preview(project: &Project, target: &str, preview: PreviewLaunch) -> Result<()> {
-    if !matches!(
-        target.to_ascii_lowercase().as_str(),
-        "desktop" | "macos" | "windows" | "linux"
-    ) {
-        bail!("the S02 preview runtime currently supports the desktop target only");
-    }
-    let plan = resolve_plan(project, target, &DeviceFlags::default())?;
-    let target_id = format!("desktop:{}", std::env::consts::OS);
+pub fn handle_preview(
+    project: &Project,
+    target: &str,
+    preview: PreviewLaunch,
+    flags: &DeviceFlags,
+) -> Result<()> {
+    let plan = resolve_plan(project, target, flags)?;
+    let preleased = std::env::var_os("GPUI_PREVIEW_PRELEASED").is_some();
+    let device_lease = if preleased {
+        None
+    } else {
+        match &plan {
+            Plan::Desktop => None,
+            Plan::Ios { id, .. } => Some(
+                DeviceLeaseSession::acquire(&project.root, id)
+                    .context("acquiring the iOS preview device lease")?,
+            ),
+            Plan::Android { serial, .. } => Some(
+                DeviceLeaseSession::acquire(&project.root, serial)
+                    .context("acquiring the Android preview device lease")?,
+            ),
+        }
+    };
+    let target_id = match &plan {
+        Plan::Desktop => format!("desktop:{}", std::env::consts::OS),
+        Plan::Ios { physical, id, .. } => format!(
+            "ios-{}:{id}",
+            if *physical { "device" } else { "simulator" }
+        ),
+        Plan::Android { serial, .. } => format!("android:{serial}"),
+    };
     let session = Session::start(&project.root, &project.name, &target_id)?;
     struct EndSession(Arc<Session>);
     impl Drop for EndSession {
@@ -1409,7 +1431,7 @@ pub fn handle_preview(project: &Project, target: &str, preview: PreviewLaunch) -
         &server,
         &mut child,
         &build,
-        None,
+        device_lease.as_ref(),
     );
     match iteration {
         Ok(Iteration::Rebuilt) => build.finish(true, None),
