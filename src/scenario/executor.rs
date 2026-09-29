@@ -281,6 +281,10 @@ pub struct CheckContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset_generation: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub uncontrolled_inputs: Vec<String>,
@@ -1223,6 +1227,8 @@ mod tests {
             ))),
             context: Some(CheckContext {
                 reset_generation: Some(2),
+                snapshot_hash: None,
+                build_key: None,
                 environment: Some(json!({"os": "android", "theme": "light"})),
                 uncontrolled_inputs: vec!["network".into()],
             }),

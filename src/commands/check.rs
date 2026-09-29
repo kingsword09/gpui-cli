@@ -20,6 +20,7 @@ use crate::devserver::actions::Action;
 use crate::devserver::control::{self, Command as ControlCommand, Registration};
 use crate::devserver::events::{Event, Kind, Page};
 use crate::runner::android::AndroidRunner;
+use crate::runner::build_inputs::{DesktopBuildPlan, desktop_build_plan};
 use crate::runner::ios::IosSimulatorRunner;
 use crate::runner::lease::DeviceLeaseSession;
 use crate::runner::matrix::{
@@ -90,29 +91,26 @@ pub fn handle_check(args: CheckArgs) -> Result<()> {
     if !validation.valid {
         bail!("scenario validation failed; check was not launched");
     }
-    let source = fs::read_to_string(&file)
-        .with_context(|| format!("reading scenario file {}", file.display()))?;
-    let model: ScenarioFile = toml::from_str(&source).context("parsing scenario file")?;
-    let selected = model
-        .scenarios
-        .iter()
-        .find(|scenario| scenario.id == scenario_id)
-        .with_context(|| format!("scenario {} was not found", scenario_id))?;
-    let fixture_hash = validation
-        .scenarios
-        .iter()
-        .find(|entry| entry.id == selected.id)
-        .and_then(|entry| entry.fixture_hash.clone());
-
     prepare_cargo_lock(&project.root)?;
-    let mut runner = DesktopCheckRunner::launch(
+    let frozen = prepare_frozen_desktop_check(&project.root, &file, scenario_id)?;
+    let mut runner = DesktopCheckRunner::launch_until(
+        &frozen.plan.snapshot.root,
         &project.root,
-        &file,
-        selected,
-        fixture_hash.clone(),
+        &frozen.scenario_file,
+        &frozen.scenario,
+        frozen.fixture_hash.clone(),
         &args.target,
+        CheckLaunchOptions {
+            device: None,
+            preleased: false,
+            deadline: Instant::now() + PREVIEW_START_TIMEOUT,
+            session_key: format!("single-{}-{}", std::process::id(), epoch_ms()),
+            snapshot_hash: Some(frozen.plan.snapshot.input_hash.clone()),
+            build_key: Some(frozen.plan.key.key_hash().to_owned()),
+        },
     )?;
-    let report = crate::scenario::executor::execute(&mut runner, selected, fixture_hash);
+    let report =
+        crate::scenario::executor::execute(&mut runner, &frozen.scenario, frozen.fixture_hash);
     print_report(&report, args.json)?;
     if report.status == crate::scenario::executor::CheckStatus::Passed {
         Ok(())
@@ -513,6 +511,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                 );
                 let mut runner = DesktopCheckRunner::launch_until(
                     project_root,
+                    project_root,
                     scenario_file,
                     &bounded_scenario,
                     fixture_hash.clone(),
@@ -522,6 +521,8 @@ impl MatrixCellRunner for MatrixCheckRunner {
                         preleased: mobile_capture.is_some(),
                         deadline,
                         session_key,
+                        snapshot_hash: None,
+                        build_key: None,
                     },
                 )?;
                 runner.mobile_capture = mobile_capture.take();
@@ -588,6 +589,69 @@ fn prepare_cargo_lock(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+struct FrozenDesktopCheck {
+    plan: DesktopBuildPlan,
+    scenario_file: PathBuf,
+    scenario: ScenarioDefinition,
+    fixture_hash: Option<String>,
+}
+
+fn prepare_frozen_desktop_check(
+    project_root: &Path,
+    scenario_file: &Path,
+    scenario_id: &str,
+) -> Result<FrozenDesktopCheck> {
+    let project_root = fs::canonicalize(project_root)
+        .with_context(|| format!("resolving project root {}", project_root.display()))?;
+    let scenario_file = fs::canonicalize(scenario_file)
+        .with_context(|| format!("resolving scenario file {}", scenario_file.display()))?;
+    let relative_scenario = scenario_file
+        .strip_prefix(&project_root)
+        .with_context(|| {
+            format!(
+                "scenario file {} is outside project root {}",
+                scenario_file.display(),
+                project_root.display()
+            )
+        })?
+        .to_owned();
+    let plan = desktop_build_plan(&project_root, false)?;
+    if let Some(reason) = &plan.cache_hit_disabled_reason {
+        bail!("strict frozen desktop check is unavailable: {reason}");
+    }
+
+    let snapshot_file = plan.snapshot.root.join(&relative_scenario);
+    if !snapshot_file.is_file() {
+        bail!(
+            "frozen snapshot does not contain scenario file {}",
+            relative_scenario.display()
+        );
+    }
+    let validation = scenario::validate_file(&snapshot_file, &plan.snapshot.root)?;
+    if !validation.valid {
+        bail!("frozen scenario validation failed; check was not launched");
+    }
+    let source = fs::read_to_string(&snapshot_file)
+        .with_context(|| format!("reading frozen scenario file {}", snapshot_file.display()))?;
+    let model: ScenarioFile = toml::from_str(&source).context("parsing frozen scenario file")?;
+    let scenario = model
+        .scenarios
+        .into_iter()
+        .find(|scenario| scenario.id == scenario_id)
+        .with_context(|| format!("scenario {scenario_id} was not found in frozen inputs"))?;
+    let fixture_hash = validation
+        .scenarios
+        .iter()
+        .find(|entry| entry.id == scenario.id)
+        .and_then(|entry| entry.fixture_hash.clone());
+    Ok(FrozenDesktopCheck {
+        plan,
+        scenario_file: snapshot_file,
+        scenario,
+        fixture_hash,
+    })
+}
+
 fn print_report(report: &CheckReport, json_output: bool) -> Result<()> {
     if json_output {
         println!("{}", serde_json::to_string_pretty(report)?);
@@ -636,6 +700,8 @@ struct DesktopCheckRunner {
     default_requirements: Vec<String>,
     issue_floor: u64,
     mobile_capture: Option<MobileCapture>,
+    snapshot_hash: Option<String>,
+    build_key: Option<String>,
 }
 
 struct CheckLaunchOptions<'a> {
@@ -643,33 +709,14 @@ struct CheckLaunchOptions<'a> {
     preleased: bool,
     deadline: Instant,
     session_key: String,
+    snapshot_hash: Option<String>,
+    build_key: Option<String>,
 }
 
 impl DesktopCheckRunner {
-    fn launch(
-        project_root: &Path,
-        scenario_file: &Path,
-        scenario: &ScenarioDefinition,
-        fixture_hash: Option<String>,
-        target: &str,
-    ) -> Result<Self> {
-        Self::launch_until(
-            project_root,
-            scenario_file,
-            scenario,
-            fixture_hash,
-            target,
-            CheckLaunchOptions {
-                device: None,
-                preleased: false,
-                deadline: Instant::now() + PREVIEW_START_TIMEOUT,
-                session_key: format!("single-{}-{}", std::process::id(), epoch_ms()),
-            },
-        )
-    }
-
     fn launch_until(
-        project_root: &Path,
+        runtime_root: &Path,
+        report_root: &Path,
         scenario_file: &Path,
         scenario: &ScenarioDefinition,
         fixture_hash: Option<String>,
@@ -681,13 +728,15 @@ impl DesktopCheckRunner {
             preleased,
             deadline,
             session_key,
+            snapshot_hash,
+            build_key,
         } = options;
         let executable = std::env::current_exe().context("locating the gpui executable")?;
         let scenario_file = scenario_file
-            .strip_prefix(project_root)
+            .strip_prefix(runtime_root)
             .unwrap_or(scenario_file);
         let mut child = Command::new(executable);
-        child.current_dir(project_root).args([
+        child.current_dir(runtime_root).args([
             "preview",
             &scenario.component,
             "--scenario",
@@ -712,7 +761,7 @@ impl DesktopCheckRunner {
         )
         .context("starting isolated desktop preview")?;
         let registration =
-            match wait_for_registration(project_root, &scenario.id, &session_key, deadline) {
+            match wait_for_registration(runtime_root, &scenario.id, &session_key, deadline) {
                 Ok(registration) => registration,
                 Err(error) => {
                     let _ = child.terminate();
@@ -721,7 +770,7 @@ impl DesktopCheckRunner {
             };
         let mut runner = Self {
             child,
-            project_root: project_root.to_owned(),
+            project_root: report_root.to_owned(),
             registration,
             event_cursor: 0,
             scenario_id: scenario.id.clone(),
@@ -739,6 +788,8 @@ impl DesktopCheckRunner {
             default_requirements: observation_requirements(&scenario.requires),
             issue_floor: 0,
             mobile_capture: None,
+            snapshot_hash,
+            build_key,
         };
         if let Err(error) = runner.wait_for_ready(deadline) {
             let _ = runner.child.terminate();
@@ -1591,6 +1642,8 @@ impl ScenarioRunner for DesktopCheckRunner {
     fn context(&self) -> Option<CheckContext> {
         Some(CheckContext {
             reset_generation: self.ready_reset_generation,
+            snapshot_hash: self.snapshot_hash.clone(),
+            build_key: self.build_key.clone(),
             environment: Some(self.ready_environment.clone()),
             uncontrolled_inputs: self.ready_uncontrolled_inputs.clone(),
         })
