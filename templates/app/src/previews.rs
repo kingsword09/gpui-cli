@@ -99,7 +99,7 @@ pub fn default_registry() -> PreviewRegistry {
             supports_reset: true,
             ready_ids: &["counter.value"],
             logical_ids: &["counter.value", "counter.increment"],
-            environments: &["desktop"],
+            environments: &["desktop", "ios", "android"],
         })
         .expect("the built-in Counter preview descriptor is valid");
     registry
@@ -115,7 +115,7 @@ pub fn default_registry() -> PreviewRegistry {
                 "login.submit",
                 "login.error",
             ],
-            environments: &["desktop"],
+            environments: &["desktop", "ios", "android"],
         })
         .expect("the built-in LoginForm preview descriptor is valid");
     registry
@@ -126,7 +126,7 @@ pub fn default_registry() -> PreviewRegistry {
             supports_reset: true,
             ready_ids: &["list.viewport"],
             logical_ids: &["list.viewport", "list.item.<stable-key>"],
-            environments: &["desktop"],
+            environments: &["desktop", "ios", "android"],
         })
         .expect("the built-in VirtualList preview descriptor is valid");
     registry
@@ -169,22 +169,23 @@ fn state() -> &'static Mutex<Option<PreviewState>> {
 }
 
 fn project_root() -> PathBuf {
-    std::env::var_os("GPUI_PREVIEW_PROJECT_ROOT")
+    crate::preview_env("GPUI_PREVIEW_PROJECT_ROOT")
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn env_required(name: &str) -> Result<String, String> {
-    std::env::var(name).map_err(|_| format!("preview environment variable {name} is missing"))
+    crate::preview_env(name)
+        .ok_or_else(|| format!("preview environment variable {name} is missing"))
 }
 
 fn env_optional(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
+    crate::preview_env(name)
 }
 
 fn uncontrolled_inputs() -> Vec<String> {
-    std::env::var("GPUI_PREVIEW_UNCONTROLLED_INPUTS")
+    crate::preview_env("GPUI_PREVIEW_UNCONTROLLED_INPUTS")
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
@@ -253,13 +254,20 @@ pub fn initialize() {
         let descriptor = registry
             .find(&component)
             .ok_or_else(|| format!("component `{component}` is not in the preview registry"))?;
+        let environment = if cfg!(target_os = "android") {
+            "android"
+        } else if cfg!(target_os = "ios") {
+            "ios"
+        } else {
+            "desktop"
+        };
         if !descriptor
             .environments
             .iter()
-            .any(|environment| *environment == "desktop")
+            .any(|candidate| *candidate == environment)
         {
             return Err(format!(
-                "component `{component}` does not support the desktop preview environment"
+                "component `{component}` does not support the {environment} preview environment"
             ));
         }
         let fixture_path = PathBuf::from(env_required("GPUI_PREVIEW_FIXTURE")?);

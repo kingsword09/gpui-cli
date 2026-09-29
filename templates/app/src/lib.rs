@@ -15,6 +15,17 @@ compile_error!("feature `gpui-dev` is debug-only; use a debug build");
 pub mod live;
 pub mod previews;
 
+pub(crate) fn preview_env(name: &str) -> Option<String> {
+    #[cfg(debug_assertions)]
+    {
+        return live::preview_env(name);
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        std::env::var(name).ok().filter(|value| !value.is_empty())
+    }
+}
+
 /// Starts the explicit preview registry and, when `gpui preview` supplied a
 /// scenario, creates its isolated fixture state before the first view.
 pub fn initialize_preview() {

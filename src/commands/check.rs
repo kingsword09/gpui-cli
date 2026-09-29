@@ -504,6 +504,12 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     } else {
                         None
                     };
+                let session_key = format!(
+                    "{}-{}-{}",
+                    safe_matrix_component(&cell.cell_id),
+                    std::process::id(),
+                    epoch_ms()
+                );
                 let mut runner = DesktopCheckRunner::launch_until(
                     project_root,
                     scenario_file,
@@ -514,6 +520,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                         device: device.as_deref(),
                         preleased: mobile_capture.is_some(),
                         deadline,
+                        session_key,
                     },
                 )?;
                 runner.mobile_capture = mobile_capture.take();
@@ -632,6 +639,7 @@ struct CheckLaunchOptions<'a> {
     device: Option<&'a str>,
     preleased: bool,
     deadline: Instant,
+    session_key: String,
 }
 
 impl DesktopCheckRunner {
@@ -652,6 +660,7 @@ impl DesktopCheckRunner {
                 device: None,
                 preleased: false,
                 deadline: Instant::now() + PREVIEW_START_TIMEOUT,
+                session_key: format!("single-{}-{}", std::process::id(), epoch_ms()),
             },
         )
     }
@@ -668,6 +677,7 @@ impl DesktopCheckRunner {
             device,
             preleased,
             deadline,
+            session_key,
         } = options;
         let executable = std::env::current_exe().context("locating the gpui executable")?;
         let scenario_file = scenario_file
@@ -690,20 +700,22 @@ impl DesktopCheckRunner {
         if preleased {
             child.env("GPUI_PREVIEW_PRELEASED", "1");
         }
+        child.env("GPUI_PREVIEW_SESSION_KEY", &session_key);
         child
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         let child = child.spawn().context("starting isolated desktop preview")?;
-        let registration = match wait_for_registration(project_root, &scenario.id, deadline) {
-            Ok(registration) => registration,
-            Err(error) => {
-                let mut child = child;
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
+        let registration =
+            match wait_for_registration(project_root, &scenario.id, &session_key, deadline) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    let mut child = child;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
         let mut runner = Self {
             child,
             project_root: project_root.to_owned(),
@@ -893,7 +905,7 @@ impl DesktopCheckRunner {
                 .cloned()
                 .collect::<Vec<_>>();
             if filtered.is_empty() {
-                filtered.push("semantics".into());
+                filtered.push("ui.heartbeat".into());
             }
             filtered
         } else {
@@ -1539,7 +1551,10 @@ impl ScenarioRunner for DesktopCheckRunner {
             kinds.push("semantics".into());
         }
         Ok(CaptureEvidence {
-            artifact_id: None,
+            artifact_id: observed
+                .screenshot
+                .as_ref()
+                .and_then(|screenshot| screenshot.artifact_id.clone()),
             kinds,
         })
     }
@@ -1580,13 +1595,15 @@ impl Drop for DesktopCheckRunner {
 fn wait_for_registration(
     project_root: &Path,
     scenario_id: &str,
+    session_key: &str,
     deadline: Instant,
 ) -> Result<Registration> {
+    let target_suffix = format!("::gpui-check:{session_key}");
     loop {
         if Instant::now() >= deadline {
             bail!("no control session appeared for scenario `{scenario_id}`")
         }
-        if let Ok(registration) = control::discover(project_root, None) {
+        if let Ok(registration) = control::discover_target_suffix(project_root, &target_suffix) {
             return Ok(registration);
         }
         thread::sleep(Duration::from_millis(100));

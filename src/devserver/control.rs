@@ -652,6 +652,28 @@ pub fn discover(
     root: &Path,
     selected: Option<&str>,
 ) -> std::result::Result<Registration, ApiError> {
+    let mut active = active_sessions(root)?;
+    if let Some(selected) = selected {
+        active.retain(|registration| registration.session_id == selected);
+    }
+    select_session(active)
+}
+
+/// Finds the one active session whose target id carries the supplied suffix.
+/// Matrix preview cells use this to bind a check process to its own control
+/// session even when several cells run from the same project concurrently.
+pub fn discover_target_suffix(
+    root: &Path,
+    suffix: &str,
+) -> std::result::Result<Registration, ApiError> {
+    let active = active_sessions(root)?
+        .into_iter()
+        .filter(|registration| registration.target_id.ends_with(suffix))
+        .collect();
+    select_session(active)
+}
+
+fn active_sessions(root: &Path) -> std::result::Result<Vec<Registration>, ApiError> {
     let root = root
         .canonicalize()
         .map_err(|e| ApiError::new("invalid_project", e.to_string()))?;
@@ -669,9 +691,7 @@ pub fn discover(
         let Ok(registration) = serde_json::from_slice::<Registration>(&bytes) else {
             continue;
         };
-        if registration.project_root != root
-            || selected.is_some_and(|id| id != registration.session_id)
-        {
+        if registration.project_root != root {
             continue;
         }
         if let Ok(reply) = request(&registration, &next_request_id("discover"), Command::Ping)
@@ -684,6 +704,10 @@ pub fn discover(
             active.push(registration);
         }
     }
+    Ok(active)
+}
+
+fn select_session(mut active: Vec<Registration>) -> std::result::Result<Registration, ApiError> {
     match active.len() {
         1 => Ok(active.remove(0)),
         0 => Err(ApiError::new(

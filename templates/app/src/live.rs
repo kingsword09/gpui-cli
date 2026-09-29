@@ -42,6 +42,29 @@ struct LiveConfig {
     state_file: Option<std::path::PathBuf>,
 }
 
+static PREVIEW_ENV: std::sync::OnceLock<Mutex<BTreeMap<String, String>>> =
+    std::sync::OnceLock::new();
+
+fn preview_env_store() -> &'static Mutex<BTreeMap<String, String>> {
+    PREVIEW_ENV.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub(crate) fn preview_env(name: &str) -> Option<String> {
+    preview_env_store()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(name)
+        .cloned()
+        .or_else(|| std::env::var(name).ok().filter(|value| !value.is_empty()))
+}
+
+fn set_preview_env(name: &str, value: String) {
+    preview_env_store()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(name.to_owned(), value);
+}
+
 /// Latest snapshot the view published (`publish_state`), shipped to the CLI
 /// when it asks the app to prepare for a restart.
 static PUBLISHED_STATE: Mutex<Option<String>> = Mutex::new(None);
@@ -257,6 +280,8 @@ fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
     let mut file_session = None;
     let mut file_source_revision = 0;
     let mut file_asset_revision = 0;
+    let mut preview_fixture = None;
+    let mut preview_data_dir = None;
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("addr=") {
             addr = Some(value.trim().to_string());
@@ -270,6 +295,46 @@ fn resolve_config(config_file: Option<&Path>) -> Option<LiveConfig> {
             file_source_revision = value.trim().parse().unwrap_or(0);
         } else if let Some(value) = line.strip_prefix("asset_revision=") {
             file_asset_revision = value.trim().parse().unwrap_or(0);
+        } else if let Some(value) = line.strip_prefix("preview_scenario_id=") {
+            set_preview_env("GPUI_PREVIEW_SCENARIO_ID", value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_component=") {
+            set_preview_env("GPUI_PREVIEW_COMPONENT", value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_fixture=") {
+            preview_fixture = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_fixture_hash=") {
+            set_preview_env("GPUI_PREVIEW_FIXTURE_HASH", value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_data_dir=") {
+            preview_data_dir = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_theme=") {
+            set_preview_env("GPUI_PREVIEW_THEME", value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_locale=") {
+            set_preview_env("GPUI_PREVIEW_LOCALE", value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_clock=") {
+            set_preview_env("GPUI_PREVIEW_CLOCK", value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_clock_at=") {
+            set_preview_env("GPUI_PREVIEW_CLOCK_AT", value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_random_seed=") {
+            set_preview_env("GPUI_PREVIEW_RANDOM_SEED", value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("preview_uncontrolled_inputs=") {
+            set_preview_env("GPUI_PREVIEW_UNCONTROLLED_INPUTS", value.trim().to_owned());
+        }
+    }
+    if let Some(parent) = config_file.and_then(Path::parent) {
+        set_preview_env(
+            "GPUI_PREVIEW_PROJECT_ROOT",
+            parent.to_string_lossy().into_owned(),
+        );
+        if let Some(fixture) = preview_fixture {
+            set_preview_env(
+                "GPUI_PREVIEW_FIXTURE",
+                parent.join(fixture).to_string_lossy().into_owned(),
+            );
+        }
+        if let Some(data_dir) = preview_data_dir {
+            set_preview_env(
+                "GPUI_PREVIEW_DATA_DIR",
+                parent.join(data_dir).to_string_lossy().into_owned(),
+            );
         }
     }
     Some(LiveConfig {
@@ -1898,7 +1963,7 @@ fn run_connection(config: &LiveConfig, platform: &'static str) {
         } else {
             ""
         },
-        if std::env::var_os("GPUI_PREVIEW_SCENARIO_ID").is_some() {
+        if preview_env("GPUI_PREVIEW_SCENARIO_ID").is_some() {
             ",\"scenario.reset\""
         } else {
             ""

@@ -578,9 +578,10 @@ control/native capture 边界（当前切片）→ frozen build、host inventory
 当前契约、移动 scenario driver 边界与 admission 记录见
 [M02 matrix contract](../experiments/M02-matrix-contract-2026-09-28.md)。
 
-验收 M-03/M-06/M-08/R-05。后续需要输出 macOS+iOS simulator+Android emulator 矩阵与不可用
-Windows cell；当前 control/native capture 接线不等于这些真实设备验收。回退：用户可单目标
-运行，不能用本机交叉编译替代 Windows 运行。
+验收 M-03/M-06/M-08/R-05。当前已有本机 Android emulator 的 capture-only 真实探针和
+artifact 引用，但仍需输出完整 macOS+iOS simulator+Android emulator 矩阵与不可用 Windows
+cell；semantics-required 移动场景必须继续按 runtime capability 返回 unavailable。回退：用户可
+单目标运行，不能用本机交叉编译替代 Windows 运行。
 
 ### M05 · Repro export/inspect/run
 
