@@ -21,7 +21,8 @@ use crate::devserver::control::{self, Command as ControlCommand, Registration};
 use crate::devserver::events::{Event, Kind, Page};
 use crate::runner::android::AndroidRunner;
 use crate::runner::build_inputs::{
-    DesktopBuildPlan, FrozenCheckInputs, desktop_build_plan, frozen_check_inputs,
+    DesktopBuildPlan, FrozenCheckInputs, android_build_key, desktop_build_key, desktop_build_plan,
+    frozen_check_inputs, ios_build_key,
 };
 use crate::runner::ios::IosSimulatorRunner;
 use crate::runner::lease::DeviceLeaseSession;
@@ -169,6 +170,22 @@ fn handle_matrix_check(
         .iter()
         .map(|target| (target.id.clone(), target.abi.clone()))
         .collect::<BTreeMap<_, _>>();
+    let ready_target_ids = admission
+        .ready_cells()
+        .map(|cell| cell.target_id.clone())
+        .collect::<BTreeSet<_>>();
+    let target_build_keys = ready_target_ids
+        .iter()
+        .map(|target_id| {
+            let platform = target_platforms
+                .get(target_id)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("matrix target '{target_id}' disappeared"))?;
+            let abi = target_abis.get(target_id).cloned().flatten();
+            let key = matrix_target_build_key(&runtime_root, platform, abi.as_deref())?;
+            Ok((target_id.clone(), key))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let scenario_by_id = scenarios
         .scenarios
         .iter()
@@ -198,6 +215,10 @@ fn handle_matrix_check(
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("matrix scenario '{}' disappeared", cell.scenario_id))?;
         let fixture_hash = fixture_hashes.get(&cell.scenario_id).cloned();
+        let build_key = target_build_keys
+            .get(&cell.target_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("matrix target '{}' has no BuildKey", cell.target_id))?;
         Ok(MatrixCheckRunner::Control(Box::new(
             ControlMatrixCheckRunner {
                 project_root: project_root.clone(),
@@ -206,6 +227,7 @@ fn handle_matrix_check(
                 scenario,
                 fixture_hash,
                 snapshot_hash: snapshot_hash_for_factory.clone(),
+                build_key,
                 target: platform.label().into(),
                 device: target_devices.get(&cell.target_id).cloned().flatten(),
                 platform,
@@ -278,6 +300,24 @@ fn matrix_admission_context(
         context.toolchains.insert(platform, report);
     }
     Ok(context)
+}
+
+fn matrix_target_build_key(
+    snapshot_root: &Path,
+    platform: MatrixPlatform,
+    abi: Option<&str>,
+) -> Result<String> {
+    let key = match platform {
+        MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux => {
+            desktop_build_key(snapshot_root, false)?
+        }
+        MatrixPlatform::Ios => ios_build_key(snapshot_root, false, "aarch64-apple-ios-sim")?,
+        MatrixPlatform::Android => {
+            let abi = abi.context("Android matrix target has no ABI for BuildKey")?;
+            android_build_key(snapshot_root, false, &[abi.to_owned()])?
+        }
+    };
+    Ok(key.key_hash().to_owned())
 }
 
 fn print_matrix_report(report: &MatrixReport, json_output: bool) -> Result<()> {
@@ -468,6 +508,7 @@ struct ControlMatrixCheckRunner {
     scenario: ScenarioDefinition,
     fixture_hash: Option<String>,
     snapshot_hash: String,
+    build_key: String,
     target: String,
     device: Option<String>,
     platform: MatrixPlatform,
@@ -489,6 +530,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     scenario,
                     fixture_hash,
                     snapshot_hash,
+                    build_key,
                     target,
                     device,
                     platform,
@@ -538,7 +580,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                         deadline,
                         session_key,
                         snapshot_hash: Some(snapshot_hash.clone()),
-                        build_key: None,
+                        build_key: Some(build_key.clone()),
                     },
                 )?;
                 runner.mobile_capture = mobile_capture.take();
@@ -2086,5 +2128,11 @@ mod tests {
         assert!(frozen.matrix_file.starts_with(&frozen.inputs.snapshot.root));
         assert!(!frozen.inputs.snapshot.input_hash.is_empty());
         assert!(frozen.inputs.cache_hit_disabled_reason.is_none());
+
+        let build_key =
+            matrix_target_build_key(&frozen.inputs.snapshot.root, MatrixPlatform::Linux, None)
+                .unwrap();
+        assert_eq!(build_key.len(), 64);
+        assert!(build_key.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }
