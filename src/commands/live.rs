@@ -34,8 +34,10 @@ use crate::devserver::protocol::{self, AssetManifestEntry, ServerMessage};
 use crate::devserver::session::{Build, Session};
 use crate::devserver::timing;
 use crate::devserver::{AssetReconciliation, DevServer};
-use crate::runner::build_cache::BuildOutputLock;
+use crate::runner::build_cache::{BuildCacheLookup, BuildOutputLock, lookup_verified_at_path};
+use crate::runner::build_manifest::BuildArtifactManifest;
 use crate::runner::lease::DeviceLeaseSession;
+use crate::runner::output_layout::{BuildPlatform, PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE};
 use serde_json::json;
 
 /// Source files watch out for asset-only changes under this directory; they
@@ -88,6 +90,7 @@ enum Plan {
 pub struct PreviewBuildOutputs {
     pub output_root: PathBuf,
     pub cargo_target_dir: PathBuf,
+    pub build_key_hash: Option<String>,
     pub jni_libs_dir: Option<PathBuf>,
     pub gradle_build_dir: Option<PathBuf>,
     pub ios_derived_data_dir: Option<PathBuf>,
@@ -100,6 +103,7 @@ impl PreviewBuildOutputs {
         Some(Self {
             output_root: PathBuf::from(output_root),
             cargo_target_dir: PathBuf::from(cargo_target_dir),
+            build_key_hash: std::env::var("GPUI_PREVIEW_BUILD_KEY_HASH").ok(),
             jni_libs_dir: std::env::var_os("GPUI_PREVIEW_JNI_LIBS_DIR").map(PathBuf::from),
             gradle_build_dir: std::env::var_os("GPUI_PREVIEW_GRADLE_BUILD_DIR").map(PathBuf::from),
             ios_derived_data_dir: std::env::var_os("GPUI_PREVIEW_IOS_DERIVED_DATA_DIR")
@@ -323,6 +327,42 @@ fn launch_path(executable: &Path) -> Result<PathBuf> {
     })
 }
 
+fn preview_desktop_executable_from_manifest(
+    manifest: &BuildArtifactManifest,
+    root: &Path,
+) -> Option<PathBuf> {
+    let mut executables = manifest
+        .files
+        .iter()
+        .filter(|file| file.executable && file.path.starts_with("cargo-target/"))
+        .map(|file| root.join(&file.path));
+    let executable = executables.next()?;
+    executables.next().is_none().then_some(executable)
+}
+
+fn publish_preview_desktop_manifest(root: &Path, key_hash: &str, executable: &Path) -> Result<()> {
+    let executable = fs::canonicalize(executable)
+        .with_context(|| format!("resolving preview executable {}", executable.display()))?;
+    let relative = executable.strip_prefix(root).with_context(|| {
+        format!(
+            "preview executable {} is outside output root {}",
+            executable.display(),
+            root.display()
+        )
+    })?;
+    let manifest = BuildArtifactManifest::capture_at(
+        root,
+        BuildPlatform::Desktop,
+        key_hash,
+        &[relative.to_owned()],
+    )
+    .context("capturing preview desktop artifact manifest")?;
+    manifest
+        .write_atomic(&root.join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE))
+        .context("publishing preview desktop artifact manifest")?;
+    Ok(())
+}
+
 /// Runs one build + (re)launch cycle. `Ok(BuildFailed)` means a compile failure
 /// was already rendered; infrastructure errors come back as `Err`.
 fn run_iteration(
@@ -336,36 +376,84 @@ fn run_iteration(
 ) -> Result<Iteration> {
     match plan {
         Plan::Desktop => {
-            let _output_lock = channel
+            let outputs = channel
                 .preview
                 .as_ref()
                 .and_then(|preview| preview.build_outputs.as_ref())
+                .cloned();
+            let _output_lock = outputs
+                .as_ref()
                 .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
                 .transpose()?;
-            let mut cmd = Command::new("cargo");
-            cmd.current_dir(&project.root).args([
-                "build",
-                "-p",
-                &project.desktop_crate(),
-                "--features",
-                "gpui-dev",
-            ]);
-            if let Some(outputs) = channel
-                .preview
-                .as_ref()
-                .and_then(|preview| preview.build_outputs.as_ref())
-            {
-                cmd.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
-            }
-            let outcome = error::run_cargo_json(&mut cmd, build, "cargo.build")?;
-            if !outcome.success {
-                return Ok(Iteration::BuildFailed);
-            }
-            let executable = outcome
-                .executable
-                .context("cargo succeeded but reported no binary path")?;
+            let executable = if let Some(outputs) = &outputs {
+                if let Some(key_hash) = outputs.build_key_hash.as_deref() {
+                    match lookup_verified_at_path(
+                        &outputs
+                            .output_root
+                            .join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE),
+                        &outputs.output_root,
+                        BuildPlatform::Desktop,
+                        key_hash,
+                    ) {
+                        BuildCacheLookup::Hit(manifest) => {
+                            if let Some(executable) = preview_desktop_executable_from_manifest(
+                                &manifest,
+                                &outputs.output_root,
+                            ) {
+                                println!(
+                                    "  {} preview BuildKey cache hit: {}",
+                                    "✓".green(),
+                                    key_hash
+                                );
+                                Some(executable)
+                            } else {
+                                println!(
+                                    "  {} preview cache miss: manifest does not identify one desktop executable",
+                                    "→".blue()
+                                );
+                                None
+                            }
+                        }
+                        BuildCacheLookup::Miss(reason) => {
+                            println!("  {} preview cache miss: {reason}", "→".blue());
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let executable = if let Some(executable) = executable {
+                executable
+            } else {
+                let mut cmd = Command::new("cargo");
+                cmd.current_dir(&project.root).args([
+                    "build",
+                    "-p",
+                    &project.desktop_crate(),
+                    "--features",
+                    "gpui-dev",
+                ]);
+                if let Some(outputs) = &outputs {
+                    cmd.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
+                }
+                let outcome = error::run_cargo_json(&mut cmd, build, "cargo.build")?;
+                if !outcome.success {
+                    return Ok(Iteration::BuildFailed);
+                }
+                outcome
+                    .executable
+                    .context("cargo succeeded but reported no binary path")?
+            };
             if !build.is_current()? {
                 return Ok(Iteration::Superseded);
+            }
+            if let Some(outputs) = &outputs
+                && let Some(key_hash) = outputs.build_key_hash.as_deref()
+            {
+                publish_preview_desktop_manifest(&outputs.output_root, key_hash, &executable)?;
             }
             prepare_restart(project, server, channel);
             if !build.is_current()? {
@@ -1966,6 +2054,10 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::build_manifest::{
+        BUILD_ARTIFACT_MANIFEST_SCHEMA_VERSION, BuildArtifactFile,
+    };
+    use crate::runner::output_layout::BuildPlatform;
 
     #[test]
     fn ignores_build_output_and_generated_dirs() {
@@ -2019,5 +2111,38 @@ mod tests {
         );
         assert_eq!(asset_rel_path(root, &root.join("assets_mine/x.png")), None);
         assert_eq!(asset_rel_path(root, &root.join("other/assets/x.png")), None);
+    }
+
+    #[test]
+    fn preview_cache_only_selects_one_verified_desktop_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = BuildArtifactManifest {
+            schema_version: BUILD_ARTIFACT_MANIFEST_SCHEMA_VERSION,
+            platform: BuildPlatform::Desktop,
+            key_hash: "a".repeat(64),
+            roots: vec!["cargo-target/debug/app".into()],
+            files: vec![BuildArtifactFile {
+                path: "cargo-target/debug/app".into(),
+                size: 4,
+                sha256: "0".repeat(64),
+                executable: true,
+            }],
+        };
+        assert_eq!(
+            preview_desktop_executable_from_manifest(&manifest, root.path()),
+            Some(root.path().join("cargo-target/debug/app"))
+        );
+
+        let mut ambiguous = manifest.clone();
+        ambiguous.files.push(BuildArtifactFile {
+            path: "cargo-target/debug/other".into(),
+            size: 4,
+            sha256: "0".repeat(64),
+            executable: true,
+        });
+        assert_eq!(
+            preview_desktop_executable_from_manifest(&ambiguous, root.path()),
+            None
+        );
     }
 }

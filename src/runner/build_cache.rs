@@ -2,7 +2,7 @@
 
 use super::build_key::BuildKey;
 use super::build_manifest::BuildArtifactManifest;
-use super::output_layout::BuildOutputLayout;
+use super::output_layout::{BuildOutputLayout, BuildPlatform};
 use anyhow::{Context, Result, bail};
 use std::fs::TryLockError;
 use std::fs::{self, File, OpenOptions};
@@ -424,8 +424,24 @@ pub enum BuildCacheLookup {
 /// cache miss. The caller must hold BuildOutputLock while looking up and
 /// rebuilding so another process cannot publish the same key concurrently.
 pub fn lookup_verified(layout: &BuildOutputLayout, key: &BuildKey) -> BuildCacheLookup {
-    let path = layout.artifact_manifest_path();
-    match fs::symlink_metadata(&path) {
+    lookup_verified_at_path(
+        &layout.artifact_manifest_path(),
+        &layout.root,
+        layout.platform,
+        key.key_hash(),
+    )
+}
+
+/// Verifies a manifest whose expected key is represented by a trusted output
+/// layout or preview environment. The caller must hold BuildOutputLock for the
+/// same root while checking and rebuilding.
+pub fn lookup_verified_at_path(
+    path: &Path,
+    root: &Path,
+    platform: BuildPlatform,
+    key_hash: &str,
+) -> BuildCacheLookup {
+    match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return BuildCacheLookup::Miss("artifact manifest is missing".into());
         }
@@ -438,7 +454,24 @@ pub fn lookup_verified(layout: &BuildOutputLayout, key: &BuildKey) -> BuildCache
         Ok(_) => {}
     }
 
-    match BuildArtifactManifest::read_verified(&path, &layout.root, layout.platform, key) {
+    match BuildArtifactManifest::read(path).and_then(|manifest| {
+        if manifest.platform != platform {
+            bail!(
+                "build artifact manifest platform mismatch: expected {}, found {}",
+                platform.label(),
+                manifest.platform.label()
+            );
+        }
+        if manifest.key_hash != key_hash {
+            bail!(
+                "build artifact manifest BuildKey mismatch: expected {}, found {}",
+                key_hash,
+                manifest.key_hash
+            );
+        }
+        manifest.verify(root)?;
+        Ok(manifest)
+    }) {
         Ok(manifest) => BuildCacheLookup::Hit(manifest),
         Err(error) => BuildCacheLookup::Miss(format!("artifact manifest rejected: {error:#}")),
     }
@@ -518,6 +551,50 @@ mod tests {
         assert!(matches!(
             lookup_verified(&layout, &key),
             BuildCacheLookup::Miss(reason) if reason.contains("rejected")
+        ));
+    }
+
+    #[test]
+    fn preview_manifest_lookup_binds_platform_and_key_hash() {
+        let base = tempfile::tempdir().unwrap();
+        let key = key();
+        let layout = layout(base.path(), &key);
+        layout.prepare().unwrap();
+        let executable = layout.cargo_target_dir.join("debug/app");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"preview binary").unwrap();
+        let entry = executable.strip_prefix(&layout.root).unwrap().to_owned();
+        BuildArtifactManifest::capture(&layout, &[entry])
+            .unwrap()
+            .write_atomic(&layout.preview_artifact_manifest_path())
+            .unwrap();
+
+        assert!(matches!(
+            lookup_verified_at_path(
+                &layout.preview_artifact_manifest_path(),
+                &layout.root,
+                BuildPlatform::Desktop,
+                key.key_hash(),
+            ),
+            BuildCacheLookup::Hit(_)
+        ));
+        assert!(matches!(
+            lookup_verified_at_path(
+                &layout.preview_artifact_manifest_path(),
+                &layout.root,
+                BuildPlatform::Android,
+                key.key_hash(),
+            ),
+            BuildCacheLookup::Miss(reason) if reason.contains("platform mismatch")
+        ));
+        assert!(matches!(
+            lookup_verified_at_path(
+                &layout.preview_artifact_manifest_path(),
+                &layout.root,
+                BuildPlatform::Desktop,
+                &"0".repeat(64),
+            ),
+            BuildCacheLookup::Miss(reason) if reason.contains("BuildKey mismatch")
         ));
     }
 
