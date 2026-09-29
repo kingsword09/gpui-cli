@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-09-29，主分支 `a1395d3`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-09-29，主分支 `5b63656`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -488,8 +488,9 @@ backend/font fingerprint、baseline 缺失或不可比仍保持 `inconclusive`�
 2026-09-29 增量：单场景和 matrix 的 preview 已使用唯一 session key 定向发现 control，
 修复误连已有 preview 的路径；移动场景经 `gpui check --matrix` 接入，单场景入口仍限
 desktop。`CheckReport.context` 已保留 runtime ready/reset generation、environment 和
-uncontrolled inputs。桌面 supervisor 的 kill/wait 仍不能证明应用进程树清理成功；fixture
-重读不更新 hash、真实环境适配和冻结构建仍需补齐，不能据新增报告字段标记 S04 完成。
+uncontrolled inputs。#151 已让 desktop check 通过 process group/Windows Job Object
+终止 owned process tree，并覆盖后代持有输出管道的回归测试；完整 GUI check cleanup probe、
+fixture 重读不更新 hash、真实环境适配和冻结构建仍需补齐，不能据该局部修复标记 S04 完成。
 当前 context 只随单场景 `CheckReport` 输出；matrix 汇总仍只投影 status、primary error
 和 capture step artifact IDs，完整步骤、context 与 cleanup 详情尚未保留。
 
