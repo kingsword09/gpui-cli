@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::live::PreviewBuildOutputs;
 use super::run::{Project, bundle_id_of, bundle_id_of_android};
 use crate::device;
 use crate::devserver::OwnedChild;
@@ -38,6 +39,7 @@ use crate::runner::matrix_executor::{
 };
 use crate::runner::matrix_resources::MatrixResourcePool;
 use crate::runner::mobile::{CaptureArtifact, CaptureScope, MobileRunner, RunIdentity, RunRequest};
+use crate::runner::output_layout::{BuildOutputLayout, BuildPlatform};
 use crate::scenario::baseline::{
     BaselineComparison, BaselineKey, BaselineLoad, DiffPng, MAX_IMAGE_BYTES, compare_png, diff_png,
     load_baseline,
@@ -110,6 +112,8 @@ pub fn handle_check(args: CheckArgs) -> Result<()> {
             session_key: format!("single-{}-{}", std::process::id(), epoch_ms()),
             snapshot_hash: Some(frozen.plan.snapshot.input_hash.clone()),
             build_key: Some(frozen.plan.key.key_hash().to_owned()),
+            build_outputs: Some(preview_outputs_from_layout(&frozen.plan.layout)),
+            android_abis: None,
         },
     )?;
     let report =
@@ -149,7 +153,7 @@ fn handle_matrix_check(
         .with_context(|| format!("reading matrix file {}", matrix_path.display()))?;
     let matrix: MatrixFile = toml::from_str(&matrix_source).context("parsing matrix file")?;
     let context = matrix_admission_context(project, &matrix, &runtime_root)?;
-    let admission = load_and_admit(&matrix_path, &scenario_path, &runtime_root, &context)?;
+    let mut admission = load_and_admit(&matrix_path, &scenario_path, &runtime_root, &context)?;
 
     let target_platforms = matrix
         .targets
@@ -174,7 +178,7 @@ fn handle_matrix_check(
         .ready_cells()
         .map(|cell| cell.target_id.clone())
         .collect::<BTreeSet<_>>();
-    let target_build_keys = ready_target_ids
+    let target_builds = ready_target_ids
         .iter()
         .map(|target_id| {
             let platform = target_platforms
@@ -182,10 +186,28 @@ fn handle_matrix_check(
                 .copied()
                 .ok_or_else(|| anyhow::anyhow!("matrix target '{target_id}' disappeared"))?;
             let abi = target_abis.get(target_id).cloned().flatten();
-            let key = matrix_target_build_key(&runtime_root, platform, abi.as_deref())?;
-            Ok((target_id.clone(), key))
+            let build =
+                matrix_target_build(&project.root, &runtime_root, platform, abi.as_deref())?;
+            Ok((target_id.clone(), build))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    for cell in &mut admission.plan.cells {
+        if let Some(build) = target_builds.get(&cell.target_id) {
+            let resource_id = format!("build:{}", build.key_hash);
+            if !cell.resource_ids.contains(&resource_id) {
+                cell.resource_ids.push(resource_id);
+            }
+        }
+    }
+    for admitted in &mut admission.cells {
+        if let Some(build) = target_builds.get(&admitted.cell.target_id) {
+            let resource_id = format!("build:{}", build.key_hash);
+            if !admitted.cell.resource_ids.contains(&resource_id) {
+                admitted.cell.resource_ids.push(resource_id);
+            }
+        }
+    }
+    admission.plan.validate()?;
     let scenario_by_id = scenarios
         .scenarios
         .iter()
@@ -215,10 +237,9 @@ fn handle_matrix_check(
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("matrix scenario '{}' disappeared", cell.scenario_id))?;
         let fixture_hash = fixture_hashes.get(&cell.scenario_id).cloned();
-        let build_key = target_build_keys
-            .get(&cell.target_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("matrix target '{}' has no BuildKey", cell.target_id))?;
+        let target_build = target_builds.get(&cell.target_id).cloned().ok_or_else(|| {
+            anyhow::anyhow!("matrix target '{}' has no build outputs", cell.target_id)
+        })?;
         Ok(MatrixCheckRunner::Control(Box::new(
             ControlMatrixCheckRunner {
                 project_root: project_root.clone(),
@@ -227,7 +248,8 @@ fn handle_matrix_check(
                 scenario,
                 fixture_hash,
                 snapshot_hash: snapshot_hash_for_factory.clone(),
-                build_key,
+                build_key: target_build.key_hash,
+                build_outputs: target_build.outputs,
                 target: platform.label().into(),
                 device: target_devices.get(&cell.target_id).cloned().flatten(),
                 platform,
@@ -302,22 +324,57 @@ fn matrix_admission_context(
     Ok(context)
 }
 
-fn matrix_target_build_key(
+#[derive(Clone)]
+struct MatrixTargetBuild {
+    key_hash: String,
+    outputs: PreviewBuildOutputs,
+}
+
+fn matrix_target_build(
+    source_root: &Path,
     snapshot_root: &Path,
     platform: MatrixPlatform,
     abi: Option<&str>,
-) -> Result<String> {
-    let key = match platform {
-        MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux => {
-            desktop_build_key(snapshot_root, false)?
-        }
-        MatrixPlatform::Ios => ios_build_key(snapshot_root, false, "aarch64-apple-ios-sim")?,
+) -> Result<MatrixTargetBuild> {
+    let source_root = fs::canonicalize(source_root).with_context(|| {
+        format!(
+            "resolving matrix build output root {}",
+            source_root.display()
+        )
+    })?;
+    let (key, build_platform) = match platform {
+        MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux => (
+            desktop_build_key(snapshot_root, false)?,
+            BuildPlatform::Desktop,
+        ),
+        MatrixPlatform::Ios => (
+            ios_build_key(snapshot_root, false, "aarch64-apple-ios-sim")?,
+            BuildPlatform::Ios,
+        ),
         MatrixPlatform::Android => {
             let abi = abi.context("Android matrix target has no ABI for BuildKey")?;
-            android_build_key(snapshot_root, false, &[abi.to_owned()])?
+            (
+                android_build_key(snapshot_root, false, &[abi.to_owned()])?,
+                BuildPlatform::Android,
+            )
         }
     };
-    Ok(key.key_hash().to_owned())
+    let layout =
+        BuildOutputLayout::for_key(&source_root.join(".gpui/builds"), &key, build_platform)?;
+    layout.prepare()?;
+    Ok(MatrixTargetBuild {
+        key_hash: key.key_hash().to_owned(),
+        outputs: preview_outputs_from_layout(&layout),
+    })
+}
+
+fn preview_outputs_from_layout(layout: &BuildOutputLayout) -> PreviewBuildOutputs {
+    PreviewBuildOutputs {
+        cargo_target_dir: layout.cargo_target_dir.clone(),
+        jni_libs_dir: layout.android_jni_dir.clone(),
+        gradle_build_dir: layout.android_gradle_build_dir.clone(),
+        ios_derived_data_dir: layout.ios_derived_data_dir.clone(),
+    }
 }
 
 fn print_matrix_report(report: &MatrixReport, json_output: bool) -> Result<()> {
@@ -509,6 +566,7 @@ struct ControlMatrixCheckRunner {
     fixture_hash: Option<String>,
     snapshot_hash: String,
     build_key: String,
+    build_outputs: PreviewBuildOutputs,
     target: String,
     device: Option<String>,
     platform: MatrixPlatform,
@@ -531,6 +589,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     fixture_hash,
                     snapshot_hash,
                     build_key,
+                    build_outputs,
                     target,
                     device,
                     platform,
@@ -581,6 +640,8 @@ impl MatrixCellRunner for MatrixCheckRunner {
                         session_key,
                         snapshot_hash: Some(snapshot_hash.clone()),
                         build_key: Some(build_key.clone()),
+                        build_outputs: Some(build_outputs.clone()),
+                        android_abis: abi.clone(),
                     },
                 )?;
                 runner.mobile_capture = mobile_capture.take();
@@ -832,6 +893,8 @@ struct CheckLaunchOptions<'a> {
     session_key: String,
     snapshot_hash: Option<String>,
     build_key: Option<String>,
+    build_outputs: Option<PreviewBuildOutputs>,
+    android_abis: Option<String>,
 }
 
 impl DesktopCheckRunner {
@@ -851,6 +914,8 @@ impl DesktopCheckRunner {
             session_key,
             snapshot_hash,
             build_key,
+            build_outputs,
+            android_abis,
         } = options;
         let executable = std::env::current_exe().context("locating the gpui executable")?;
         let scenario_file = scenario_file
@@ -874,6 +939,21 @@ impl DesktopCheckRunner {
             child.env("GPUI_PREVIEW_PRELEASED", "1");
         }
         child.env("GPUI_PREVIEW_SESSION_KEY", &session_key);
+        if let Some(abis) = android_abis {
+            child.env("GPUI_ANDROID_ABIS", abis);
+        }
+        if let Some(outputs) = &build_outputs {
+            child.env("GPUI_PREVIEW_CARGO_TARGET_DIR", &outputs.cargo_target_dir);
+            if let Some(path) = &outputs.jni_libs_dir {
+                child.env("GPUI_PREVIEW_JNI_LIBS_DIR", path);
+            }
+            if let Some(path) = &outputs.gradle_build_dir {
+                child.env("GPUI_PREVIEW_GRADLE_BUILD_DIR", path);
+            }
+            if let Some(path) = &outputs.ios_derived_data_dir {
+                child.env("GPUI_PREVIEW_IOS_DERIVED_DATA_DIR", path);
+            }
+        }
         let mut child = OwnedChild::spawn_with_stdio(
             &mut child,
             Stdio::null(),
@@ -2129,10 +2209,29 @@ mod tests {
         assert!(!frozen.inputs.snapshot.input_hash.is_empty());
         assert!(frozen.inputs.cache_hit_disabled_reason.is_none());
 
-        let build_key =
-            matrix_target_build_key(&frozen.inputs.snapshot.root, MatrixPlatform::Linux, None)
-                .unwrap();
+        let build_key = matrix_target_build(
+            root.path(),
+            &frozen.inputs.snapshot.root,
+            MatrixPlatform::Linux,
+            None,
+        )
+        .unwrap()
+        .key_hash;
         assert_eq!(build_key.len(), 64);
         assert!(build_key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        let build = matrix_target_build(
+            root.path(),
+            &frozen.inputs.snapshot.root,
+            MatrixPlatform::Linux,
+            None,
+        )
+        .unwrap();
+        assert!(
+            build
+                .outputs
+                .cargo_target_dir
+                .starts_with(source_root.join(".gpui/builds/desktop"))
+        );
     }
 }
