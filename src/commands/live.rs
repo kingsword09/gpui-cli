@@ -35,10 +35,13 @@ use crate::devserver::session::{Build, Session};
 use crate::devserver::timing;
 use crate::devserver::{AssetReconciliation, DevServer};
 use crate::runner::build_cache::{BuildCacheLookup, BuildOutputLock, lookup_verified_at_path};
+use crate::runner::build_coordinator::coordinate_preview_build_with_verifier;
 use crate::runner::build_inputs::android_debug_keystore_hash;
 use crate::runner::build_manifest::BuildArtifactManifest;
 use crate::runner::lease::DeviceLeaseSession;
-use crate::runner::output_layout::{BuildPlatform, PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE};
+use crate::runner::output_layout::{
+    BuildOutputLayout, BuildPlatform, PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE,
+};
 use serde_json::json;
 
 /// Source files watch out for asset-only changes under this directory; they
@@ -52,6 +55,8 @@ const SNAPSHOT_WAIT: Duration = Duration::from_millis(1500);
 const MAX_SNAPSHOT_BYTES: usize = 512 * 1024;
 /// Snapshots older than this are pruned on the next save.
 const SNAPSHOT_TTL: Duration = Duration::from_secs(24 * 3600);
+const PREVIEW_BUILD_FAILED: &str = "preview build failed";
+const PREVIEW_BUILD_SUPERSEDED: &str = "preview build superseded";
 
 /// Editors fire several events per save; this absorbs the burst.
 const DEBOUNCE_MS: u64 = 400;
@@ -369,6 +374,119 @@ fn publish_preview_desktop_manifest(root: &Path, key_hash: &str, executable: &Pa
     Ok(())
 }
 
+fn preview_desktop_output_layout(
+    outputs: &PreviewBuildOutputs,
+    key_hash: &str,
+) -> BuildOutputLayout {
+    BuildOutputLayout {
+        platform: BuildPlatform::Desktop,
+        key_hash: key_hash.to_owned(),
+        root: outputs.output_root.clone(),
+        cargo_target_dir: outputs.cargo_target_dir.clone(),
+        native_staging_dir: outputs.output_root.join("native-staging"),
+        android_jni_dir: None,
+        android_gradle_build_dir: None,
+        ios_derived_data_dir: None,
+    }
+}
+
+fn verified_preview_desktop_executable(root: &Path, key_hash: &str) -> Result<PathBuf> {
+    let manifest = match lookup_verified_at_path(
+        &root.join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE),
+        root,
+        BuildPlatform::Desktop,
+        key_hash,
+    ) {
+        BuildCacheLookup::Hit(manifest) => manifest,
+        BuildCacheLookup::Miss(reason) => {
+            bail!("preview artifact manifest is not verified: {reason}")
+        }
+    };
+    preview_desktop_executable_from_manifest(&manifest, root)
+        .context("preview artifact manifest does not identify one desktop executable")
+}
+
+fn verify_preview_desktop_output(layout: &BuildOutputLayout, key_hash: &str) -> Result<()> {
+    verified_preview_desktop_executable(&layout.root, key_hash).map(|_| ())
+}
+
+fn preview_control_error(error: &anyhow::Error) -> Option<Iteration> {
+    let message = error.to_string();
+    if message.contains(PREVIEW_BUILD_FAILED) {
+        Some(Iteration::BuildFailed)
+    } else if message.contains(PREVIEW_BUILD_SUPERSEDED) {
+        Some(Iteration::Superseded)
+    } else {
+        None
+    }
+}
+
+fn coordinate_desktop_preview_build(
+    project: &Project,
+    outputs: &PreviewBuildOutputs,
+    build: &Build,
+) -> Result<PathBuf> {
+    let key_hash = outputs
+        .build_key_hash
+        .as_deref()
+        .context("desktop preview coordinator requires a BuildKey hash")?;
+    let layout = preview_desktop_output_layout(outputs, key_hash);
+    coordinate_preview_build_with_verifier(
+        &layout,
+        key_hash,
+        || {
+            match lookup_verified_at_path(
+                &outputs
+                    .output_root
+                    .join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE),
+                &outputs.output_root,
+                BuildPlatform::Desktop,
+                key_hash,
+            ) {
+                BuildCacheLookup::Hit(manifest) => {
+                    if preview_desktop_executable_from_manifest(&manifest, &outputs.output_root)
+                        .is_some()
+                    {
+                        println!("  {} preview BuildKey cache hit: {}", "✓".green(), key_hash);
+                        return Ok(());
+                    }
+                    println!(
+                        "  {} preview cache miss: manifest does not identify one desktop executable",
+                        "→".blue()
+                    );
+                }
+                BuildCacheLookup::Miss(reason) => {
+                    println!("  {} preview cache miss: {reason}", "→".blue());
+                }
+            }
+
+            let mut cmd = Command::new("cargo");
+            cmd.current_dir(&project.root).args([
+                "build",
+                "-p",
+                &project.desktop_crate(),
+                "--features",
+                "gpui-dev",
+            ]);
+            cmd.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
+            let outcome = error::run_cargo_json(&mut cmd, build, "cargo.build")?;
+            if !outcome.success {
+                bail!(PREVIEW_BUILD_FAILED);
+            }
+            let executable = outcome
+                .executable
+                .context("cargo succeeded but reported no binary path")?;
+            if !build.is_current()? {
+                bail!(PREVIEW_BUILD_SUPERSEDED);
+            }
+            publish_preview_desktop_manifest(&outputs.output_root, key_hash, &executable)?;
+            Ok(())
+        },
+        verify_preview_desktop_output,
+    )?;
+    verified_preview_desktop_executable(&outputs.output_root, key_hash)
+}
+
 fn preview_manifest_contains_root(
     manifest: &BuildArtifactManifest,
     root: &Path,
@@ -471,79 +589,82 @@ fn run_iteration(
                 .as_ref()
                 .and_then(|preview| preview.build_outputs.as_ref())
                 .cloned();
-            let _output_lock = outputs
-                .as_ref()
-                .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
-                .transpose()?;
-            let executable = if let Some(outputs) = &outputs {
-                if let Some(key_hash) = outputs.build_key_hash.as_deref() {
-                    match lookup_verified_at_path(
-                        &outputs
-                            .output_root
-                            .join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE),
-                        &outputs.output_root,
-                        BuildPlatform::Desktop,
-                        key_hash,
-                    ) {
-                        BuildCacheLookup::Hit(manifest) => {
-                            if let Some(executable) = preview_desktop_executable_from_manifest(
-                                &manifest,
-                                &outputs.output_root,
-                            ) {
-                                println!(
-                                    "  {} preview BuildKey cache hit: {}",
-                                    "✓".green(),
-                                    key_hash
-                                );
-                                Some(executable)
-                            } else {
-                                println!(
-                                    "  {} preview cache miss: manifest does not identify one desktop executable",
-                                    "→".blue()
-                                );
-                                None
+            let executable = if let Some(outputs) = &outputs
+                && outputs.build_key_hash.is_some()
+                && outputs.cache_hit_disabled_reason.is_none()
+            {
+                match coordinate_desktop_preview_build(project, outputs, build) {
+                    Ok(executable) => executable,
+                    Err(error) => {
+                        if let Some(control) = preview_control_error(&error) {
+                            return Ok(control);
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                let _output_lock = outputs
+                    .as_ref()
+                    .map(|outputs| BuildOutputLock::acquire_at_root(&outputs.output_root))
+                    .transpose()?;
+                let executable = if let Some(outputs) = &outputs {
+                    if let Some(key_hash) = outputs.build_key_hash.as_deref() {
+                        match lookup_verified_at_path(
+                            &outputs
+                                .output_root
+                                .join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE),
+                            &outputs.output_root,
+                            BuildPlatform::Desktop,
+                            key_hash,
+                        ) {
+                            BuildCacheLookup::Hit(manifest) => {
+                                preview_desktop_executable_from_manifest(
+                                    &manifest,
+                                    &outputs.output_root,
+                                )
                             }
+                            BuildCacheLookup::Miss(_) => None,
                         }
-                        BuildCacheLookup::Miss(reason) => {
-                            println!("  {} preview cache miss: {reason}", "→".blue());
-                            None
-                        }
+                    } else {
+                        None
                     }
                 } else {
                     None
+                };
+                let executable = if let Some(executable) = executable {
+                    executable
+                } else {
+                    let mut cmd = Command::new("cargo");
+                    cmd.current_dir(&project.root).args([
+                        "build",
+                        "-p",
+                        &project.desktop_crate(),
+                        "--features",
+                        "gpui-dev",
+                    ]);
+                    if let Some(outputs) = &outputs {
+                        cmd.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
+                    }
+                    let outcome = error::run_cargo_json(&mut cmd, build, "cargo.build")?;
+                    if !outcome.success {
+                        return Ok(Iteration::BuildFailed);
+                    }
+                    outcome
+                        .executable
+                        .context("cargo succeeded but reported no binary path")?
+                };
+                if !build.is_current()? {
+                    return Ok(Iteration::Superseded);
                 }
-            } else {
-                None
-            };
-            let executable = if let Some(executable) = executable {
+                if let Some(outputs) = &outputs
+                    && let Some(key_hash) = outputs.build_key_hash.as_deref()
+                {
+                    publish_preview_desktop_manifest(&outputs.output_root, key_hash, &executable)?;
+                }
                 executable
-            } else {
-                let mut cmd = Command::new("cargo");
-                cmd.current_dir(&project.root).args([
-                    "build",
-                    "-p",
-                    &project.desktop_crate(),
-                    "--features",
-                    "gpui-dev",
-                ]);
-                if let Some(outputs) = &outputs {
-                    cmd.env("CARGO_TARGET_DIR", &outputs.cargo_target_dir);
-                }
-                let outcome = error::run_cargo_json(&mut cmd, build, "cargo.build")?;
-                if !outcome.success {
-                    return Ok(Iteration::BuildFailed);
-                }
-                outcome
-                    .executable
-                    .context("cargo succeeded but reported no binary path")?
             };
             if !build.is_current()? {
                 return Ok(Iteration::Superseded);
-            }
-            if let Some(outputs) = &outputs
-                && let Some(key_hash) = outputs.build_key_hash.as_deref()
-            {
-                publish_preview_desktop_manifest(&outputs.output_root, key_hash, &executable)?;
             }
             prepare_restart(project, server, channel);
             if !build.is_current()? {
