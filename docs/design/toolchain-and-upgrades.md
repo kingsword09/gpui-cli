@@ -1,8 +1,9 @@
 # 设计契约：工具链、开发支持库、模板升级与构建效率
 
-状态：T01 的规则、probe 和 CLI 已实现；T02 已实现 manifest/嵌入基线记录；
-T03 已实现只读三方 plan；T04 已实现 journal/recovery 的多阶段子集；F02 已开始
-feature/release 边界子集；协议/runtime 拆分、T05、T06 仍拟议。基线：`6d091b6`。
+状态核查（2026-09-29，`a1395d3`）：doctor、模板 manifest、保守三方 plan、事务恢复、
+独立 protocol crate、普通构建冻结/BuildKey、T06 产物缓存和清理已有实现。
+doctor 版本解析、真实历史升级、独立 runtime/v1 兼容、缓存键完整性、T05 索引与共享构建/
+有界预热仍未完成。详见[当前进度](../roadmap/current-status.md)，下文为完整设计契约。
 
 ## 1. 工程基础的目标
 

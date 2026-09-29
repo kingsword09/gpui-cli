@@ -26,8 +26,10 @@ and device execution; it does not validate native runtime behavior.
 
 ## Design documentation
 
-Start with the [agent-native roadmap](docs/ROADMAP-agent-native-development.md),
-then select a task from its implementation backlog and the matching acceptance
+Start with the [current status](docs/roadmap/current-status.md) and compare its
+audited commit with your branch. Then read the
+[agent-native roadmap](docs/ROADMAP-agent-native-development.md) and select a task
+from its implementation backlog and the matching acceptance
 cases. Proposed APIs and configuration examples must stay marked as drafts
 until their implementation and required platform checks have passed.
 

@@ -2,6 +2,9 @@
 
 当前功能以项目 [README](../README.md) 和代码为准；设计草案不代表已实现。
 
+接续开发先读[当前进度与接续记录](roadmap/current-status.md)：核查至 2026-09-29
+主分支 `a1395d3`，包含全部 35 项任务、最近合并、旧问题处置和验证边界。
+
 ## 后续路线与可执行计划
 
 - [Agent-native 跨平台开发总路线](ROADMAP-agent-native-development.md)：目标、现状、架构、G0–G4 门槛。
