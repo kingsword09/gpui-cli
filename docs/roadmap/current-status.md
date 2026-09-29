@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-09-29（Asia/Shanghai）。核查代码：`14339b5`（PR #175 squash merge）。
+更新日期：2026-09-29（Asia/Shanghai）。核查代码：`5f6859d`（PR #177 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -18,7 +18,7 @@ iOS simulator/Android runner、移动 matrix control driver 也已落地；previ
 基于独立 verified artifact manifest 命中并跳过相应构建步骤；matrix control scenario cell 现在
 保留完整 `CheckReport`，包括 steps、证据和 cleanup。
 现阶段仍未完成
-跨命令共享构建/在途任务合并、移动 capture-only 路径的完整 scenario 语义/输入验收、MCP、
+preview/移动 capture-only 路径的完整 scenario 语义/输入验收、MCP、
 复现包或性能验证闭环。
 
 35 项工作包更新为 **1 done、21 in_progress、13 planned、0 in_review**。
@@ -30,7 +30,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup/fixture identity hardening | 语义激活、真实环境适配、跨命令共享构建/在途任务合并、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、普通 build/run 的跨进程 BuildKey coordinator、cleanup/fixture identity hardening | 语义激活、真实环境适配、preview 入口接入 coordinator、调用者取消引用/终止策略、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture | 完整三端同快照矩阵、可靠日志归属、设备重连、repro 和 L2/L3 CI |
 | G4 | 普通构建缓存复用、desktop/iOS simulator/Android default-debug live preview verified cache hit 和显式清理 | 缓存输入遗漏、iOS physical/Android custom or signing-sensitive preview cache hit、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
@@ -59,6 +59,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `f6801e9`（#171） | iOS live preview 将 BuildKey hash 通过受控环境传入，在 output root 发布并校验独立 iOS `.app` manifest；simulator 命中时跳过 rustup/Cargo/XcodeGen/`xcodebuild`，physical device 仍强制重建 | 真机签名 identity/Provisioning Profile 等输入仍未建模；不覆盖 Android preview、跨命令构建所有权、在途任务 coalescing 或隐藏输入建模 |
 | `0c2771e`（#173） | Android live preview 将 cache policy、ABI 和 default debug keystore hash 传入 preview；在 output root 校验 JNI staging 与 debug APK 输出的完整 manifest，命中时跳过 rustup/cargo-ndk/Gradle | release/custom/sensitive signing、keystore 变化、工具链身份不可读或隐藏输入会 bypass；不覆盖跨命令构建所有权、在途任务 coalescing 或完整设备验收 |
 | `14339b5`（#175） | `BuildOutputLock` 在取得 OS 锁后原子写入 `.build-owner.json`，记录 schema、owner、PID、开始时间、状态和可选 BuildKey；释放时仅删除 owner_id 匹配的记录，stale 记录由下一个持锁者覆盖，cache size 统计排除该元数据 | 这是跨进程 ownership 证据，不是 coordinator、心跳/fencing 状态机、subscriber/取消引用或同 key 在途任务合并；OS 锁仍是活跃性唯一权威 |
+| `5f6859d`（#177） | 普通 desktop/iOS/Android build/run 的可复用 BuildKey 通过持久 coordinator record 选举单一 leader；同 key follower 持有订阅文件 OS 锁、等待终态并复核完整 artifact manifest，失败可共享、leader 消失可接管，cache clean 避开活跃 subscriber | 尚未接入 live preview/check 构建；无调用者取消引用计数、无订阅者归零后的终止策略、无 heartbeat/fencing/partial 状态机；含未建模输入的路径仍不共享 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -87,20 +88,20 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | S02 | in_progress | Counter/LoginForm/VirtualList preview/reset；Android preview 已接入，真实环境适配仍有缺口 |
 | S03 | in_progress | click/type/key/scroll、正常事件路径、owner/scope 和 unknown 语义；真实输入/遮挡/污染及持久幂等验收未齐 |
 | M03 | in_progress | 主机 OS 锁、owner/fencing、heartbeat，run/live/capture 和移动 matrix 已接入；重连和真实竞争矩阵未齐 |
-| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；单场景及 matrix 已消费共享冻结 snapshot/target BuildKey、绑定输出布局并锁定 preview 输出根，desktop/iOS simulator/Android default-debug live preview 已接入 verified manifest 命中，BuildKey output ownership record 已接入，跨命令共享构建/隐藏输入建模仍未齐 |
+| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；单场景及 matrix 已消费共享冻结 snapshot/target BuildKey、绑定输出布局并锁定 preview 输出根，普通 desktop/iOS/Android build/run 已接入 BuildKey coordinator，desktop/iOS simulator/Android default-debug live preview 已接入 verified manifest 命中，BuildKey output ownership record 已接入，preview 接入/隐藏输入建模仍未齐 |
 | S04 | in_progress | executor、desktop check、单场景及 matrix frozen inputs、baseline/diff/approve、移动 matrix 场景 driver、per-cell context/BuildKey/output layout/preview output lock/完整 CheckReport、owned process-tree/fixture identity cleanup；移动 capture-only 语义/输入、环境及三夹具各 20 次真实验收未齐 |
 | A01 | planned | CLI/control 可复用；无 MCP 只读适配、JSON-RPC server 或独立 Agent service |
 | A02 | planned | action/operation/check 可复用；无 MCP 动作/取消/owner 适配 |
 | A03 | planned | pin/manifest/registry 可复用；无 context 命令、版本知识索引或工作流包 |
 | S05 | planned | 无类型化热参数、overlay revision、撤销/固化及收益实验 |
 | M01 | in_progress | iOS/Android adapter、capture/log snapshot、进程身份与 fault evidence；缺完整日志归属、设备故障和 UI 变体验收 |
-| M02 | in_progress | 配置展开、admission、并行/资源锁、matrix CLI、移动 control/native capture、共享 frozen snapshot/target output lock、control scenario cell 完整报告；缺跨命令构建所有权、移动完整 scenario 证据和三端矩阵 |
+| M02 | in_progress | 配置展开、admission、并行/资源锁、matrix CLI、移动 control/native capture、共享 frozen snapshot/target output lock、control scenario cell 完整报告；普通 build/run 已有跨命令构建所有权，仍缺 preview/check 接入、移动完整 scenario 证据和三端矩阵 |
 | M05 | planned | 无 repro export/inspect/run、脱敏和干净环境重放 |
 | Q01 | planned | 已有三 OS CLI/macOS 模板/Android 宿主 CI；尚无该工作包的完整真实 GUI/设备 L2/L3 门禁 |
 | G01 | planned | supervisor 计时已有；无应用 layout/paint/frame/CPU/GPU 指标与开销验收 |
 | G02 | planned | 无 perf 执行器、统计/可比性和性能预算判定 |
 | T05 | planned | watcher/全量内容扫描已有；无增量输入索引及大项目对照 |
-| T06 | in_progress | desktop/iOS simulator/Android default-debug 缓存与 cache clean，desktop/iOS simulator/Android default-debug live preview verified manifest 命中，BuildKey output ownership record 已落地；输入键有遗漏，iOS physical/Android custom or signing-sensitive preview、共享在途构建/取消/预热未实现 |
+| T06 | in_progress | desktop/iOS simulator/Android default-debug 缓存与 cache clean，普通 desktop/iOS/Android build/run 已接入同 key 在途 coordinator，desktop/iOS simulator/Android default-debug live preview verified manifest 命中，BuildKey output ownership record 已落地；输入键有遗漏，preview coordinator、iOS physical/Android custom or signing-sensitive preview、取消/预热未实现 |
 | Q02 | planned | 仅有 12 项任务设计；无可执行评分器和固定预算对照实验 |
 | G03 | planned | 无 GPU capture/analysis provider 闭环；可选 |
 | M06 | planned | 无远程 runner、传输和断线恢复；可选 |
@@ -127,8 +128,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
   matrix check 也在 admission 前创建一个严格 snapshot，所有 cell 从同一 runtime root 启动
   preview，并把原项目 root 仅用于 baseline/diff 和移动 artifact 输出。已知 local `build.rs`
   等未建模输入会让严格 check/matrix 直接不可用，不回退到可变目录；matrix target-specific
-  BuildKey 已从 shared snapshot 计算并绑定到 source-project output layout；跨命令共享构建、
-  cache coalescing 和在途任务所有权仍未接入。
+  BuildKey 已从 shared snapshot 计算并绑定到 source-project output layout；普通 build/run 的跨命令
+  coordinator 已接入，但 check/matrix preview 仍未消费该 coordinator，cache coalescing 和在途任务
+  所有权在 preview/check 路径仍未接入。
 - [桌面模板](../../templates/desktop/src/main.rs) 仍固定 Light 主题及窗口注册尺寸；
   `ready_environment` 中 theme/locale/clock/seed 来自配置。报告保留这些值改善了追踪性，
   不能代替真实 viewport/DPI、环境控制、字体/backend 和语义 provider 的验证。
@@ -140,7 +142,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 
 ## 5. 验证记录与证据范围
 
-本轮验证针对上述 `14339b5` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
+本轮验证针对上述 `5f6859d` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
 `artifacts/progress-audit-2026-09-29/`（忽略的本机产物目录，不是已发布验收证据）。
 测试独立设置 `GPUI_DEVICE_LEASE_DIR`，避免与其他 worktree 的租约测试互相影响。
 
@@ -148,7 +150,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- |
 | `cargo fmt --check` | 通过 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | 通过 |
-| `cargo test --workspace --locked` | 340 个单元测试及全部集成/协议测试通过，0 failed |
+| `cargo test --workspace --locked` | 348 个单元测试及全部集成/协议测试通过，0 failed |
 | `cargo build --locked` | 通过 |
 | `cargo x check-design-docs`、`git diff --check` | 通过；仅验证文档/示例一致性 |
 | 两份 35 项状态表逐项比对 | 相同；1 done、21 in_progress、13 planned |
@@ -164,6 +166,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | PR #171 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；无 release/tag | [PR #171](https://github.com/kingsword09/gpui-cli/pull/171) |
 | PR #173 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；macOS capture helper deadline 初次波动后重跑通过；无 release/tag | [PR #173](https://github.com/kingsword09/gpui-cli/pull/173) |
 | PR #175 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；无 release/tag | [PR #175](https://github.com/kingsword09/gpui-cli/pull/175) |
+| PR #177 CI | required checks 全部通过；Android template 先修复 follower cache-hit 诊断契约后重跑，Windows live-feedback 时序波动重跑通过；三 OS check、desktop-template、android-template、baseline-driver 最终均通过；无 release/tag | [PR #177](https://github.com/kingsword09/gpui-cli/pull/177) |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
@@ -181,6 +184,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | iOS simulator live preview cache hit | preview 专用 manifest 绑定 iOS platform/BuildKey hash，逐文件验证 `.app` 内容并要求根正是当前 simulator bundle；命中跳过 rustup/Cargo/XcodeGen/`xcodebuild`，physical device 不命中 | [T06 iOS preview cache hit](../experiments/T06-ios-preview-cache-hit-2026-09-29.md) |
 | Android default-debug live preview cache hit | preview 专用 manifest 绑定 Android platform/BuildKey/ABI，逐文件验证 JNI staging 与 debug APK 输出；default debug keystore 和 cache policy 仍有效时命中并跳过 rustup/cargo-ndk/Gradle | [T06 Android preview cache hit](../experiments/T06-android-preview-cache-hit-2026-09-29.md) |
 | BuildKey output ownership | `BuildOutputLock` 持有 OS 锁后原子发布 `.build-owner.json`；owner_id 匹配时才删除，stale 记录在下一次成功加锁后覆盖，cache clean 不把 owner record 计入输出大小；不以 record 推断锁活跃性 | [S04 BuildKey output ownership](../experiments/S04-build-output-ownership-2026-09-29.md) |
+| BuildKey coordinator | 普通 build/run 对可复用 key 通过 `.build-coordinator.json` 发布 building/succeeded/failed attempt；leader closure 只执行一次，follower 以 OS-locked subscriber 等待并验证 manifest；leader 崩溃可接管，failed attempt 在无活跃 subscriber 后可重试，cache clean 跳过活跃 subscriber | [S04 BuildKey coordinator](../experiments/S04-build-coordinator-2026-09-29.md) |
 | v1 兼容 | app proto 1 为 `unsupported_version`；control schema 1 为 `invalid_schema`；schema 2 可用 | `cli-probes.json` |
 | 历史升级 | 复制上次用 `3df7a6c` CLI 生成的未修改项目，执行 `upgrade plan --to agent-native-v1-draft --json`，仍退出 1、`baseline_unavailable` | `upgrade-probe.json`、`old-t02-upgrade.json` |
 | doctor 版本 | shim 输出不可解析版本但退出 0，doctor 仍 overall=pass | `runtime-probes.json` |
@@ -196,7 +200,7 @@ PNG 仅有临时路径和记录 hash，未形成持久 CI 产物。本轮没有�
 
 ## 6. 后续接续顺序
 
-1. 在 #157/#159/#161/#163/#165/#167/#169/#171/#173/#175 的共享 snapshot/context/BuildKey/output layout/preview lock/ownership record/完整 cell report 上，先实现真正的跨命令 build coordinator、同 key 在途任务合并和调用者取消引用，再补齐 iOS physical signing 输入、Android custom/release/signing-sensitive preview、移动完整 scenario 证据以及真实环境身份/viewport/DPI 证据。
+1. 在 #157/#159/#161/#163/#165/#167/#169/#171/#173/#175/#177 的共享 snapshot/context/BuildKey/output layout/preview lock/ownership/coordinator/完整 cell report 上，先把 coordinator 接入 live preview/check，再实现调用者取消引用、无 subscriber 终止和失败/取消/partial 状态，随后补齐 iOS physical signing 输入、Android custom/release/signing-sensitive preview、移动完整 scenario 证据以及真实环境身份/viewport/DPI 证据。
 2. 补齐 v1 在线兼容、不可变历史模板基线和 doctor 版本解析；保留现有拒绝/降级边界。
 3. 完成 macOS 三夹具各连续 20 次及故障变体，再收口移动语义/输入和完整三端矩阵。
 4. 按依赖继续 MCP、repro、L2/L3 CI；性能、索引/预热、Agent 基准按各自验收推进。
