@@ -440,7 +440,11 @@ iOS 的切片见
 [M04 iOS artifact manifest](../experiments/M04-ios-artifact-manifest-2026-09-28.md)。
 非 live desktop 构建也已登记 Cargo JSON 返回的实际 package binary；记录见
 [M04 desktop artifact manifest](../experiments/M04-desktop-artifact-manifest-2026-09-28.md)。
-M04 仍未完成：snapshot build orchestration、同 key 在途任务合并和
+普通 `build`/`run` 的 snapshot BuildKey orchestration 与同 key 在途任务合并已由 #177 接入：可复用
+desktop/iOS/Android 路径以 `.build-coordinator.json` 选举 leader，follower 以 OS-locked subscriber
+等待并复核 artifact manifest；leader 消失可接管，failed attempt 在无活跃 subscriber 后可重试。
+含未建模输入的路径继续不共享。preview/check 仍未接入该 coordinator。
+M04 仍未完成：preview/check orchestration 和
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
@@ -452,7 +456,9 @@ preview builder 在对应 output root 取得跨进程 `BuildOutputLock`，但不
 伪造成构建完成或复用。`BuildOutputLock` 在取得 OS 锁后还会原子发布 `.build-owner.json`，记录当前
 owner、PID、开始时间、状态和可选 key hash；guard 释放时仅删除仍匹配自身 owner_id 的记录，stale
 record 会在下一个持锁者取得 OS 锁后被覆盖，cache clean 会排除该记录的大小。该文件只是跨进程
-ownership 证据，OS 锁仍是活跃性唯一权威，不提供 heartbeat/fencing、coordinator 或订阅者取消协调。
+ownership 证据，OS 锁仍是活跃性唯一权威，不提供 heartbeat/fencing 或订阅者取消协调；普通
+build/run 的 coordinator 记录、subscriber 锁和 manifest 复核见
+[S04 BuildKey coordinator](../experiments/S04-build-coordinator-2026-09-29.md)。
 local `build.rs`
 等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
 allowlist 遗漏已由 #149 修复，但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
@@ -470,7 +476,8 @@ Android default-debug 切片在 BuildKey 纳入 debug keystore 指纹并完整�
 Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次，验证 Android CLI
 第一次 miss、第二次同 key hit 和 APK ABI；它不包含完整 GPUI app 或设备运行，记录见
 [T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。真实在途
-任务共享仍未接入；#175 只补充 output ownership record，尚未将独立命令接入共享 coordinator；本地 `build.rs` 项目已保守 bypass artifact cache reuse，记录见
+preview/check 任务共享仍未接入；#177 已将普通 build/run 接入共享 coordinator，但取消引用/终止、
+queued/cancelled/partial 状态和预热仍未实现；本地 `build.rs` 项目已保守 bypass artifact cache reuse，记录见
 [T06 build-script cache bypass](../experiments/T06-build-script-cache-bypass-2026-09-28.md)。
 `gpui cache clean --max-bytes` 已提供按 BuildKey 大小预算的显式清理，
 活动锁和不安全目录会跳过，记录见
@@ -713,8 +720,8 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 ### T06 · 构建缓存与有界预热
 
 代码落点：`src/runner/build_cache.rs`、`src/commands/cache.rs` 已实现产物缓存/清理，preview
-build 另已接入 output-root lock 和 `.build-owner.json` ownership record；
-build coordinator 和有界预热仍拟议。遵循 M04 BuildKey；现有切片与输入遗漏见 M04 和
+build 另已接入 output-root lock、`.build-owner.json` ownership record 和普通 build/run coordinator；
+preview/check coordinator 与有界预热仍拟议。遵循 M04 BuildKey；现有切片与输入遗漏见 M04 和
 [当前审计](current-status.md)。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
