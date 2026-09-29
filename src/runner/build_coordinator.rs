@@ -26,6 +26,8 @@ use tempfile::NamedTempFile;
 
 pub const BUILD_COORDINATOR_SCHEMA_VERSION: u32 = 1;
 pub const BUILD_COORDINATOR_CANCELLED_ERROR: &str = "coordinated BuildKey subscriber cancelled";
+pub const BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR: &str =
+    "coordinated BuildKey leader superseded";
 const BUILD_COORDINATOR_BUILD_KIND: &str = "build";
 const BUILD_COORDINATOR_PREVIEW_KIND: &str = "preview";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -217,7 +219,9 @@ where
                     }
                 }
                 BuildCoordinatorState::Failed => {
-                    if active_subscriber_count(layout, &record.attempt_id)? > 0 {
+                    if record.error.as_deref() != Some(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)
+                        && active_subscriber_count(layout, &record.attempt_id)? > 0
+                    {
                         bail!(
                             "coordinated BuildKey build failed: {}",
                             record
@@ -265,6 +269,17 @@ where
         let result = match result {
             Ok(()) => verify(layout, key_hash),
             Err(error) => Err(error),
+        };
+        let result = match result {
+            Err(error) if format!("{error:#}").contains("superseded") => {
+                Err(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR))
+            }
+            result => result,
+        };
+        let result = match cancel() {
+            Ok(true) => Err(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)),
+            Ok(false) => result,
+            Err(error) => Err(error).context("checking BuildKey leader cancellation"),
         };
 
         let terminal = BuildCoordinatorRecord {
@@ -320,7 +335,9 @@ fn wait_for_attempt(
     verify: &impl Fn(&BuildOutputLayout, &str) -> Result<()>,
     cancel: &impl Fn() -> Result<bool>,
 ) -> Result<WaitOutcome> {
-    let subscription = subscribe(layout, &expected.attempt_id)?;
+    let Some(subscription) = subscribe_if_building(layout, kind, key_hash, expected)? else {
+        return Ok(WaitOutcome::Abandoned);
+    };
 
     loop {
         if cancel()? {
@@ -366,7 +383,11 @@ fn wait_for_attempt(
                         }));
                     }
                     BuildCoordinatorState::Failed => {
-                        if record.error.as_deref() == Some(LEADER_ABANDONED_ERROR) {
+                        if matches!(
+                            record.error.as_deref(),
+                            Some(LEADER_ABANDONED_ERROR)
+                                | Some(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)
+                        ) {
                             drop(subscription);
                             return Ok(WaitOutcome::Abandoned);
                         }
@@ -426,6 +447,37 @@ fn verify_completed_output(layout: &BuildOutputLayout, key_hash: &str) -> Result
 }
 
 fn subscribe(layout: &BuildOutputLayout, attempt_id: &str) -> Result<BuildCoordinatorSubscription> {
+    let _state_lock = lock_coordinator_state(&layout.root, true)?
+        .expect("creating a coordinator state lock returns its guard");
+    create_subscription(layout, attempt_id)
+}
+
+fn subscribe_if_building(
+    layout: &BuildOutputLayout,
+    kind: &str,
+    key_hash: &str,
+    expected: &BuildCoordinatorRecord,
+) -> Result<Option<BuildCoordinatorSubscription>> {
+    let _state_lock = lock_coordinator_state(&layout.root, true)?
+        .expect("creating a coordinator state lock returns its guard");
+    let Some(record) = read_record(layout, kind)? else {
+        return Ok(None);
+    };
+    if record.platform != layout.platform
+        || record.kind != kind
+        || record.key_hash != key_hash
+        || record.attempt_id != expected.attempt_id
+        || record.state != BuildCoordinatorState::Building
+    {
+        return Ok(None);
+    }
+    create_subscription(layout, &expected.attempt_id).map(Some)
+}
+
+fn create_subscription(
+    layout: &BuildOutputLayout,
+    attempt_id: &str,
+) -> Result<BuildCoordinatorSubscription> {
     let directory = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
     fs::create_dir_all(&directory).with_context(|| {
         format!(
@@ -450,6 +502,12 @@ fn subscribe(layout: &BuildOutputLayout, attempt_id: &str) -> Result<BuildCoordi
                 path.display()
             )
         })?;
+    file.lock_exclusive().with_context(|| {
+        format!(
+            "locking BuildKey coordinator subscription {}",
+            path.display()
+        )
+    })?;
     let record = serde_json::json!({
         "schema_version": BUILD_COORDINATOR_SCHEMA_VERSION,
         "attempt_id": attempt_id,
@@ -460,12 +518,6 @@ fn subscribe(layout: &BuildOutputLayout, attempt_id: &str) -> Result<BuildCoordi
         .context("serializing BuildKey coordinator subscription")?;
     file.write_all(b"\n")?;
     file.sync_all()?;
-    file.lock_exclusive().with_context(|| {
-        format!(
-            "locking BuildKey coordinator subscription {}",
-            path.display()
-        )
-    })?;
     Ok(BuildCoordinatorSubscription { path, _file: file })
 }
 
@@ -478,6 +530,8 @@ fn encode_attempt_id(attempt_id: &str) -> String {
 }
 
 fn active_subscriber_count(layout: &BuildOutputLayout, attempt_id: &str) -> Result<usize> {
+    let _state_lock = lock_coordinator_state(&layout.root, true)?
+        .expect("creating a coordinator state lock returns its guard");
     let directory = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
@@ -606,19 +660,39 @@ fn write_record(layout: &BuildOutputLayout, record: &BuildCoordinatorRecord) -> 
     Ok(())
 }
 
-fn open_state_lock(root: &Path) -> Result<File> {
+pub(super) fn lock_coordinator_state(root: &Path, create: bool) -> Result<Option<File>> {
     let path = root.join(BUILD_COORDINATOR_LOCK_FILE);
-    validate_regular_or_missing(&path, "BuildKey coordinator lock")?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!(
+                "BuildKey coordinator lock is not a regular file: {}",
+                path.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("checking BuildKey coordinator lock {}", path.display()));
+        }
+    }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
+        .create(create)
         .truncate(false)
         .open(&path)
         .with_context(|| format!("opening BuildKey coordinator lock {}", path.display()))?;
     file.lock()
         .with_context(|| format!("locking BuildKey coordinator state {}", root.display()))?;
-    Ok(file)
+    Ok(Some(file))
+}
+
+fn open_state_lock(root: &Path) -> Result<File> {
+    lock_coordinator_state(root, true)?.context("creating BuildKey coordinator state lock")
 }
 
 fn validate_regular_or_missing(path: &Path, label: &str) -> Result<()> {
@@ -874,6 +948,41 @@ mod tests {
     }
 
     #[test]
+    fn superseded_leader_publishes_failure_instead_of_success() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let superseded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let build_superseded = superseded.clone();
+        let error = coordinate_preview_build_with_verifier_and_cancel(
+            &layout,
+            key.key_hash(),
+            || {
+                publish_fake_artifact(&layout);
+                build_superseded.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            verify_completed_output,
+            || Ok(superseded.load(Ordering::SeqCst)),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR));
+        let record = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, BuildCoordinatorState::Failed);
+        assert_eq!(
+            record.error.as_deref(),
+            Some(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)
+        );
+        assert_eq!(
+            active_subscriber_count(&layout, &record.attempt_id).unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn preview_attempt_does_not_join_an_ordinary_build_attempt() {
         let base = tempfile::tempdir().unwrap();
         let layout = layout(base.path());
@@ -932,6 +1041,87 @@ mod tests {
                 .kind,
             BUILD_COORDINATOR_PREVIEW_KIND
         );
+    }
+
+    #[test]
+    fn follower_retries_after_superseded_leader_is_cancelled() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let superseded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let leader_layout = layout.clone();
+        let leader_key_hash = key.key_hash().to_owned();
+        let leader_superseded = superseded.clone();
+        let leader = std::thread::spawn(move || {
+            coordinate_preview_build_with_verifier_and_cancel(
+                &leader_layout,
+                &leader_key_hash,
+                || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    publish_fake_artifact(&leader_layout);
+                    leader_superseded.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+                verify_completed_output,
+                || Ok(leader_superseded.load(Ordering::SeqCst)),
+            )
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let follower_layout = layout.clone();
+        let follower_key_hash = key.key_hash().to_owned();
+        let (follower_started_tx, follower_started_rx) = std::sync::mpsc::channel();
+        let follower = std::thread::spawn(move || {
+            follower_started_tx.send(()).unwrap();
+            coordinate_preview_build_with_verifier_and_cancel(
+                &follower_layout,
+                &follower_key_hash,
+                || {
+                    publish_fake_artifact(&follower_layout);
+                    Ok(())
+                },
+                verify_completed_output,
+                || Ok(false),
+            )
+            .unwrap()
+        });
+        follower_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let attempt_id = loop {
+            let subscribers = layout.root.join(BUILD_COORDINATOR_SUBSCRIBERS_DIR);
+            let entries = fs::read_dir(subscribers)
+                .map(|entries| entries.filter_map(std::result::Result::ok).count())
+                .unwrap_or_default();
+            if entries > 1 {
+                let attempt_id = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+                    .unwrap()
+                    .unwrap()
+                    .attempt_id;
+                break attempt_id;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "follower did not subscribe to the active preview attempt"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(active_subscriber_count(&layout, &attempt_id).unwrap(), 2);
+        release_tx.send(()).unwrap();
+
+        let leader_error = leader.join().unwrap().unwrap_err();
+        assert!(format!("{leader_error:#}").contains(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR));
+        assert_eq!(follower.join().unwrap().role, BuildCoordinatorRole::Leader);
+        let final_record = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+            .unwrap()
+            .unwrap();
+        assert_eq!(final_record.state, BuildCoordinatorState::Succeeded);
+        assert_ne!(final_record.attempt_id, attempt_id);
     }
 
     #[test]

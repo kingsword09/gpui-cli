@@ -490,8 +490,7 @@ fn preview_control_error(error: &anyhow::Error) -> Option<Iteration> {
     let message = error.to_string();
     if message.contains(PREVIEW_BUILD_FAILED) {
         Some(Iteration::BuildFailed)
-    } else if message.contains(PREVIEW_BUILD_SUPERSEDED)
-        || message.contains(BUILD_COORDINATOR_CANCELLED_ERROR)
+    } else if message.contains("superseded") || message.contains(BUILD_COORDINATOR_CANCELLED_ERROR)
     {
         Some(Iteration::Superseded)
     } else {
@@ -1667,6 +1666,14 @@ fn run_cycles(
                     again = true;
                     *last_failed
                 }
+                Err(error)
+                    if preview_control_error(&error)
+                        .is_some_and(|control| matches!(control, Iteration::Superseded)) =>
+                {
+                    build.superseded();
+                    again = true;
+                    *last_failed
+                }
                 Err(error) => {
                     build.finish(false, Some(format!("{error:#}")));
                     if channel.scope.build_id == build.scope.build_id {
@@ -2193,6 +2200,13 @@ pub fn handle_preview(
             bail!("preview build failed")
         }
         Ok(Iteration::Superseded) => {
+            build.superseded();
+            bail!("preview inputs changed while building; rerun the preview")
+        }
+        Err(error)
+            if preview_control_error(&error)
+                .is_some_and(|control| matches!(control, Iteration::Superseded)) =>
+        {
             build.superseded();
             bail!("preview inputs changed while building; rerun the preview")
         }

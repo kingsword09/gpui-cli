@@ -526,6 +526,7 @@ fn inspect_entry(path: &Path, stats: &mut TreeStats) -> Result<()> {
 }
 
 fn clear_candidate_contents(root: &Path) -> Result<u64> {
+    let _state_lock = super::build_coordinator::lock_coordinator_state(root, false)?;
     let lock_path = root.join(super::output_layout::BUILD_OUTPUT_LOCK_FILE);
     let mut removed_bytes = 0u64;
     for entry in
@@ -541,6 +542,10 @@ fn clear_candidate_contents(root: &Path) -> Result<u64> {
 }
 
 fn coordinator_is_active(root: &Path) -> Result<bool> {
+    // Subscriber registration and coordinator-side counts share this short
+    // lock. Acquiring it before probing prevents the cache cleaner from
+    // observing a just-created, not-yet-locked subscriber file as stale.
+    let _state_lock = super::build_coordinator::lock_coordinator_state(root, false)?;
     let directory = root.join(super::output_layout::BUILD_COORDINATOR_SUBSCRIBERS_DIR);
     let metadata = match fs::symlink_metadata(&directory) {
         Ok(metadata) => metadata,
