@@ -1,8 +1,8 @@
 # M02：local matrix contract and scheduler（2026-09-28）
 
 状态：in_progress。本切片先固定本地 matrix 的 cell lifecycle、deadline、fail-fast、
-required/optional 汇总和 artifact 保留接口；当前已加入配置展开和分发前 admission，
-尚未把真实 iOS/Android runner 接入 matrix CLI。
+required/optional 汇总和 artifact 保留接口；当前已加入配置展开、分发前 admission、
+并行 executor、mobile lifecycle adapter 和 matrix CLI；真实移动 scenario driver 仍未接入。
 
 ## 已交付
 

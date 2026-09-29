@@ -570,7 +570,7 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 PR 拆分：matrix plan/status/summary 契约与纯 scheduler（已交付）→ runner execution adapter
 （已交付）→ target/scenario admission 与 host/ABI/toolchain preflight（已交付）→
 跨目标并行与 supervisor 内资源锁（已交付）→ mobile runner cell lifecycle（已交付）→
-matrix CLI 与 desktop scenario factory（当前切片）→移动 scenario driver、host lease/
+matrix CLI 与 desktop scenario factory（已交付）→移动 scenario driver、host lease/
 inventory 完整接入与矩阵验收。
 
 当前契约与 admission 记录见
