@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub const BUILD_OUTPUT_LOCK_FILE: &str = ".build-output.lock";
 pub const BUILD_OUTPUT_OWNER_FILE: &str = ".build-owner.json";
 pub const BUILD_COORDINATOR_STATE_FILE: &str = ".build-coordinator.json";
+pub const PREVIEW_BUILD_COORDINATOR_STATE_FILE: &str = ".preview-build-coordinator.json";
 pub const BUILD_COORDINATOR_LOCK_FILE: &str = ".build-coordinator.lock";
 pub const BUILD_COORDINATOR_SUBSCRIBERS_DIR: &str = ".build-subscribers";
 pub const PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE: &str = "preview-artifact-manifest.json";
