@@ -448,7 +448,7 @@ verifier；它与普通 build/run attempt 隔离，同时共享 output lock 串�
 iOS simulator preview 复用该 coordinator，#183 再让 Android default-debug preview 验证 JNI/APK
 manifest 和 debug keystore 指纹；physical device、release/custom-signing、cache-disabled 和
 BuildKey 不可复用路径仍保留原有锁流程。含未建模输入的路径继续不共享。
-M04 仍未完成：preview coordinator 的取消/失败/partial 语义、preview/check orchestration 的其余部分，以及
+M04 仍未完成：preview coordinator 的 leader 引用计数、失败/取消/partial 终态、heartbeat/fencing、preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
@@ -465,7 +465,8 @@ build/run 的 coordinator 记录、subscriber 锁和 manifest 复核见
 [S04 BuildKey coordinator](../experiments/S04-build-coordinator-2026-09-29.md) 与
 [S04 desktop preview coordinator](../experiments/S04-preview-build-coordinator-2026-09-30.md) 与
 [S04 iOS preview coordinator](../experiments/S04-ios-preview-build-coordinator-2026-09-30.md) 与
-[S04 Android preview coordinator](../experiments/S04-android-preview-build-coordinator-2026-09-30.md)。
+[S04 Android preview coordinator](../experiments/S04-android-preview-build-coordinator-2026-09-30.md) 与
+[S04 preview coordinator cancellation](../experiments/S04-preview-coordinator-cancellation-2026-09-30.md)。
 local `build.rs`
 等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
 allowlist 遗漏已由 #149 修复，但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
