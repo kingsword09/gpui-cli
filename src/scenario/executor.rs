@@ -273,6 +273,19 @@ pub struct CleanupReport {
     pub error: Option<CheckError>,
 }
 
+/// Runtime context captured at scenario readiness and updated when the
+/// runner observes a new reset generation. This keeps fixture/environment
+/// evidence in the check report instead of requiring event-log reconstruction.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct CheckContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub uncontrolled_inputs: Vec<String>,
+}
+
 /// Structured result of one scenario execution.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct CheckReport {
@@ -280,6 +293,8 @@ pub struct CheckReport {
     pub scenario_id: String,
     pub component: String,
     pub fixture_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<CheckContext>,
     pub status: CheckStatus,
     pub steps: Vec<StepReport>,
     pub primary_error: Option<CheckError>,
@@ -382,6 +397,11 @@ pub trait ScenarioRunner {
     ) -> Result<CaptureEvidence, DriverError>;
 
     fn cleanup(&mut self) -> Result<(), DriverError>;
+
+    /// Returns immutable runtime context collected during prepare/reset.
+    fn context(&self) -> Option<CheckContext> {
+        None
+    }
 }
 
 /// Execute a scenario through an injected runner and always attempt cleanup.
@@ -395,6 +415,7 @@ pub fn execute<R: ScenarioRunner>(
         Err(error) => {
             let mut report = empty_report(scenario, fixture_hash, CheckStatus::Failed);
             report.primary_error = Some(error);
+            report.context = runner.context();
             report.cleanup = cleanup_report(runner.cleanup());
             return report;
         }
@@ -405,6 +426,7 @@ pub fn execute<R: ScenarioRunner>(
         Ok(observation) => observation,
         Err(error) => {
             set_driver_failure(&mut report, &error);
+            report.context = runner.context();
             report.cleanup = cleanup_report(runner.cleanup());
             return report;
         }
@@ -440,6 +462,7 @@ pub fn execute<R: ScenarioRunner>(
         report.steps.push(step_report);
     }
 
+    report.context = runner.context();
     report.cleanup = cleanup_report(runner.cleanup());
     if !report.cleanup.succeeded && report.status == CheckStatus::Passed {
         report.status = CheckStatus::Failed;
@@ -458,6 +481,7 @@ fn empty_report(
         scenario_id: scenario.id.clone(),
         component: scenario.component.clone(),
         fixture_hash,
+        context: None,
         status,
         steps: Vec::new(),
         primary_error: None,
@@ -1015,6 +1039,7 @@ mod tests {
         waits: VecDeque<Result<Observation, DriverError>>,
         captures: VecDeque<Result<CaptureEvidence, DriverError>>,
         cleanup: Option<Result<(), DriverError>>,
+        context: Option<CheckContext>,
         action_calls: usize,
         screenshot_resolutions: usize,
     }
@@ -1100,6 +1125,10 @@ mod tests {
         fn cleanup(&mut self) -> Result<(), DriverError> {
             self.cleanup.take().unwrap_or(Ok(()))
         }
+
+        fn context(&self) -> Option<CheckContext> {
+            self.context.clone()
+        }
     }
 
     #[test]
@@ -1171,6 +1200,11 @@ mod tests {
                 "cleanup_failed",
                 "fixture cleanup failed",
             ))),
+            context: Some(CheckContext {
+                reset_generation: Some(2),
+                environment: Some(json!({"os": "android", "theme": "light"})),
+                uncontrolled_inputs: vec!["network".into()],
+            }),
             ..FakeRunner::default()
         };
         let report = execute(
@@ -1187,6 +1221,15 @@ mod tests {
             "action_outcome_unknown"
         );
         assert!(!report.cleanup.succeeded);
+        assert_eq!(report.context.as_ref().unwrap().reset_generation, Some(2));
+        assert_eq!(
+            report.context.as_ref().unwrap().environment,
+            Some(json!({"os": "android", "theme": "light"}))
+        );
+        assert_eq!(
+            report.context.as_ref().unwrap().uncontrolled_inputs,
+            vec!["network"]
+        );
         assert_eq!(runner.action_calls, 1);
     }
 

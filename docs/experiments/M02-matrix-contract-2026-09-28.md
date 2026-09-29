@@ -83,6 +83,9 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
 - 同一 emulator 的 semantics-required Counter scenario 返回
   `unavailable: semantic capture is unavailable for the selected window`；这被保留为真实
   capability 结果，没有用设备截图或 heartbeat 降级成 semantics 通过。
+- check report 现在保留 runner 提供的 `context`：ready/reset generation、实际环境和
+  `uncontrolled_inputs`；Android reset probe 的 generation 1→2 不必再只从 event journal
+  反查。
 
 ## 尚未覆盖
 

@@ -38,8 +38,8 @@ use crate::scenario::baseline::{
     load_baseline,
 };
 use crate::scenario::executor::{
-    ActionResult, CaptureEvidence, CheckReport, DiffEvidence, DriverError, DriverErrorKind,
-    Observation, ScenarioRunner, ScreenshotEvidence, SemanticNode,
+    ActionResult, CaptureEvidence, CheckContext, CheckReport, DiffEvidence, DriverError,
+    DriverErrorKind, Observation, ScenarioRunner, ScreenshotEvidence, SemanticNode,
 };
 use crate::scenario::{self, ScenarioDefinition, ScenarioFile, ScenarioStep, Selector};
 
@@ -630,6 +630,8 @@ struct DesktopCheckRunner {
     requested_locale: String,
     ready_fixture_hash: Option<String>,
     ready_environment: Value,
+    ready_reset_generation: Option<u64>,
+    ready_uncontrolled_inputs: Vec<String>,
     default_requirements: Vec<String>,
     issue_floor: u64,
     mobile_capture: Option<MobileCapture>,
@@ -731,6 +733,8 @@ impl DesktopCheckRunner {
             requested_locale: scenario.locale.clone(),
             ready_fixture_hash: None,
             ready_environment: Value::Object(serde_json::Map::new()),
+            ready_reset_generation: None,
+            ready_uncontrolled_inputs: Vec::new(),
             default_requirements: observation_requirements(&scenario.requires),
             issue_floor: 0,
             mobile_capture: None,
@@ -1007,6 +1011,14 @@ impl DesktopCheckRunner {
     fn record_ready_environment(&mut self, event: &Event) {
         self.ready_fixture_hash = event.data["fixture_hash"].as_str().map(str::to_owned);
         self.ready_environment = event.data["environment"].clone();
+        self.ready_reset_generation = event.data["reset_generation"].as_u64();
+        self.ready_uncontrolled_inputs = event.data["uncontrolled_inputs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
     }
 
     fn environment_string(&self, field: &str) -> Option<String> {
@@ -1579,6 +1591,14 @@ impl ScenarioRunner for DesktopCheckRunner {
         }
         child_result?;
         Ok(())
+    }
+
+    fn context(&self) -> Option<CheckContext> {
+        Some(CheckContext {
+            reset_generation: self.ready_reset_generation,
+            environment: Some(self.ready_environment.clone()),
+            uncontrolled_inputs: self.ready_uncontrolled_inputs.clone(),
+        })
     }
 }
 
