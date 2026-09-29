@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-09-29（Asia/Shanghai）。核查代码：`1256bb3`（PR #149 squash merge）。
+更新日期：2026-09-29（Asia/Shanghai）。核查代码：`5b63656`（PR #151 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -38,6 +38,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `14f81fe`（#146） | 单场景和 matrix preview 专属 session key、定向发现；Android preview 元数据/fixture 接入 | 修复旧会话误绑定路径；不同时修复桌面进程清理或 fixture hash |
 | `a1395d3`（#147） | `CheckReport.context` 保存 reset generation、environment、uncontrolled inputs | 单场景 JSON 可见；matrix 汇总尚未传递 context，报告值也不等于实际环境已受控 |
 | `1256bb3`（#149） | BuildKey 环境 allowlist 纳入 `CARGO_ENCODED_RUSTFLAGS`，并增加 hash 回归测试 | 修复该已确认的缓存键遗漏；不等于所有 build.rs/Gradle/NDK/Xcode 隐藏输入或整个 M04/T06 已完成 |
+| `5b63656`（#151） | desktop check preview 使用 process-group/Windows Job Object 归属，cleanup/Drop 终止整个 owned process tree；新增后代管道回归测试 | 修复 supervisor-only cleanup 路径；真实 GPUI check 的完整 GUI 进程验收、fixture hash 和其他 S04 门槛仍未完成 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -67,7 +68,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | S03 | in_progress | click/type/key/scroll、正常事件路径、owner/scope 和 unknown 语义；真实输入/遮挡/污染及持久幂等验收未齐 |
 | M03 | in_progress | 主机 OS 锁、owner/fencing、heartbeat，run/live/capture 和移动 matrix 已接入；重连和真实竞争矩阵未齐 |
 | M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；`CARGO_ENCODED_RUSTFLAGS` 已纳入 key，check/matrix 未冻结且仍有未建模输入 |
-| S04 | in_progress | executor、desktop check、baseline/diff/approve、移动 matrix 场景 driver、报告 context；清理/fixture/环境及三夹具各 20 次真实验收未齐 |
+| S04 | in_progress | executor、desktop check、baseline/diff/approve、移动 matrix 场景 driver、报告 context、owned process-tree cleanup；fixture/环境及三夹具各 20 次真实验收未齐 |
 | A01 | planned | CLI/control 可复用；无 MCP 只读适配、JSON-RPC server 或独立 Agent service |
 | A02 | planned | action/operation/check 可复用；无 MCP 动作/取消/owner 适配 |
 | A03 | planned | pin/manifest/registry 可复用；无 context 命令、版本知识索引或工作流包 |
@@ -88,13 +89,13 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 ## 4. 旧审计问题的当前状态
 
 以下编号延续原报告的七项问题。本轮使用当前二进制/模板和隔离夹具重新核查，
-问题 1、2 的旧触发已有局部修复，其余五项仍可复现；不将局部修复扩大为整个工作包完成。
+问题 1–3 的旧触发已有局部修复，其余四项仍可复现；不将局部修复扩大为整个工作包完成。
 
 | 编号 | 结论 | 代码与影响 |
 | --- | --- | --- |
 | 1 缓存环境键 | 已修复该已确认遗漏 | #149 在 [build_inputs.rs](../../src/runner/build_inputs.rs) 的 allowlist 加入 `CARGO_ENCODED_RUSTFLAGS`，并用不同 encoded flag 值证明环境 hash 改变；其他未建模输入仍不因此解决 |
 | 2 check 误绑定旧 preview | 已修复该路径 | #146 为单场景和 matrix 注入 session key；[control](../../src/devserver/control.rs) 按 target suffix 定向发现；复测旧 preview 未收到 check reset 且仍存活 |
-| 3 桌面 cleanup 假成功 | 未解决 | [check cleanup/Drop](../../src/commands/check.rs) 仍直接 kill/wait supervisor；不能据此证明独立应用进程组退出 |
+| 3 桌面 cleanup 假成功 | 已修复 supervisor-only 路径 | #151 让 [check cleanup/Drop](../../src/commands/check.rs) 通过 `OwnedChild` 使用 Unix process group/Windows Job Object，并以 descendant-held pipe 回归测试证明后代随终止关闭；真实 GPUI check 的完整 GUI 进程探针仍未重跑 |
 | 4 fixture 变化但 hash 不变 | 未解决 | [preview reset](../../templates/app/src/previews.rs) 重读文件但不重算 hash；#147 的 context 不修复该身份问题 |
 | 5 v1 在线兼容 | 未解决 | [app channel](../../src/devserver/app_channel.rs) 拒绝 proto 1，[control](../../src/devserver/control.rs) 拒绝 schema 1 |
 | 6 真实历史模板升级 | 未解决 | [模板基线解析](../../src/template.rs) 仍缺不可变历史内容；旧 T02 项目会遇到 `baseline_unavailable` |
@@ -113,7 +114,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 
 ## 5. 验证记录与证据范围
 
-本轮验证针对上述 `1256bb3` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
+本轮验证针对上述 `5b63656` 代码及本次文档更新。本地原始输出、隔离探针源码及 JSON 保存在
 `artifacts/progress-audit-2026-09-29/`（忽略的本机产物目录，不是已发布验收证据）。
 测试独立设置 `GPUI_DEVICE_LEASE_DIR`，避免与其他 worktree 的租约测试互相影响。
 
@@ -121,11 +122,11 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- |
 | `cargo fmt --check` | 通过 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | 通过 |
-| `cargo test --workspace --locked` | 359 passed，0 failed |
+| `cargo test --workspace --locked` | 360 passed，0 failed |
 | `cargo build --locked` | 通过 |
 | `cargo x check-design-docs`、`git diff --check` | 通过；仅验证文档/示例一致性 |
 | 两份 35 项状态表逐项比对 | 相同；1 done、21 in_progress、13 planned |
-| [该提交 CI](https://github.com/kingsword09/gpui-cli/actions/runs/36516794325) | success；三 OS check、desktop-template、android-template、baseline-driver 六项均通过 |
+| PR #151 CI | required checks 全部通过；首次 Windows 并发测试波动重跑后通过，三 OS check、desktop-template、android-template、baseline-driver 均通过 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
@@ -133,7 +134,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | encoded Rust flags | 修复前探针曾在改编译参数后仍 cache hit；#149 已将变量纳入 allowlist，回归测试证明 encoded flag 改变 hash；尚未重跑合并后的 end-to-end CLI probe | `cli-probes.json`、[M04 encoded Rust flags](../experiments/M04-cargo-encoded-rustflags-2026-09-29.md) |
 | check 会话归属 | 旧 preview 收到的 reset 数为 0，旧 preview 仍运行 | `check-probes.json` |
-| check 清理 | 报告 `cleanup.succeeded=true`，测试应用仍存活且 PPID=1；探针结束后已清理 | `check-probes.json` |
+| check 清理 | 旧探针记录了 supervisor-only cleanup 的问题；#151 已改用 process group/Job Object，并用后代持有管道回归测试验证终止传播；尚未重跑完整 GUI check cleanup probe | `check-probes.json`、[S04 process-tree cleanup](../experiments/S04-process-tree-cleanup-2026-09-29.md) |
 | fixture 身份 | 初值 0→42、generation 1→2，报告 hash 仍为初始值 | `runtime-probes.json` |
 | v1 兼容 | app proto 1 为 `unsupported_version`；control schema 1 为 `invalid_schema`；schema 2 可用 | `cli-probes.json` |
 | 历史升级 | 复制上次用 `3df7a6c` CLI 生成的未修改项目，执行 `upgrade plan --to agent-native-v1-draft --json`，仍退出 1、`baseline_unavailable` | `upgrade-probe.json`、`old-t02-upgrade.json` |
