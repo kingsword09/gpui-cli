@@ -449,7 +449,11 @@ matrix per-cell context 现在也保留 shared snapshot hash、runtime environme
 target-specific BuildKey；#163 又让 preview builder 使用 source-project 的 target/JNI/Gradle/
 DerivedData 输出布局，并在同一 supervisor 内串行同 key cell；#165 再让 desktop/iOS/Android
 preview builder 在对应 output root 取得跨进程 `BuildOutputLock`，但不把 key/layout/lock evidence
-伪造成构建完成或复用。local `build.rs`
+伪造成构建完成或复用。`BuildOutputLock` 在取得 OS 锁后还会原子发布 `.build-owner.json`，记录当前
+owner、PID、开始时间、状态和可选 key hash；guard 释放时仅删除仍匹配自身 owner_id 的记录，stale
+record 会在下一个持锁者取得 OS 锁后被覆盖，cache clean 会排除该记录的大小。该文件只是跨进程
+ownership 证据，OS 锁仍是活跃性唯一权威，不提供 heartbeat/fencing、coordinator 或订阅者取消协调。
+local `build.rs`
 等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
 allowlist 遗漏已由 #149 修复，但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
 见[当前审计](current-status.md)。
@@ -466,7 +470,7 @@ Android default-debug 切片在 BuildKey 纳入 debug keystore 指纹并完整�
 Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次，验证 Android CLI
 第一次 miss、第二次同 key hit 和 APK ABI；它不包含完整 GPUI app 或设备运行，记录见
 [T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。真实在途
-任务共享仍未接入；本地 `build.rs` 项目已保守 bypass artifact cache reuse，记录见
+任务共享仍未接入；#175 只补充 output ownership record，尚未将独立命令接入共享 coordinator；本地 `build.rs` 项目已保守 bypass artifact cache reuse，记录见
 [T06 build-script cache bypass](../experiments/T06-build-script-cache-bypass-2026-09-28.md)。
 `gpui cache clean --max-bytes` 已提供按 BuildKey 大小预算的显式清理，
 活动锁和不安全目录会跳过，记录见
@@ -709,7 +713,7 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 ### T06 · 构建缓存与有界预热
 
 代码落点：`src/runner/build_cache.rs`、`src/commands/cache.rs` 已实现产物缓存/清理，preview
-build 另已接入 output-root lock；
+build 另已接入 output-root lock 和 `.build-owner.json` ownership record；
 build coordinator 和有界预热仍拟议。遵循 M04 BuildKey；现有切片与输入遗漏见 M04 和
 [当前审计](current-status.md)。
 
