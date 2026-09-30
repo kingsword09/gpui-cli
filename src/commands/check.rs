@@ -560,6 +560,9 @@ impl MobileCapture {
                 "sha256": capture.sha256,
                 "width": capture.width,
                 "height": capture.height,
+                "logical_width": capture.logical_width,
+                "logical_height": capture.logical_height,
+                "scale_milli": capture.scale_milli,
                 "orientation": capture.orientation,
                 "system_ui": capture.system_ui,
                 "foreground_app": capture.foreground_app,
@@ -626,12 +629,15 @@ fn screenshot_from_mobile_artifact(artifact: &CaptureArtifact) -> ScreenshotEvid
         provider: Some(artifact.provider.clone()),
         pixel_width: Some(artifact.width),
         pixel_height: Some(artifact.height),
-        logical_width: None,
-        logical_height: None,
-        scale_milli: None,
+        logical_width: artifact.logical_width,
+        logical_height: artifact.logical_height,
+        scale_milli: artifact.scale_milli,
         comparable: false,
         matches: None,
-        reason: None,
+        reason: (artifact.logical_width.is_none()
+            || artifact.logical_height.is_none()
+            || artifact.scale_milli.is_none())
+        .then_some("mobile_environment_metadata_unavailable".into()),
     }
 }
 

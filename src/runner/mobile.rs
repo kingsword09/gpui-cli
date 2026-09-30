@@ -145,6 +145,12 @@ pub struct CaptureArtifact {
     pub sha256: String,
     pub width: u32,
     pub height: u32,
+    #[serde(default)]
+    pub logical_width: Option<u32>,
+    #[serde(default)]
+    pub logical_height: Option<u32>,
+    #[serde(default)]
+    pub scale_milli: Option<u32>,
     pub orientation: Option<String>,
     pub system_ui: bool,
     pub foreground_app: Option<String>,
@@ -185,6 +191,9 @@ impl CaptureArtifact {
             sha256,
             width,
             height,
+            logical_width: None,
+            logical_height: None,
+            scale_milli: None,
             orientation: scope.orientation.clone(),
             system_ui,
             foreground_app: scope.foreground_app.clone(),
