@@ -7,6 +7,7 @@
 use anyhow::Context;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -33,6 +34,18 @@ pub struct LeaseOwner {
     pub fencing_token: String,
     pub acquired_at_ms: u64,
     pub heartbeat_at_ms: u64,
+}
+
+/// A child process may use the lease held by its supervisor without opening a
+/// second OS lock. The supervisor remains responsible for the heartbeat and
+/// release; the child only rechecks this owner record before and after each
+/// device operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeviceLeaseDelegation {
+    pub owner_path: PathBuf,
+    pub device_id: String,
+    pub session_id: String,
+    pub fencing_token_sha256: String,
 }
 
 #[derive(Debug)]
@@ -302,6 +315,9 @@ pub struct DeviceLeaseSession {
     heartbeat_error: Arc<Mutex<Option<String>>>,
     stop: Arc<(Mutex<bool>, Condvar)>,
     owner: LeaseOwner,
+    owner_path: PathBuf,
+    delegated: bool,
+    delegated_fencing_token_sha256: Option<String>,
     heartbeat_thread: Option<JoinHandle<()>>,
 }
 
@@ -313,6 +329,7 @@ impl DeviceLeaseSession {
 
     fn start(lease: DeviceLease) -> Result<Self, LeaseError> {
         let owner = lease.owner().clone();
+        let owner_path = lease.owner_path().to_owned();
         let shared = Arc::new(Mutex::new(Some(lease)));
         let heartbeat_error = Arc::new(Mutex::new(None));
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
@@ -330,7 +347,48 @@ impl DeviceLeaseSession {
             heartbeat_error,
             stop,
             owner,
+            owner_path,
+            delegated: false,
+            delegated_fencing_token_sha256: None,
             heartbeat_thread: Some(heartbeat_thread),
+        })
+    }
+
+    /// Creates a non-owning child view of a supervisor-held lease.
+    pub fn from_delegation(delegation: DeviceLeaseDelegation) -> Result<Self, LeaseError> {
+        validate_device_identifier(&delegation.device_id)?;
+        validate_identifier(&delegation.session_id)?;
+        validate_sha256(&delegation.fencing_token_sha256)?;
+        if !delegation.owner_path.is_absolute() {
+            return Err(LeaseError::InvalidOwner(
+                "delegated owner path must be absolute".into(),
+            ));
+        }
+        reject_symlink_path(&delegation.owner_path)?;
+        let current = read_owner(&delegation.owner_path)?;
+        if current.device_id != delegation.device_id
+            || current.session_id != delegation.session_id
+            || token_sha256(&current.fencing_token) != delegation.fencing_token_sha256
+        {
+            return Err(LeaseError::FencingLost);
+        }
+        Ok(Self {
+            shared: Arc::new(Mutex::new(None)),
+            heartbeat_error: Arc::new(Mutex::new(None)),
+            stop: Arc::new((Mutex::new(false), Condvar::new())),
+            owner: LeaseOwner {
+                device_id: delegation.device_id,
+                session_id: delegation.session_id,
+                pid: 0,
+                process_start_token: "delegated".into(),
+                fencing_token: String::new(),
+                acquired_at_ms: 0,
+                heartbeat_at_ms: 0,
+            },
+            owner_path: delegation.owner_path,
+            delegated: true,
+            delegated_fencing_token_sha256: Some(delegation.fencing_token_sha256),
+            heartbeat_thread: None,
         })
     }
 
@@ -342,6 +400,18 @@ impl DeviceLeaseSession {
         &self.owner.fencing_token
     }
 
+    pub fn delegation(&self) -> DeviceLeaseDelegation {
+        DeviceLeaseDelegation {
+            owner_path: self.owner_path.clone(),
+            device_id: self.owner.device_id.clone(),
+            session_id: self.owner.session_id.clone(),
+            fencing_token_sha256: self
+                .delegated_fencing_token_sha256
+                .clone()
+                .unwrap_or_else(|| token_sha256(&self.owner.fencing_token)),
+        }
+    }
+
     pub fn assert_owned(&self) -> Result<(), LeaseError> {
         if let Some(message) = self
             .heartbeat_error
@@ -350,6 +420,17 @@ impl DeviceLeaseSession {
             .as_ref()
         {
             return Err(LeaseError::HeartbeatFailed(message.clone()));
+        }
+        if self.delegated {
+            let current = read_owner(&self.owner_path)?;
+            if current.session_id != self.owner.session_id
+                || current.device_id != self.owner.device_id
+                || self.delegated_fencing_token_sha256.as_deref()
+                    != Some(token_sha256(&current.fencing_token).as_str())
+            {
+                return Err(LeaseError::FencingLost);
+            }
+            return Ok(());
         }
         let lease = self
             .shared
@@ -363,6 +444,9 @@ impl DeviceLeaseSession {
 
     /// Performs an immediate metadata heartbeat and fencing check.
     pub fn heartbeat_now(&self) -> Result<(), LeaseError> {
+        if self.delegated {
+            return self.assert_owned();
+        }
         let mut lease = self
             .shared
             .lock()
@@ -390,6 +474,9 @@ impl DeviceLeaseSession {
     }
 
     pub fn release(mut self) -> Result<(), LeaseError> {
+        if self.delegated {
+            return Ok(());
+        }
         self.request_stop();
         if let Some(thread) = self.heartbeat_thread.take() {
             thread
@@ -553,6 +640,17 @@ fn validate_identifier(value: &str) -> Result<(), LeaseError> {
     Ok(())
 }
 
+fn validate_sha256(value: &str) -> Result<(), LeaseError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(LeaseError::InvalidIdentifier(value.into()));
+    }
+    Ok(())
+}
+
+fn token_sha256(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
 fn validate_device_identifier(value: &str) -> Result<(), LeaseError> {
     if value.is_empty()
         || value.len() > MAX_IDENTIFIER_BYTES
@@ -703,6 +801,38 @@ mod tests {
         assert!(!ran);
         assert!(error.to_string().contains("device lease lost"));
         drop(session);
+    }
+
+    #[test]
+    fn delegated_session_rechecks_parent_owner_without_releasing_it() {
+        let root = tempdir().unwrap();
+        let leases = root.path().canonicalize().unwrap().join("leases");
+        let lease = DeviceLease::acquire_in_directory(
+            &leases,
+            "emulator-5554",
+            "session-a",
+            10,
+            "start-a",
+            100,
+        )
+        .unwrap();
+        let parent = DeviceLeaseSession::start(lease).unwrap();
+        let delegation = parent.delegation();
+        let serialized = serde_json::to_string(&delegation).unwrap();
+        assert!(!serialized.contains(parent.fencing_token()));
+        let child = DeviceLeaseSession::from_delegation(delegation).unwrap();
+        let mut ran = false;
+        child
+            .execute("android.launch", || {
+                ran = true;
+                Ok::<_, anyhow::Error>(())
+            })
+            .unwrap();
+        assert!(ran);
+        child.release().unwrap();
+        assert!(parent.assert_owned().is_ok());
+        assert!(parent.owner_path.exists());
+        parent.release().unwrap();
     }
 
     #[test]

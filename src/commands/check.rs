@@ -27,7 +27,7 @@ use crate::runner::build_inputs::{
     prepare_android_signing_snapshot,
 };
 use crate::runner::ios::IosSimulatorRunner;
-use crate::runner::lease::DeviceLeaseSession;
+use crate::runner::lease::{DeviceLeaseDelegation, DeviceLeaseSession};
 use crate::runner::matrix::{
     MatrixCellError, MatrixCellSpec, MatrixCellState, MatrixReport, MatrixStatus,
 };
@@ -39,7 +39,9 @@ use crate::runner::matrix_executor::{
     MatrixCellExecution, MatrixCellRunner, execute_admitted_matrix_parallel,
 };
 use crate::runner::matrix_resources::MatrixResourcePool;
-use crate::runner::mobile::{CaptureArtifact, CaptureScope, MobileRunner, RunIdentity, RunRequest};
+use crate::runner::mobile::{
+    CaptureArtifact, CaptureScope, LogEvidence, MobileRunner, RunIdentity, RunRequest, StopEvidence,
+};
 use crate::runner::output_layout::{BuildOutputLayout, BuildPlatform};
 use crate::scenario::baseline::{
     BaselineComparison, BaselineKey, BaselineLoad, DiffPng, MAX_IMAGE_BYTES, compare_png, diff_png,
@@ -108,9 +110,9 @@ pub fn handle_check(args: CheckArgs) -> Result<()> {
         &args.target,
         CheckLaunchOptions {
             device: None,
-            preleased: false,
             deadline: Instant::now() + PREVIEW_START_TIMEOUT,
             session_key: format!("single-{}-{}", std::process::id(), epoch_ms()),
+            device_lease_delegation: None,
             snapshot_hash: Some(frozen.plan.snapshot.input_hash.clone()),
             build_key: Some(frozen.plan.key.key_hash().to_owned()),
             build_outputs: Some(preview_outputs_from_layout(&frozen.plan.layout)),
@@ -425,6 +427,9 @@ struct MobileCapture {
     lease: Option<DeviceLeaseSession>,
     identity: RunIdentity,
     artifact_root: PathBuf,
+    captures: Vec<CaptureArtifact>,
+    native_logs: Option<LogEvidence>,
+    stop: Option<StopEvidence>,
 }
 
 impl MobileCapture {
@@ -478,7 +483,21 @@ impl MobileCapture {
             lease: Some(lease),
             identity,
             artifact_root,
+            captures: Vec::new(),
+            native_logs: None,
+            stop: None,
         })
+    }
+
+    fn delegation(&self) -> DeviceLeaseDelegation {
+        self.lease
+            .as_ref()
+            .expect("mobile capture lease is present before preview launch")
+            .delegation()
+    }
+
+    fn bind_run_id(&mut self, run_id: String) {
+        self.identity.run_id = run_id;
     }
 
     fn capture(&mut self, observation_id: &str, deadline: Instant) -> Result<ScreenshotEvidence> {
@@ -504,14 +523,77 @@ impl MobileCapture {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("mobile capture lease has been released"))?;
         let artifact = self.runner.capture(&scope, lease)?;
+        self.captures.push(artifact.clone());
         Ok(screenshot_from_mobile_artifact(&artifact))
+    }
+
+    fn finalize(&mut self) -> Result<()> {
+        let lease = self
+            .lease
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("mobile capture lease has been released"))?;
+        let logs = self.runner.collect_logs(&self.identity, lease)?;
+        let assigned = logs.assigned_to_run;
+        self.native_logs = Some(logs);
+        if !assigned {
+            bail!("mobile native logs could not be assigned to the active run")
+        }
+        Ok(())
+    }
+
+    fn evidence(&self) -> Value {
+        let relative_path = |path: &Path| {
+            path.strip_prefix(&self.artifact_root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned()
+        };
+        json!({
+            "run_id": self.identity.run_id,
+            "device_id": self.identity.device_id,
+            "lease_session_id": self.identity.lease_session_id,
+            "fencing_token_sha256": self.identity.fencing_token_sha256,
+            "captures": self.captures.iter().map(|capture| json!({
+                "artifact_id": capture.artifact_id,
+                "provider": capture.provider,
+                "bytes": capture.bytes,
+                "sha256": capture.sha256,
+                "width": capture.width,
+                "height": capture.height,
+                "orientation": capture.orientation,
+                "system_ui": capture.system_ui,
+                "foreground_app": capture.foreground_app,
+                "path": relative_path(&capture.path),
+                "run_id": capture.run_id,
+            })).collect::<Vec<_>>(),
+            "native_logs": self.native_logs.as_ref().map(|logs| json!({
+                "run_id": logs.run_id,
+                "source": logs.source,
+                "path": relative_path(&logs.path),
+                "bytes": logs.bytes,
+                "truncated": logs.truncated,
+                "pid": logs.pid,
+                "process_start_token_sha256": logs.process_start_token_sha256,
+                "assigned_to_run": logs.assigned_to_run,
+                "unassigned_reason": logs.unassigned_reason,
+            })),
+            "stop": self.stop.as_ref().map(|stop| json!({
+                "run_id": stop.run_id,
+                "stopped_owned_process": stop.stopped_owned_process,
+                "removed_owned_resources": stop.removed_owned_resources,
+                "preserved_resources": stop.preserved_resources,
+                "at_ms": stop.at_ms,
+            })),
+        })
     }
 
     fn cleanup(&mut self) -> Result<()> {
         let stop_result = if let Some(lease) = self.lease.as_ref() {
             self.runner
                 .stop_owned(&self.identity, lease)
-                .map(|_| ())
+                .map(|stop| {
+                    self.stop = Some(stop);
+                })
                 .map_err(|error| anyhow::anyhow!("{error:#}"))
         } else {
             Ok(())
@@ -661,15 +743,24 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     target,
                     CheckLaunchOptions {
                         device: device.as_deref(),
-                        preleased: mobile_capture.is_some(),
                         deadline,
                         session_key,
+                        device_lease_delegation: mobile_capture
+                            .as_ref()
+                            .map(MobileCapture::delegation),
                         snapshot_hash: Some(snapshot_hash.clone()),
                         build_key: Some(build_key.clone()),
                         build_outputs: Some(build_outputs.clone()),
                         android_abis: abi.clone(),
                     },
                 )?;
+                if let Some(mobile_capture) = mobile_capture.as_mut() {
+                    let run_id = runner
+                        .run_id()
+                        .ok_or_else(|| anyhow::anyhow!("mobile preview did not publish a run id"))?
+                        .to_owned();
+                    mobile_capture.bind_run_id(run_id);
+                }
                 runner.mobile_capture = mobile_capture.take();
                 let report = crate::scenario::executor::execute(
                     &mut runner,
@@ -905,6 +996,7 @@ struct DesktopCheckRunner {
     requested_theme: String,
     requested_locale: String,
     ready_fixture_hash: Option<String>,
+    ready_run_id: Option<String>,
     ready_environment: Value,
     ready_reset_generation: Option<u64>,
     ready_uncontrolled_inputs: Vec<String>,
@@ -917,9 +1009,9 @@ struct DesktopCheckRunner {
 
 struct CheckLaunchOptions<'a> {
     device: Option<&'a str>,
-    preleased: bool,
     deadline: Instant,
     session_key: String,
+    device_lease_delegation: Option<DeviceLeaseDelegation>,
     snapshot_hash: Option<String>,
     build_key: Option<String>,
     build_outputs: Option<PreviewBuildOutputs>,
@@ -938,9 +1030,9 @@ impl DesktopCheckRunner {
     ) -> Result<Self> {
         let CheckLaunchOptions {
             device,
-            preleased,
             deadline,
             session_key,
+            device_lease_delegation,
             snapshot_hash,
             build_key,
             build_outputs,
@@ -964,8 +1056,12 @@ impl DesktopCheckRunner {
         if let Some(device) = device {
             child.args(["--device", device]);
         }
-        if preleased {
-            child.env("GPUI_PREVIEW_PRELEASED", "1");
+        if let Some(delegation) = device_lease_delegation {
+            child.env(
+                "GPUI_PREVIEW_DEVICE_LEASE_DELEGATION",
+                serde_json::to_string(&delegation)
+                    .context("serializing the delegated preview device lease")?,
+            );
         }
         child.env("GPUI_PREVIEW_SESSION_KEY", &session_key);
         if let Some(abis) = android_abis {
@@ -1025,6 +1121,7 @@ impl DesktopCheckRunner {
             requested_theme: scenario.theme.clone(),
             requested_locale: scenario.locale.clone(),
             ready_fixture_hash: None,
+            ready_run_id: None,
             ready_environment: Value::Object(serde_json::Map::new()),
             ready_reset_generation: None,
             ready_uncontrolled_inputs: Vec::new(),
@@ -1304,6 +1401,7 @@ impl DesktopCheckRunner {
 
     fn record_ready_environment(&mut self, event: &Event) {
         self.ready_fixture_hash = event.data["fixture_hash"].as_str().map(str::to_owned);
+        self.ready_run_id = event.scope.run_id.clone();
         self.ready_environment = event.data["environment"].clone();
         self.ready_reset_generation = event.data["reset_generation"].as_u64();
         self.ready_uncontrolled_inputs = event.data["uncontrolled_inputs"]
@@ -1634,6 +1732,10 @@ impl DesktopCheckRunner {
             )),
         }
     }
+
+    fn run_id(&self) -> Option<&str> {
+        self.ready_run_id.as_deref()
+    }
 }
 
 impl ScenarioRunner for DesktopCheckRunner {
@@ -1865,6 +1967,15 @@ impl ScenarioRunner for DesktopCheckRunner {
         })
     }
 
+    fn finalize(&mut self, _deadline: Instant) -> Result<(), DriverError> {
+        if let Some(mobile_capture) = self.mobile_capture.as_mut() {
+            mobile_capture.finalize().map_err(|error| {
+                DriverError::unknown("mobile_logs_unavailable", error.to_string())
+            })?;
+        }
+        Ok(())
+    }
+
     fn cleanup(&mut self) -> Result<(), DriverError> {
         let child_result = self
             .child
@@ -1889,6 +2000,7 @@ impl ScenarioRunner for DesktopCheckRunner {
             build_key: self.build_key.clone(),
             environment: Some(self.ready_environment.clone()),
             uncontrolled_inputs: self.ready_uncontrolled_inputs.clone(),
+            mobile_evidence: self.mobile_capture.as_ref().map(MobileCapture::evidence),
         })
     }
 

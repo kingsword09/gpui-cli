@@ -288,6 +288,8 @@ pub struct CheckContext {
     pub environment: Option<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub uncontrolled_inputs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mobile_evidence: Option<Value>,
 }
 
 /// Structured result of one scenario execution.
@@ -402,6 +404,13 @@ pub trait ScenarioRunner {
 
     fn cleanup(&mut self) -> Result<(), DriverError>;
 
+    /// Collects evidence that is only available after the scenario steps have
+    /// finished but before owned resources are released. Most runners have no
+    /// finalization work; mobile runners use this boundary for native logs.
+    fn finalize(&mut self, _deadline: Instant) -> Result<(), DriverError> {
+        Ok(())
+    }
+
     /// Returns immutable runtime context collected during prepare/reset.
     fn context(&self) -> Option<CheckContext> {
         None
@@ -426,9 +435,10 @@ pub fn execute<R: ScenarioRunner>(
         Err(error) => {
             let mut report = empty_report(scenario, fixture_hash, CheckStatus::Failed);
             report.primary_error = Some(error);
+            let cleanup = runner.cleanup();
             report.context = runner.context();
             refresh_fixture_hash(&mut report, runner);
-            report.cleanup = cleanup_report(runner.cleanup());
+            report.cleanup = cleanup_report(cleanup);
             return report;
         }
     };
@@ -438,9 +448,10 @@ pub fn execute<R: ScenarioRunner>(
         Ok(observation) => observation,
         Err(error) => {
             set_driver_failure(&mut report, &error);
+            let cleanup = runner.cleanup();
             report.context = runner.context();
             refresh_fixture_hash(&mut report, runner);
-            report.cleanup = cleanup_report(runner.cleanup());
+            report.cleanup = cleanup_report(cleanup);
             return report;
         }
     };
@@ -475,9 +486,15 @@ pub fn execute<R: ScenarioRunner>(
         report.steps.push(step_report);
     }
 
+    if let Err(error) = runner.finalize(deadline)
+        && report.status == CheckStatus::Passed
+    {
+        set_driver_failure(&mut report, &error);
+    }
+    let cleanup = runner.cleanup();
     report.context = runner.context();
     refresh_fixture_hash(&mut report, runner);
-    report.cleanup = cleanup_report(runner.cleanup());
+    report.cleanup = cleanup_report(cleanup);
     if !report.cleanup.succeeded && report.status == CheckStatus::Passed {
         report.status = CheckStatus::Failed;
         report.primary_error = report.cleanup.error.clone();
@@ -1058,6 +1075,7 @@ mod tests {
         actions: VecDeque<Result<ActionResult, DriverError>>,
         waits: VecDeque<Result<Observation, DriverError>>,
         captures: VecDeque<Result<CaptureEvidence, DriverError>>,
+        finalize: Option<Result<(), DriverError>>,
         cleanup: Option<Result<(), DriverError>>,
         context: Option<CheckContext>,
         runtime_fixture_hash: Option<String>,
@@ -1147,6 +1165,10 @@ mod tests {
             self.cleanup.take().unwrap_or(Ok(()))
         }
 
+        fn finalize(&mut self, _deadline: Instant) -> Result<(), DriverError> {
+            self.finalize.take().unwrap_or(Ok(()))
+        }
+
         fn context(&self) -> Option<CheckContext> {
             self.context.clone()
         }
@@ -1231,6 +1253,7 @@ mod tests {
                 build_key: None,
                 environment: Some(json!({"os": "android", "theme": "light"})),
                 uncontrolled_inputs: vec!["network".into()],
+                mobile_evidence: None,
             }),
             ..FakeRunner::default()
         };
@@ -1284,6 +1307,32 @@ mod tests {
             "cleanup_failed"
         );
         assert_eq!(report.steps[0].status, StepStatus::Passed);
+    }
+
+    #[test]
+    fn finalization_failure_is_inconclusive_before_cleanup() {
+        let mut runner = FakeRunner {
+            prepared: Some(Ok(observation(
+                "o-1",
+                vec![node("counter.value", json!(0))],
+            ))),
+            finalize: Some(Err(DriverError::unknown(
+                "mobile_logs_unavailable",
+                "native logs could not be assigned",
+            ))),
+            ..FakeRunner::default()
+        };
+        let report = execute(
+            &mut runner,
+            &scenario(vec![assert_step("initial", "value_equals", Some(json!(0)))]),
+            None,
+        );
+        assert_eq!(report.status, CheckStatus::Inconclusive);
+        assert_eq!(
+            report.primary_error.as_ref().unwrap().code,
+            "mobile_logs_unavailable"
+        );
+        assert!(report.cleanup.succeeded);
     }
 
     #[test]
