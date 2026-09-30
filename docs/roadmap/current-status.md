@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-09-30（Asia/Shanghai）。核查代码：`0e05087`（PR #199 squash merge）。
+更新日期：2026-09-30（Asia/Shanghai）。核查代码：`13fc5c8`（PR #201 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -30,7 +30,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、普通 build/run 与 desktop/iOS simulator/Android default-debug preview 的 BuildKey coordinator、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening | partial artifact 的消费/恢复契约、语义激活、真实环境适配、heartbeat/fencing、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、普通 build/run 与 desktop/iOS simulator/Android default-debug preview 的 BuildKey coordinator、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening | partial artifact 的消费/恢复契约、语义激活、真实环境适配、签名敏感输入、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续场景验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture | 完整三端同快照矩阵、可靠日志归属、设备重连、repro 和 L2/L3 CI |
 | G4 | 普通构建缓存复用、desktop/iOS simulator/Android default-debug live preview verified cache hit 和显式清理 | 缓存输入遗漏、iOS physical/Android custom or signing-sensitive preview cache hit、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
@@ -67,6 +67,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `3364c58`（#195） | desktop、iOS simulator、Android default-debug preview 安装 leader control 到 owned process loop；最后引用 caller-cancel 会终止 owned process tree 并发布 marker，有 follower 时 leader 脱离但共享构建继续；superseded 仍重建旧 attempt | 仍无独立 `cancelled`/`partial` state、heartbeat/fencing、physical/signing-sensitive preview 共享或完整真实设备验收 |
 | `f8a95ce`（#197） | `BuildCoordinatorState::Cancelled` 明确表示无剩余 subscriber 的 caller-cancel；follower 放弃旧 attempt 并重新竞争，普通失败仍为 `Failed`，superseded 仍是 retryable `Failed` marker | 尚无 `Partial` 终态/部分产物消费契约、heartbeat/fencing、physical/signing-sensitive preview 共享或完整真实设备验收 |
 | `0e05087`（#199） | 增加 `BuildCoordinatorState::Partial`；精确 partial marker 保留不完整输出诊断，但不验证/共享/命中该输出，旧 attempt 的 follower 放弃并重新竞争；error chain 支持 contextual marker | partial marker 需调用方显式返回；没有自动 partial 检测、可消费部分 manifest 或恢复机制，heartbeat/fencing、physical/signing-sensitive preview 共享及完整真实设备验收仍未完成 |
+| `13fc5c8`（#201） | coordinator schema v2 增加 owner fencing token/heartbeat；leader 持锁续 heartbeat，terminal publish 校验 owner，stale heartbeat 只作诊断且不能绕过 output OS lock 接管 | 仍是本机 coordinator heartbeat，不提供远端租约/跨主机时钟语义；partial artifact 消费/恢复、签名敏感输入和完整真实设备验收仍未完成 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -95,8 +96,8 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | S02 | in_progress | Counter/LoginForm/VirtualList preview/reset；Android preview 已接入，真实环境适配仍有缺口 |
 | S03 | in_progress | click/type/key/scroll、正常事件路径、owner/scope 和 unknown 语义；真实输入/遮挡/污染及持久幂等验收未齐 |
 | M03 | in_progress | 主机 OS 锁、owner/fencing、heartbeat，run/live/capture 和移动 matrix 已接入；重连和真实竞争矩阵未齐 |
-| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；单场景及 matrix 已消费共享冻结 snapshot/target BuildKey、绑定输出布局并锁定 preview 输出根，普通 desktop/iOS/Android build/run 已接入 BuildKey coordinator，desktop/iOS simulator/Android default-debug live preview 已接入 verified manifest 命中及 caller-cancel/显式 Cancelled/Partial 状态，BuildKey output ownership record 已接入；partial 输出消费/恢复、heartbeat/fencing、隐藏输入建模和其余 preview 路径仍未齐 |
-| S04 | in_progress | executor、desktop check、单场景及 matrix frozen inputs、baseline/diff/approve、移动 matrix 场景 driver、per-cell context/BuildKey/output layout/preview output lock/完整 CheckReport、owned process-tree/fixture identity cleanup、preview coordinator caller-cancel 与显式 Cancelled/Partial 状态；移动 capture-only 语义/输入、环境及三夹具各 20 次真实验收未齐 |
+| M04 | in_progress | 稳定扫描、外部 Cargo path root、普通三端构建冻结/输出隔离/manifest；单场景及 matrix 已消费共享冻结 snapshot/target BuildKey、绑定输出布局并锁定 preview 输出根，普通 desktop/iOS/Android build/run 已接入 BuildKey coordinator，desktop/iOS simulator/Android default-debug live preview 已接入 verified manifest 命中、caller-cancel、显式 Cancelled/Partial 状态和 owner heartbeat/fencing，BuildKey output ownership record 已接入；partial 输出消费/恢复、签名敏感输入、隐藏输入建模和其余 preview 路径仍未齐 |
+| S04 | in_progress | executor、desktop check、单场景及 matrix frozen inputs、baseline/diff/approve、移动 matrix 场景 driver、per-cell context/BuildKey/output layout/preview output lock/完整 CheckReport、owned process-tree/fixture identity cleanup、preview coordinator caller-cancel、显式 Cancelled/Partial 状态和 owner heartbeat/fencing；移动 capture-only 语义/输入、环境及三夹具各 20 次真实验收未齐 |
 | A01 | planned | CLI/control 可复用；无 MCP 只读适配、JSON-RPC server 或独立 Agent service |
 | A02 | planned | action/operation/check 可复用；无 MCP 动作/取消/owner 适配 |
 | A03 | planned | pin/manifest/registry 可复用；无 context 命令、版本知识索引或工作流包 |
@@ -108,7 +109,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | G01 | planned | supervisor 计时已有；无应用 layout/paint/frame/CPU/GPU 指标与开销验收 |
 | G02 | planned | 无 perf 执行器、统计/可比性和性能预算判定 |
 | T05 | planned | watcher/全量内容扫描已有；无增量输入索引及大项目对照 |
-| T06 | in_progress | desktop/iOS simulator/Android default-debug 缓存与 cache clean，普通 build/run 及受支持的 live preview 已接入同 key coordinator、verified manifest 和 caller-cancel/显式 Cancelled/Partial 状态，BuildKey output ownership record 已落地；Partial 仅为不可复用的诊断终态；heartbeat/fencing、输入遗漏、iOS physical/Android custom or signing-sensitive preview 和预热未实现 |
+| T06 | in_progress | desktop/iOS simulator/Android default-debug 缓存与 cache clean，普通 build/run 及受支持的 live preview 已接入同 key coordinator、verified manifest、caller-cancel、显式 Cancelled/Partial 状态和 owner heartbeat/fencing，BuildKey output ownership record 已落地；Partial 仅为不可复用的诊断终态；输入遗漏、iOS physical/Android custom or signing-sensitive preview 和预热未实现 |
 | Q02 | planned | 仅有 12 项任务设计；无可执行评分器和固定预算对照实验 |
 | G03 | planned | 无 GPU capture/analysis provider 闭环；可选 |
 | M06 | planned | 无远程 runner、传输和断线恢复；可选 |
@@ -175,7 +176,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | PR #175 CI | required checks 全部通过；三 OS check、desktop-template、android-template、baseline-driver 均通过；无 release/tag | [PR #175](https://github.com/kingsword09/gpui-cli/pull/175) |
 | PR #177 CI | required checks 全部通过；Android template 先修复 follower cache-hit 诊断契约后重跑，Windows live-feedback 时序波动重跑通过；三 OS check、desktop-template、android-template、baseline-driver 最终均通过；无 release/tag | [PR #177](https://github.com/kingsword09/gpui-cli/pull/177) |
 
-本次接续到 `0e05087` 的增量证据：
+本次接续到 `13fc5c8` 的增量证据：
 
 | 检查/合并 | 结果 |
 | --- | --- |
@@ -186,6 +187,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | 本地运行时验证（PR #199） | 362 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check 均通过 |
 | PR #199 CI | PR 与 push 两套 CI 最终全通过；PR 首轮 Windows 既有 coordinator 时序测试失败后仅重跑失败 job，Windows 和 macOS 均通过，Linux、两类模板和 baseline-driver 通过 |
 | PR #199 合并 | squash merge `0e05087`；无发布/tag |
+| 本地运行时验证（PR #201） | 365 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check 均通过 |
+| PR #201 CI | PR 与 push 两套 CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 和文档门槛均通过；无发布/tag |
+| PR #201 合并 | squash merge `13fc5c8`；无发布/tag |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
@@ -221,7 +225,7 @@ PNG 仅有临时路径和记录 hash，未形成持久 CI 产物。本轮没有�
 
 ## 6. 后续接续顺序
 
-1. 在共享 snapshot/context/BuildKey/output layout/preview lock/ownership/coordinator/完整 cell report 的现有基础上，实现 coordinator owner heartbeat/fencing，并验证 stale owner、OS lock 和 subscriber reference 的交互；之后补齐 iOS physical signing 输入、Android custom/release/signing-sensitive preview、移动完整 scenario 证据以及真实环境身份/viewport/DPI 证据。
+1. 在现有 coordinator heartbeat/fencing 基础上，补齐 iOS physical signing 输入、Android custom/release/signing-sensitive preview、移动完整 scenario 证据以及真实环境身份/viewport/DPI 证据；随后处理隐藏构建输入、剩余 preview/cache orchestration 和真实连续验收。
 2. 补齐 v1 在线兼容、不可变历史模板基线和 doctor 版本解析；保留现有拒绝/降级边界。
 3. 完成 macOS 三夹具各连续 20 次及故障变体，再收口移动语义/输入和完整三端矩阵。
 4. 按依赖继续 MCP、repro、L2/L3 CI；性能、索引/预热、Agent 基准按各自验收推进。
