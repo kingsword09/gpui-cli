@@ -426,6 +426,7 @@ struct MobileCapture {
     runner: Box<dyn MobileRunner + Send>,
     lease: Option<DeviceLeaseSession>,
     identity: RunIdentity,
+    run_id_bound: bool,
     artifact_root: PathBuf,
     captures: Vec<CaptureArtifact>,
     native_logs: Option<LogEvidence>,
@@ -482,6 +483,7 @@ impl MobileCapture {
             runner,
             lease: Some(lease),
             identity,
+            run_id_bound: false,
             artifact_root,
             captures: Vec::new(),
             native_logs: None,
@@ -498,6 +500,7 @@ impl MobileCapture {
 
     fn bind_run_id(&mut self, run_id: String) {
         self.identity.run_id = run_id;
+        self.run_id_bound = true;
     }
 
     fn capture(&mut self, observation_id: &str, deadline: Instant) -> Result<ScreenshotEvidence> {
@@ -532,13 +535,47 @@ impl MobileCapture {
             .lease
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("mobile capture lease has been released"))?;
-        let logs = self.runner.collect_logs(&self.identity, lease)?;
+        let mut logs = self.runner.collect_logs(&self.identity, lease)?;
+        if !self.run_id_bound {
+            logs.assigned_to_run = false;
+            logs.unassigned_reason =
+                Some("preview run identity was unavailable before scenario_ready".into());
+        }
         let assigned = logs.assigned_to_run;
         self.native_logs = Some(logs);
         if !assigned {
             bail!("mobile native logs could not be assigned to the active run")
         }
         Ok(())
+    }
+
+    fn finalize_and_cleanup(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if let Err(error) = self.finalize() {
+            errors.push(format!("finalizing mobile evidence: {error:#}"));
+        }
+        if let Err(error) = self.cleanup() {
+            errors.push(format!("cleaning up mobile evidence: {error:#}"));
+        }
+        errors
+    }
+
+    fn artifact_ids(&self) -> Vec<String> {
+        self.captures
+            .iter()
+            .map(|capture| capture.artifact_id.clone())
+            .collect()
+    }
+
+    fn context(&self, snapshot_hash: String, build_key: String) -> CheckContext {
+        CheckContext {
+            reset_generation: None,
+            snapshot_hash: Some(snapshot_hash),
+            build_key: Some(build_key),
+            environment: None,
+            uncontrolled_inputs: Vec::new(),
+            mobile_evidence: Some(self.evidence()),
+        }
     }
 
     fn evidence(&self) -> Value {
@@ -550,6 +587,7 @@ impl MobileCapture {
         };
         json!({
             "run_id": self.identity.run_id,
+            "run_id_bound": self.run_id_bound,
             "device_id": self.identity.device_id,
             "lease_session_id": self.identity.lease_session_id,
             "fencing_token_sha256": self.identity.fencing_token_sha256,
@@ -740,7 +778,7 @@ impl MatrixCellRunner for MatrixCheckRunner {
                     std::process::id(),
                     epoch_ms()
                 );
-                let mut runner = DesktopCheckRunner::launch_until(
+                let launch_result = DesktopCheckRunner::launch_until(
                     runtime_root,
                     project_root,
                     scenario_file,
@@ -759,7 +797,34 @@ impl MatrixCellRunner for MatrixCheckRunner {
                         build_outputs: Some(build_outputs.clone()),
                         android_abis: abi.clone(),
                     },
-                )?;
+                );
+                let mut runner = match launch_result {
+                    Ok(runner) => runner,
+                    Err(error) => {
+                        if let Some(mobile_capture) = mobile_capture.as_mut() {
+                            let evidence_errors = mobile_capture.finalize_and_cleanup();
+                            let mut message = format!("mobile preview launch failed: {error:#}");
+                            if !evidence_errors.is_empty() {
+                                message.push_str("; ");
+                                message.push_str(&evidence_errors.join("; "));
+                            }
+                            return Ok(MatrixCellExecution {
+                                status: MatrixCellState::Failed,
+                                error: Some(MatrixCellError {
+                                    code: "mobile_preview_launch_failed".into(),
+                                    message,
+                                }),
+                                artifact_ids: mobile_capture.artifact_ids(),
+                                context: Some(
+                                    mobile_capture
+                                        .context(snapshot_hash.clone(), build_key.clone()),
+                                ),
+                                check_report: None,
+                            });
+                        }
+                        return Err(error);
+                    }
+                };
                 if let Some(mobile_capture) = mobile_capture.as_mut() {
                     let run_id = runner
                         .run_id()
@@ -2245,6 +2310,93 @@ fn driver_to_anyhow(error: DriverError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::mobile::{
+        CaptureArtifact, LaunchEvidence, PreparedRun, RunnerCapabilities, RunnerInfo,
+    };
+    use std::collections::BTreeMap;
+
+    struct EvidenceMobileRunner;
+
+    impl MobileRunner for EvidenceMobileRunner {
+        fn describe(&self) -> &RunnerInfo {
+            static INFO: std::sync::OnceLock<RunnerInfo> = std::sync::OnceLock::new();
+            INFO.get_or_init(|| RunnerInfo {
+                runner_id: "evidence-test".into(),
+                host_id: "test".into(),
+                platform: "android".into(),
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                stable_device_id: "evidence-device".into(),
+                device_kind: "emulator".into(),
+                tool_versions: BTreeMap::new(),
+                resources: vec!["evidence-device".into()],
+            })
+        }
+
+        fn capabilities(&self) -> RunnerCapabilities {
+            RunnerCapabilities {
+                native_logs: true,
+                stop_owned: true,
+                ..RunnerCapabilities::default()
+            }
+        }
+
+        fn prepare(
+            &mut self,
+            request: &RunRequest,
+            lease: &DeviceLeaseSession,
+        ) -> Result<PreparedRun> {
+            request.prepare(lease)
+        }
+
+        fn launch(
+            &mut self,
+            _prepared: &PreparedRun,
+            _lease: &DeviceLeaseSession,
+        ) -> Result<LaunchEvidence> {
+            Err(anyhow::anyhow!("launch is not used by this evidence test"))
+        }
+
+        fn capture(
+            &mut self,
+            _scope: &CaptureScope,
+            _lease: &DeviceLeaseSession,
+        ) -> Result<CaptureArtifact> {
+            Err(anyhow::anyhow!("capture is not used by this evidence test"))
+        }
+
+        fn collect_logs(
+            &mut self,
+            identity: &RunIdentity,
+            _lease: &DeviceLeaseSession,
+        ) -> Result<LogEvidence> {
+            Ok(LogEvidence {
+                run_id: identity.run_id.clone(),
+                source: "evidence-test".into(),
+                path: PathBuf::from("native.log"),
+                bytes: 12,
+                truncated: false,
+                pid: None,
+                process_start_token_sha256: None,
+                assigned_to_run: true,
+                unassigned_reason: None,
+            })
+        }
+
+        fn stop_owned(
+            &mut self,
+            identity: &RunIdentity,
+            _lease: &DeviceLeaseSession,
+        ) -> Result<StopEvidence> {
+            Ok(StopEvidence {
+                run_id: identity.run_id.clone(),
+                stopped_owned_process: false,
+                removed_owned_resources: Vec::new(),
+                preserved_resources: vec![identity.device_id.clone()],
+                at_ms: 1,
+            })
+        }
+    }
 
     #[test]
     fn bounds_turn_into_conservative_visibility_flags() {
@@ -2279,6 +2431,44 @@ mod tests {
             operation_error(&operation, DriverErrorKind::Failed).kind,
             DriverErrorKind::Unavailable
         );
+    }
+
+    #[test]
+    fn pre_ready_mobile_failure_keeps_unbound_run_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = DeviceLeaseSession::acquire(root.path(), "evidence-device").unwrap();
+        let request = RunRequest {
+            run_id: "prepared-run".into(),
+            project_id: "project".into(),
+            device_id: "evidence-device".into(),
+            bundle_id: "com.example.app".into(),
+            artifact_root: root.path().join("artifacts"),
+            abi: Some("x86_64".into()),
+        };
+        let identity = request.prepare(&lease).unwrap().identity;
+        let mut capture = MobileCapture {
+            runner: Box::new(EvidenceMobileRunner),
+            lease: Some(lease),
+            identity,
+            run_id_bound: false,
+            artifact_root: root.path().join("artifacts"),
+            captures: Vec::new(),
+            native_logs: None,
+            stop: None,
+        };
+
+        let errors = capture.finalize_and_cleanup();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("finalizing mobile evidence"));
+        let evidence = capture.evidence();
+        assert_eq!(evidence["run_id_bound"], false);
+        assert_eq!(evidence["native_logs"]["assigned_to_run"], false);
+        assert_eq!(
+            evidence["native_logs"]["unassigned_reason"],
+            "preview run identity was unavailable before scenario_ready"
+        );
+        assert_eq!(evidence["stop"]["run_id"], "prepared-run");
+        assert!(capture.lease.is_none());
     }
 
     #[test]
