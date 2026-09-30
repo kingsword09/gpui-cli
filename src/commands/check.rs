@@ -24,6 +24,7 @@ use crate::runner::android::AndroidRunner;
 use crate::runner::build_inputs::{
     DesktopBuildPlan, FrozenCheckInputs, android_build_key, android_preview_cache_policy,
     desktop_build_key, desktop_build_plan, frozen_check_inputs, ios_build_key,
+    prepare_android_signing_snapshot,
 };
 use crate::runner::ios::IosSimulatorRunner;
 use crate::runner::lease::DeviceLeaseSession;
@@ -342,37 +343,46 @@ fn matrix_target_build(
             source_root.display()
         )
     })?;
-    let (key, build_platform, cache_hit_disabled_reason, android_debug_keystore_hash) =
-        match platform {
-            MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux => (
-                desktop_build_key(snapshot_root, false)?,
-                BuildPlatform::Desktop,
-                None,
-                None,
-            ),
-            MatrixPlatform::Ios => (
-                ios_build_key(snapshot_root, false, "aarch64-apple-ios-sim")?,
-                BuildPlatform::Ios,
-                None,
-                None,
-            ),
-            MatrixPlatform::Android => {
-                let abi = abi.context("Android matrix target has no ABI for BuildKey")?;
-                let policy = android_preview_cache_policy(&source_root, false)?;
-                (
-                    android_build_key(snapshot_root, false, &[abi.to_owned()])?,
-                    BuildPlatform::Android,
-                    policy.disabled_reason,
-                    policy.debug_keystore_hash,
-                )
-            }
-        };
+    let (
+        key,
+        build_platform,
+        cache_hit_disabled_reason,
+        android_debug_keystore_hash,
+        android_signing_fingerprint,
+    ) = match platform {
+        MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux => (
+            desktop_build_key(snapshot_root, false)?,
+            BuildPlatform::Desktop,
+            None,
+            None,
+            None,
+        ),
+        MatrixPlatform::Ios => (
+            ios_build_key(snapshot_root, false, "aarch64-apple-ios-sim")?,
+            BuildPlatform::Ios,
+            None,
+            None,
+            None,
+        ),
+        MatrixPlatform::Android => {
+            let abi = abi.context("Android matrix target has no ABI for BuildKey")?;
+            let policy = android_preview_cache_policy(&source_root, false)?;
+            (
+                android_build_key(snapshot_root, false, &[abi.to_owned()])?,
+                BuildPlatform::Android,
+                policy.disabled_reason,
+                policy.debug_keystore_hash,
+                policy.android_signing_fingerprint,
+            )
+        }
+    };
     let layout =
         BuildOutputLayout::for_key(&source_root.join(".gpui/builds"), &key, build_platform)?;
     layout.prepare()?;
     let mut outputs = preview_outputs_from_layout(&layout);
     outputs.cache_hit_disabled_reason = cache_hit_disabled_reason;
     outputs.android_debug_keystore_hash = android_debug_keystore_hash;
+    outputs.android_signing_fingerprint = android_signing_fingerprint;
     Ok(MatrixTargetBuild {
         key_hash: key.key_hash().to_owned(),
         outputs,
@@ -386,6 +396,7 @@ fn preview_outputs_from_layout(layout: &BuildOutputLayout) -> PreviewBuildOutput
         build_key_hash: Some(layout.key_hash.clone()),
         cache_hit_disabled_reason: None,
         android_debug_keystore_hash: None,
+        android_signing_fingerprint: None,
         jni_libs_dir: layout.android_jni_dir.clone(),
         gradle_build_dir: layout.android_gradle_build_dir.clone(),
         ios_derived_data_dir: layout.ios_derived_data_dir.clone(),
@@ -827,6 +838,7 @@ fn prepare_frozen_matrix_check(
         })?
         .to_owned();
     let inputs = frozen_check_inputs(&project_root)?;
+    prepare_android_signing_snapshot(&project_root, &inputs.snapshot.root)?;
     if let Some(reason) = &inputs.cache_hit_disabled_reason {
         bail!("strict frozen matrix check is unavailable: {reason}");
     }
@@ -970,6 +982,9 @@ impl DesktopCheckRunner {
             }
             if let Some(hash) = &outputs.android_debug_keystore_hash {
                 child.env("GPUI_PREVIEW_ANDROID_DEBUG_KEYSTORE_HASH", hash);
+            }
+            if let Some(fingerprint) = &outputs.android_signing_fingerprint {
+                child.env("GPUI_PREVIEW_ANDROID_SIGNING_FINGERPRINT", fingerprint);
             }
             if let Some(path) = &outputs.jni_libs_dir {
                 child.env("GPUI_PREVIEW_JNI_LIBS_DIR", path);
@@ -2259,6 +2274,80 @@ mod tests {
                 .outputs
                 .cargo_target_dir
                 .starts_with(source_root.join(".gpui/builds/desktop"))
+        );
+    }
+
+    #[test]
+    fn frozen_matrix_check_copies_supported_android_signing_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(root.path().join("app/src")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                signingConfigs { create("release") { storeFile = file(keystoreProperties["storeFile"]) } }
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                signingConfig
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            root.path()
+                .join("mobile/android/gradle/keystore.properties"),
+            "storeFile=release.jks\n",
+        )
+        .unwrap();
+        fs::write(app.join("release.jks"), b"private-keystore").unwrap();
+        fs::write(root.path().join("gpui.scenarios.toml"), "scenario = true\n").unwrap();
+        fs::write(
+            root.path().join("matrix.toml"),
+            "source_mode = \"frozen\"\n",
+        )
+        .unwrap();
+        let status = Command::new("cargo")
+            .current_dir(root.path())
+            .args(["generate-lockfile"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let frozen = prepare_frozen_matrix_check(
+            root.path(),
+            &root.path().join("gpui.scenarios.toml"),
+            &root.path().join("matrix.toml"),
+        )
+        .unwrap();
+        assert!(
+            frozen
+                .inputs
+                .snapshot
+                .root
+                .join("mobile/android/gradle/keystore.properties")
+                .is_file()
+        );
+        assert!(
+            frozen
+                .inputs
+                .snapshot
+                .root
+                .join("mobile/android/gradle/app/release.jks")
+                .is_file()
         );
     }
 }
