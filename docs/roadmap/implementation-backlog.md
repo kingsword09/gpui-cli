@@ -394,7 +394,8 @@ sources/assets/目录 symlink manifest 执行最多两次重扫，连续变化�
 [M04 input stability](../experiments/M04-input-stability-2026-09-27.md)。外部 root 尚未
 覆盖 native/scenario manifest 和 build.rs 隐藏输入；
 FrozenInputs 现对 local.properties/keystore.properties 只保留相对路径声明，不读取内容
-或复制进快照；该精确文件名过滤不是通用 secret scanner，记录见
+或复制进快照；该精确文件名过滤不是通用 secret scanner。随后 #205 为受控 Android
+custom/release signing 增加独立的项目内 keystore 扩展名过滤和短生命周期 `0600` 副本，记录见
 [M04 frozen sensitive input filter](../experiments/M04-frozen-sensitive-input-filter-2026-09-28.md)。
 `src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要，并已接入普通构建路径与 T06
 产物缓存。当前 desktop `build`/`run` 已通过
@@ -421,8 +422,10 @@ live preview builder 已接入 source-project target-specific output root，并�
 `BuildOutputLock`；#169 又让 desktop preview 通过独立 verified artifact manifest 在验证成功时
 跳过 Cargo；#171 又让 iOS simulator live preview 在同一语义下验证完整 `.app` bundle 并跳过
 rustup/Cargo/XcodeGen/`xcodebuild`；#173 又让 Android default-debug live preview 在同一语义下
-验证 JNI/APK 输出并跳过 rustup/cargo-ndk/Gradle；这仍不等于 iOS physical、Android custom/
-release/signing-sensitive 命中、跨命令 ownership 或 coalescing。
+验证 JNI/APK 输出并跳过 rustup/cargo-ndk/Gradle；这仍不等于 iOS physical、Android signing-sensitive
+live-preview 命中、复杂/远端 signing、跨命令 ownership 或 coalescing。#205 已覆盖受控 Android
+local custom/release signing 的非 live build/run 命中，记录见
+[T06 Android signing BuildKey](../experiments/T06-android-signing-build-key-2026-09-30.md)。
 这只串行进入该锁路径的输出变更，不等于构建已完成或可复用。snapshot build
 orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
 尚未接入。非 live 命令也已接入各自的临时 `FrozenInputs` 工作根；desktop 的切片见
@@ -467,7 +470,9 @@ terminal result 并只让取消的 leader 返回 cancellation，无 follower 时
 #199 增加 `Partial` terminal state：调用方显式返回 partial marker 时保留该诊断；attempt 不验证、共享或
 命中不完整输出，follower 放弃旧引用并重新竞争。它不提供 partial artifact manifest、恢复或渐进消费。
 #203 又将 physical iOS 的 code-signing identity/profile 摘要纳入 BuildKey；签名输入缺失或变化时保持
-cache bypass/拒绝发布，签名可用时允许 physical manifest 命中。Android release/custom signing 仍未建模。
+cache bypass/拒绝发布，签名可用时允许 physical manifest 命中。#205 又为受控 Android local
+custom/release signing 纳入 properties/keystore 摘要并接入非 live build/run；复杂/远端 signing、
+signing-sensitive live preview 和隐藏输入仍未建模。
 M04 仍未完成：preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
@@ -504,8 +509,10 @@ Rust 编译；记录见
 真机因签名输入尚未纳入 BuildKey 而继续重建，记录见
 [T06 iOS simulator manifest cache hit](../experiments/T06-ios-simulator-cache-hit-2026-09-28.md)。
 Android default-debug 切片在 BuildKey 纳入 debug keystore 指纹并完整验证 JNI/APK 输出后
-允许命中；release/custom signing 仍 bypass，记录见
-[T06 Android debug manifest cache hit](../experiments/T06-android-debug-cache-hit-2026-09-28.md)。
+允许命中；#205 又为受控 local custom/release signing 的非 live build/run 纳入签名输入摘要并
+允许命中，复杂/远端 signing 与 Android live preview 仍 bypass；记录见
+[T06 Android debug manifest cache hit](../experiments/T06-android-debug-cache-hit-2026-09-28.md) 和
+[T06 Android signing BuildKey](../experiments/T06-android-signing-build-key-2026-09-30.md)。
 Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次，验证 Android CLI
 第一次 miss、第二次同 key hit 和 APK ABI；它不包含完整 GPUI app 或设备运行，记录见
 [T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。真实在途
