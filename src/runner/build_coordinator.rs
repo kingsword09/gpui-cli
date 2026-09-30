@@ -28,6 +28,8 @@ use tempfile::NamedTempFile;
 
 pub const BUILD_COORDINATOR_SCHEMA_VERSION: u32 = 1;
 pub const BUILD_COORDINATOR_CANCELLED_ERROR: &str = "coordinated BuildKey subscriber cancelled";
+pub const BUILD_COORDINATOR_PARTIAL_ERROR: &str =
+    "coordinated BuildKey attempt produced partial artifacts";
 pub const BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR: &str =
     "coordinated BuildKey leader superseded";
 pub const BUILD_COORDINATOR_LEADER_CANCELLED_ERROR: &str =
@@ -44,6 +46,7 @@ pub enum BuildCoordinatorState {
     Building,
     Succeeded,
     Failed,
+    Partial,
     Cancelled,
 }
 
@@ -195,7 +198,7 @@ impl BuildCoordinatorLeaderControl {
             None => {}
         }
 
-        let terminal = self.terminal_record(result.as_ref().err().map(format_error));
+        let terminal = self.terminal_record(result.as_ref().err());
         let state_result = write_record_locked(&self.inner.layout, &terminal);
         *self
             .inner
@@ -226,11 +229,11 @@ impl BuildCoordinatorLeaderControl {
             .take();
     }
 
-    fn terminal_record(&self, error: Option<String>) -> BuildCoordinatorRecord {
+    fn terminal_record(&self, error: Option<&anyhow::Error>) -> BuildCoordinatorRecord {
         let mut record = self.inner.building.clone();
         record.finished_at_ms = Some(timestamp_ms());
-        record.state = terminal_state(error.as_deref());
-        record.error = error;
+        record.state = terminal_state(error);
+        record.error = error.map(format_error);
         record
     }
 }
@@ -298,7 +301,8 @@ impl BuildProcessCancellationProbe for BuildCoordinatorLeaderControl {
                 BuildCoordinatorCancellationReason::CallerCancelled,
             ),
         };
-        let terminal = self.terminal_record(Some(error.to_owned()));
+        let terminal_error = anyhow::anyhow!(error);
+        let terminal = self.terminal_record(Some(&terminal_error));
         write_record_locked(&self.inner.layout, &terminal)?;
         *self
             .inner
@@ -505,6 +509,7 @@ where
                         );
                     }
                 }
+                BuildCoordinatorState::Partial => {}
                 BuildCoordinatorState::Cancelled => {}
             }
         }
@@ -619,6 +624,7 @@ where
                         );
                     }
                 }
+                BuildCoordinatorState::Partial => {}
                 BuildCoordinatorState::Cancelled => {}
             }
         }
@@ -715,7 +721,7 @@ where
             pid: process::id(),
             started_at_ms,
             finished_at_ms: Some(timestamp_ms()),
-            state: terminal_state(result.as_ref().err().map(format_error).as_deref()),
+            state: terminal_state(result.as_ref().err()),
             error: result.as_ref().err().map(format_error),
         };
         let state_result = match terminal_state_lock.as_ref() {
@@ -830,6 +836,10 @@ fn wait_for_attempt(
                             .unwrap_or_else(|| "coordinated build failed without an error".into());
                         drop(subscription);
                         bail!("coordinated BuildKey build failed: {reason}");
+                    }
+                    BuildCoordinatorState::Partial => {
+                        drop(subscription);
+                        return Ok(WaitOutcome::Abandoned);
                     }
                     BuildCoordinatorState::Cancelled => {
                         drop(subscription);
@@ -1187,11 +1197,17 @@ fn format_error(error: &anyhow::Error) -> String {
     message
 }
 
-fn terminal_state(error: Option<&str>) -> BuildCoordinatorState {
-    match error {
-        None => BuildCoordinatorState::Succeeded,
-        Some(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR) => BuildCoordinatorState::Cancelled,
-        Some(_) => BuildCoordinatorState::Failed,
+fn terminal_state(error: Option<&anyhow::Error>) -> BuildCoordinatorState {
+    let Some(error) = error else {
+        return BuildCoordinatorState::Succeeded;
+    };
+    let has_marker = |marker: &str| error.chain().any(|cause| cause.to_string() == marker);
+    if has_marker(BUILD_COORDINATOR_PARTIAL_ERROR) {
+        BuildCoordinatorState::Partial
+    } else if has_marker(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR) {
+        BuildCoordinatorState::Cancelled
+    } else {
+        BuildCoordinatorState::Failed
     }
 }
 
@@ -1479,6 +1495,142 @@ mod tests {
         .unwrap();
         assert_eq!(retry.role, BuildCoordinatorRole::Leader);
         assert_ne!(retry.attempt_id, cancelled.attempt_id);
+    }
+
+    #[test]
+    fn partial_attempt_is_not_a_cache_hit_and_can_be_rebuilt() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let build_attempts = attempts.clone();
+        let error = coordinate_preview_build_with_verifier(
+            &layout,
+            key.key_hash(),
+            || {
+                build_attempts.fetch_add(1, Ordering::SeqCst);
+                // Even a verifiable file/manifest must not turn a partial
+                // attempt into a reusable successful result.
+                publish_fake_artifact(&layout);
+                bail!(BUILD_COORDINATOR_PARTIAL_ERROR)
+            },
+            verify_completed_output,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains(BUILD_COORDINATOR_PARTIAL_ERROR));
+
+        let partial = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial.state, BuildCoordinatorState::Partial);
+        assert_eq!(
+            partial.error.as_deref(),
+            Some(BUILD_COORDINATOR_PARTIAL_ERROR)
+        );
+
+        let retry_attempts = attempts.clone();
+        let retry = coordinate_preview_build_with_verifier(
+            &layout,
+            key.key_hash(),
+            || {
+                retry_attempts.fetch_add(1, Ordering::SeqCst);
+                publish_fake_artifact(&layout);
+                Ok(())
+            },
+            verify_completed_output,
+        )
+        .unwrap();
+        assert_eq!(retry.role, BuildCoordinatorRole::Leader);
+        assert_ne!(retry.attempt_id, partial.attempt_id);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+                .unwrap()
+                .unwrap()
+                .state,
+            BuildCoordinatorState::Succeeded
+        );
+    }
+
+    #[test]
+    fn follower_retries_after_partial_attempt_instead_of_consuming_its_artifact() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        let key = key();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let leader_layout = layout.clone();
+        let leader_key_hash = key.key_hash().to_owned();
+        let leader = std::thread::spawn(move || {
+            coordinate_preview_build_with_verifier(
+                &leader_layout,
+                &leader_key_hash,
+                || {
+                    publish_fake_artifact(&leader_layout);
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    bail!(BUILD_COORDINATOR_PARTIAL_ERROR)
+                },
+                verify_completed_output,
+            )
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let partial_attempt_id = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+            .unwrap()
+            .unwrap()
+            .attempt_id;
+
+        let follower_layout = layout.clone();
+        let follower_key_hash = key.key_hash().to_owned();
+        let follower_build_count = Arc::new(AtomicUsize::new(0));
+        let count = follower_build_count.clone();
+        let follower = std::thread::spawn(move || {
+            coordinate_preview_build_with_verifier(
+                &follower_layout,
+                &follower_key_hash,
+                || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    publish_fake_artifact(&follower_layout);
+                    Ok(())
+                },
+                verify_completed_output,
+            )
+            .unwrap()
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while active_subscriber_count(&layout, &partial_attempt_id).unwrap() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "follower did not subscribe to the partial attempt"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        release_tx.send(()).unwrap();
+
+        let leader_error = leader.join().unwrap().unwrap_err();
+        assert!(format!("{leader_error:#}").contains(BUILD_COORDINATOR_PARTIAL_ERROR));
+        let follower_outcome = follower.join().unwrap();
+        assert_eq!(follower_outcome.role, BuildCoordinatorRole::Leader);
+        assert_ne!(follower_outcome.attempt_id, partial_attempt_id);
+        assert_eq!(follower_build_count.load(Ordering::SeqCst), 1);
+        let completed = read_record(&layout, BUILD_COORDINATOR_PREVIEW_KIND)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.state, BuildCoordinatorState::Succeeded);
+        assert_eq!(completed.attempt_id, follower_outcome.attempt_id);
+    }
+
+    #[test]
+    fn terminal_state_recognizes_partial_marker_through_context() {
+        let error = anyhow::anyhow!(BUILD_COORDINATOR_PARTIAL_ERROR)
+            .context("native build left an incomplete artifact set");
+        assert_eq!(terminal_state(Some(&error)), BuildCoordinatorState::Partial);
+        let compiler_error = anyhow::anyhow!("compiler failed");
+        assert_eq!(
+            terminal_state(Some(&compiler_error)),
+            BuildCoordinatorState::Failed
+        );
     }
 
     #[test]
