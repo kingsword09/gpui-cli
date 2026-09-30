@@ -39,6 +39,11 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 - scenario executor 在初始 prepare/reset/observation 阶段失败时，也会先调用 runner 的
   finalization boundary 再 cleanup；因此已启动但未发布 `scenario_ready` 的移动 preview
   仍有机会收集 native logs 和其他 post-run evidence，原始失败仍保留为主错误。
+- 如果移动 preview 在 `scenario_ready` 之前的 registration/launch 等待阶段失败，matrix
+  driver 也会先尝试收集 native logs、owned stop 和 lease release，并把 `mobile_evidence`
+  与已有 artifact ids 返回到失败 cell；这条路径不生成伪造的 `CheckReport`。实际 preview
+  run 尚未发布时，证据明确写入 `run_id_bound: false`，日志保持 unassigned，不把准备阶段的
+  run ID 冒充为实际运行身份。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
@@ -74,6 +79,9 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   admission 或 screenshot 成功不会替它们伪造通过。
 - early prepare failure 的 finalization 只保证证据收集顺序，不把未 ready 的 preview 变成
   passed；finalization 本身失败仍按 inconclusive/cleanup 边界记录。
+- pre-`scenario_ready` 的 launch/registration failure 现在同样保留可取得的 native-log/stop/
+  lease evidence，但没有 scenario steps，因此只记录为失败 cell，不生成完整 scenario report；
+  未绑定实际 run 的日志保持 unassigned。
 - 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；
   unknown 结果仍为 inconclusive，不能重放或降格成普通失败/通过。
 - 没有完成 frozen snapshot build、真实 macOS+iOS simulator+Android emulator 矩阵报告、
