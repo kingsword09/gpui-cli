@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-09-29，主分支 `7283614`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-09-30，主分支 `a8a484f`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -422,9 +422,10 @@ live preview builder 已接入 source-project target-specific output root，并�
 `BuildOutputLock`；#169 又让 desktop preview 通过独立 verified artifact manifest 在验证成功时
 跳过 Cargo；#171 又让 iOS simulator live preview 在同一语义下验证完整 `.app` bundle 并跳过
 rustup/Cargo/XcodeGen/`xcodebuild`；#173 又让 Android default-debug live preview 在同一语义下
-验证 JNI/APK 输出并跳过 rustup/cargo-ndk/Gradle；这仍不等于 iOS physical、Android signing-sensitive
-live-preview 命中、复杂/远端 signing、跨命令 ownership 或 coalescing。#205 已覆盖受控 Android
-local custom/release signing 的非 live build/run 命中，记录见
+验证 JNI/APK 输出并跳过 rustup/cargo-ndk/Gradle；这仍不等于 iOS physical、Android release-only/
+复杂/远端 signing live-preview 命中、跨命令 ownership 或 coalescing。#205 已覆盖受控 Android
+local custom/release signing 的非 live build/run 命中，#209 又覆盖显式 debug custom-signing live
+preview 的 manifest/coordinator 复用，记录见
 [T06 Android signing BuildKey](../experiments/T06-android-signing-build-key-2026-09-30.md)。
 这只串行进入该锁路径的输出变更，不等于构建已完成或可复用。snapshot build
 orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
@@ -471,8 +472,9 @@ terminal result 并只让取消的 leader 返回 cancellation，无 follower 时
 命中不完整输出，follower 放弃旧引用并重新竞争。它不提供 partial artifact manifest、恢复或渐进消费。
 #203 又将 physical iOS 的 code-signing identity/profile 摘要纳入 BuildKey；签名输入缺失或变化时保持
 cache bypass/拒绝发布，签名可用时允许 physical manifest 命中。#205 又为受控 Android local
-custom/release signing 纳入 properties/keystore 摘要并接入非 live build/run；复杂/远端 signing、
-signing-sensitive live preview 和隐藏输入仍未建模。
+custom/release signing 纳入 properties/keystore 摘要并接入非 live build/run；#209 又让显式
+`buildTypes.debug.signingConfig` 的 custom-debug live preview 复用 signing fingerprint、verified
+manifest 和 preview coordinator；release-only、复杂/远端 signing 与隐藏输入仍未建模。
 M04 仍未完成：preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
@@ -510,7 +512,8 @@ Rust 编译；记录见
 [T06 iOS simulator manifest cache hit](../experiments/T06-ios-simulator-cache-hit-2026-09-28.md)。
 Android default-debug 切片在 BuildKey 纳入 debug keystore 指纹并完整验证 JNI/APK 输出后
 允许命中；#205 又为受控 local custom/release signing 的非 live build/run 纳入签名输入摘要并
-允许命中，复杂/远端 signing 与 Android live preview 仍 bypass；记录见
+允许命中；#209 又让显式 debug custom-signing live preview 纳入 signing fingerprint，并在
+verified manifest/coordinator 校验通过时命中；release-only、复杂/远端 signing 仍 bypass；记录见
 [T06 Android debug manifest cache hit](../experiments/T06-android-debug-cache-hit-2026-09-28.md) 和
 [T06 Android signing BuildKey](../experiments/T06-android-signing-build-key-2026-09-30.md)。
 Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次，验证 Android CLI
@@ -760,8 +763,8 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 ### T06 · 构建缓存与有界预热
 
 代码落点：`src/runner/build_cache.rs`、`src/commands/cache.rs` 已实现产物缓存/清理，preview
-build 另已接入 output-root lock、`.build-owner.json` ownership record 和普通 build/run coordinator；
-preview/check coordinator 与有界预热仍拟议。遵循 M04 BuildKey；现有切片与输入遗漏见 M04 和
+build 另已接入 output-root lock、`.build-owner.json` ownership record 和支持目标的 preview/check
+coordinator；有界预热仍拟议。遵循 M04 BuildKey；现有切片与输入遗漏见 M04 和
 [当前审计](current-status.md)。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。

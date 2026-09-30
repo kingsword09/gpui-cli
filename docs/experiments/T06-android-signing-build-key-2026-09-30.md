@@ -1,6 +1,7 @@
 # T06：Android local custom/release signing BuildKey（2026-09-30）
 
-状态：PR #205 已 squash 合并为 `142f58b`；后续 live frozen-preview 接线仍在当前实现切片中。
+状态：PR #205 已 squash 合并为 `142f58b`，PR #207 已 squash 合并为 `d90f66b`，PR #209 已 squash
+合并为 `a8a484f`。显式 debug custom-signing 的 live preview manifest/coordinator 接线已完成。
 本切片为 Android `build`/`run` 和 matrix/live frozen build 补齐一段可证明的本地 custom/release
 signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive 输出标为可复用。
 
@@ -22,25 +23,27 @@ signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive �
   cache lookup 前、Gradle 前后、manifest 发布前后和最终消费前均复核 signing inputs；建模的 release
   若产出 `-unsigned.apk`，不会作为签名敏感缓存继续发布/消费。
 - matrix frozen Android preview 会把同一组批准的 properties/keystore 以 `0600` 副本注入 snapshot，
-  并把 fingerprint 传入 preview 子进程；cargo-ndk/Gradle 前后复核该 fingerprint。custom signing
-  preview 允许正常构建和运行，但不发布/消费 preview artifact manifest，也不进入 preview coordinator。
+  并把 fingerprint 传入 preview 子进程；cargo-ndk/Gradle 前后复核该 fingerprint。显式
+  `buildTypes.debug.signingConfig` 的 custom-debug preview 会把该 fingerprint 纳入 preview BuildKey，
+  通过 verified JNI/APK manifest 发布与消费，并进入 preview coordinator；release-only signing、复杂
+  DSL、插件/远端 signing 仍保持 cache bypass。
 
 ## 验证
 
 - 单元测试覆盖签名 identity 摘要与变化重验、项目内 snapshot 注入和 `0600` 权限、secret 不进入
   manifest、项目外路径、软链接、复杂多脚本 signing bypass，以及 keystore 变化导致 native digest
   变化。
-- 本地通过 `cargo test --workspace --locked`（370 个单元测试及全部集成/协议测试）、
+- 本地通过 `cargo test --workspace --locked`（375 个单元测试及全部集成/协议测试）、
   `cargo clippy --workspace --all-targets --locked -- -D warnings`、workspace fmt、
   `cargo x check-design-docs` 和 `git diff --check`。
-- PR #205 的两套 required CI 中 Linux/macOS/Windows check、desktop-template、android-template、
+- PR #209 的两套 required CI 中 Linux/macOS/Windows check、desktop-template、android-template、
   baseline-driver 全部通过。没有发布版本或创建 tag。
 
 ## 未覆盖
 
 - Gradle wrapper distribution、AGP/plugin 隐藏读取、NDK/build-script I/O、远端 signing 服务、私钥
   可用性和同 revision 工具包内容变化仍未形成完整输入闭包。
-- Android live preview 只有 default-debug signing 进入 verified manifest/coordinator；custom/release/
-  signing-sensitive preview 现在可以在受控 frozen snapshot 中构建，但仍不发布可复用 manifest 或
-  进入 preview coordinator。
+- Android live preview 的 default-debug signing 与显式 debug custom signing 已进入 verified
+  manifest/coordinator；release-only、复杂/远端 signing 仍只允许受控 frozen snapshot 构建，不发布
+  可复用 manifest，也不进入 preview coordinator。
 - 本切片没有新增 emulator/device 安装、启动、capture 或完整 scenario 连续验收证据。
