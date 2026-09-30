@@ -20,6 +20,7 @@ const IGNORED: &[&str] = &[
     "Pods",
 ];
 const SENSITIVE_INPUT_FILE_NAMES: &[&str] = &["local.properties", "keystore.properties"];
+const SENSITIVE_INPUT_FILE_EXTENSIONS: &[&str] = &["jks", "keystore", "p12", "pfx"];
 
 pub fn should_trigger(path: &Path) -> bool {
     path.components().all(|part| {
@@ -185,6 +186,12 @@ impl NativeInputs {
                         .untracked_directory_links
                         .push(relative.to_string_lossy().replace('\\', "/"));
                 } else if kind.is_symlink() {
+                    if is_sensitive_input_file(&path) {
+                        result
+                            .excluded_sensitive_files
+                            .push(relative.to_string_lossy().replace('\\', "/"));
+                        continue;
+                    }
                     bail!(
                         "native input uses an untracked file symlink: {}",
                         relative.display()
@@ -217,9 +224,18 @@ fn native_should_trigger(path: &Path) -> bool {
 }
 
 fn is_sensitive_input_file(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|value| value.to_str())
-        .is_some_and(|name| SENSITIVE_INPUT_FILE_NAMES.contains(&name))
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    SENSITIVE_INPUT_FILE_NAMES.contains(&name)
+        || path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| {
+                SENSITIVE_INPUT_FILE_EXTENSIONS
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+            })
 }
 
 fn collect_native_file(root: &Path, path: &Path, result: &mut NativeInputs) -> Result<()> {
@@ -998,19 +1014,21 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let destination_parent = tempfile::tempdir().unwrap();
         let gradle = root.path().join("mobile/android/gradle");
-        fs::create_dir_all(&gradle).unwrap();
+        fs::create_dir_all(gradle.join("app")).unwrap();
         fs::write(gradle.join("local.properties"), "sdk.dir=/private/sdk\n").unwrap();
         fs::write(
             gradle.join("keystore.properties"),
             "storePassword=secret-value\n",
         )
         .unwrap();
+        fs::write(gradle.join("app/release.jks"), "private-keystore-bytes").unwrap();
 
         let first = Inputs::scan(root.path()).unwrap();
         assert!(first.sources.is_empty());
         assert_eq!(
             first.excluded_sensitive_files,
             vec![
+                "mobile/android/gradle/app/release.jks",
                 "mobile/android/gradle/keystore.properties",
                 "mobile/android/gradle/local.properties",
             ]
@@ -1041,6 +1059,11 @@ mod tests {
         assert!(
             !destination
                 .join("mobile/android/gradle/keystore.properties")
+                .exists()
+        );
+        assert!(
+            !destination
+                .join("mobile/android/gradle/app/release.jks")
                 .exists()
         );
         let serialized = serde_json::to_string(&frozen.manifest).unwrap();

@@ -39,6 +39,9 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "JAVA_HOME",
 ];
 
+const ANDROID_KEYSTORE_PROPERTIES_RELATIVE: &str = "mobile/android/gradle/keystore.properties";
+const ANDROID_SIGNING_EXTERNAL_HASH: &str = "android.custom-signing";
+
 /// A stable Cargo workspace copy whose lifetime is bound to a build command.
 /// The temporary parent is intentionally kept alive so Cargo cannot fall back
 /// to the mutable source workspace while the command is running.
@@ -64,6 +67,39 @@ impl FrozenBuildRoot {
             manifest: frozen.manifest,
             input_hash: frozen.input_hash,
         })
+    }
+
+    /// Copies one explicitly approved sensitive signing input into the
+    /// short-lived snapshot. The file is never included in the public input
+    /// manifest or BuildKey material directly; callers add only a digest.
+    fn copy_sensitive_file(&self, source: &Path, relative: &Path) -> Result<PathBuf> {
+        let metadata = fs::symlink_metadata(source)
+            .with_context(|| format!("checking sensitive signing input {}", source.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!(
+                "sensitive signing input is not a regular file: {}",
+                source.display()
+            );
+        }
+        let destination = self.root.join(relative);
+        if !destination.starts_with(&self.root) {
+            bail!("sensitive signing input escapes frozen workspace");
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, &destination).with_context(|| {
+            format!(
+                "copying sensitive signing input {} into snapshot",
+                source.display()
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(destination)
     }
 }
 
@@ -111,6 +147,7 @@ pub struct AndroidBuildPlan {
     pub snapshot: FrozenBuildRoot,
     pub cache_hit_disabled_reason: Option<String>,
     pub debug_keystore_identity: Option<AndroidDebugKeystoreIdentity>,
+    pub signing_identity: Option<AndroidSigningIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,6 +160,272 @@ pub struct AndroidPreviewCachePolicy {
 pub struct AndroidDebugKeystoreIdentity {
     path: PathBuf,
     sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AndroidSigningIdentity {
+    properties_path: PathBuf,
+    keystore_path: PathBuf,
+    properties_sha256: String,
+    keystore_sha256: String,
+    fingerprint: String,
+}
+
+impl AndroidSigningIdentity {
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub fn copy_into_snapshot(&self, snapshot: &FrozenBuildRoot, root: &Path) -> Result<()> {
+        let properties_relative = self.properties_path.strip_prefix(root).with_context(|| {
+            format!(
+                "Android signing properties are outside the project root: {}",
+                self.properties_path.display()
+            )
+        })?;
+        snapshot.copy_sensitive_file(&self.properties_path, properties_relative)?;
+        let keystore_relative = self.keystore_path.strip_prefix(root).with_context(|| {
+            format!(
+                "Android signing keystore is outside the project root: {}",
+                self.keystore_path.display()
+            )
+        })?;
+        snapshot.copy_sensitive_file(&self.keystore_path, keystore_relative)?;
+        self.verify_unchanged()?;
+        Ok(())
+    }
+
+    pub fn verify_unchanged(&self) -> Result<()> {
+        let properties = hash_regular_file(&self.properties_path)?;
+        let keystore = hash_regular_file(&self.keystore_path)?;
+        if properties != self.properties_sha256 || keystore != self.keystore_sha256 {
+            bail!("Android signing inputs changed during the build");
+        }
+        Ok(())
+    }
+}
+
+fn hash_regular_file(path: &Path) -> Result<String> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("checking signing input {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("signing input is not a regular file: {}", path.display());
+    }
+    let bytes =
+        fs::read(path).with_context(|| format!("reading signing input {}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+#[derive(Debug)]
+struct AndroidCacheSigningPolicy {
+    disabled_reason: Option<String>,
+    debug_keystore_identity: Option<AndroidDebugKeystoreIdentity>,
+    signing_identity: Option<AndroidSigningIdentity>,
+}
+
+fn android_custom_signing_identity(root: &Path) -> Result<Option<AndroidSigningIdentity>> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving Android signing project root {}", root.display()))?;
+    let properties_path = root.join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE);
+    let metadata = match fs::symlink_metadata(&properties_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "checking Android signing properties {}",
+                    properties_path.display()
+                )
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "Android signing properties are not a regular file: {}",
+            properties_path.display()
+        );
+    }
+
+    let contents = fs::read_to_string(&properties_path).with_context(|| {
+        format!(
+            "reading Android signing properties {}",
+            properties_path.display()
+        )
+    })?;
+    let store_file = parse_android_store_file(&contents)?;
+    let keystore_path = resolve_android_keystore_path(&root, &properties_path, &store_file)?;
+    let properties_sha256 = hash_regular_file(&properties_path)?;
+    let keystore_sha256 = hash_regular_file(&keystore_path)?;
+    let properties_relative = normalized_relative_path(&properties_path, &root)?;
+    let keystore_relative = normalized_relative_path(&keystore_path, &root)?;
+    let material = format!(
+        "properties-path={properties_relative}\nkeystore-path={keystore_relative}\nproperties-sha256={properties_sha256}\nkeystore-sha256={keystore_sha256}"
+    );
+
+    Ok(Some(AndroidSigningIdentity {
+        properties_path,
+        keystore_path,
+        properties_sha256,
+        keystore_sha256,
+        fingerprint: format!("{:x}", Sha256::digest(material.as_bytes())),
+    }))
+}
+
+fn parse_android_store_file(contents: &str) -> Result<String> {
+    let mut store_file = None;
+    for (line_number, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let delimiter = line.find(['=', ':']).with_context(|| {
+            format!(
+                "invalid Android signing properties line {}",
+                line_number + 1
+            )
+        })?;
+        let key = line[..delimiter].trim();
+        let value = decode_android_property_value(line[delimiter + 1..].trim())?;
+        if key == "storeFile" {
+            if store_file.is_some() {
+                bail!("Android signing properties contain duplicate storeFile entries");
+            }
+            if value.is_empty() {
+                bail!("Android signing properties contain an empty storeFile");
+            }
+            store_file = Some(value);
+        }
+    }
+    store_file.context("Android signing properties do not define storeFile")
+}
+
+fn decode_android_property_value(value: &str) -> Result<String> {
+    let mut decoded = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        let escaped = chars
+            .next()
+            .context("Android signing properties contain a trailing escape")?;
+        match escaped {
+            't' => decoded.push('\t'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            'f' => decoded.push('\u{000c}'),
+            'u' => {
+                let mut digits = String::with_capacity(4);
+                for _ in 0..4 {
+                    digits.push(chars.next().context(
+                        "Android signing properties contain an incomplete unicode escape",
+                    )?);
+                }
+                let code = u32::from_str_radix(&digits, 16)
+                    .context("Android signing properties contain an invalid unicode escape")?;
+                let character = char::from_u32(code)
+                    .context("Android signing properties contain an invalid unicode scalar")?;
+                decoded.push(character);
+            }
+            other => decoded.push(other),
+        }
+    }
+    Ok(decoded)
+}
+
+fn resolve_android_keystore_path(
+    root: &Path,
+    properties_path: &Path,
+    store_file: &str,
+) -> Result<PathBuf> {
+    let store_file = Path::new(store_file);
+    if store_file.is_absolute() {
+        bail!("Android signing storeFile must be relative to the project");
+    }
+
+    let properties_root = properties_path
+        .parent()
+        .context("Android signing properties have no parent directory")?;
+    let candidates = [
+        properties_root.join("app").join(store_file),
+        properties_root.join(store_file),
+        root.join(store_file),
+    ];
+    let mut matches = Vec::new();
+    for candidate in candidates {
+        let metadata = match fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("checking Android signing keystore {}", candidate.display())
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "Android signing keystore must not be a symlink: {}",
+                candidate.display()
+            );
+        }
+        if !metadata.is_file() {
+            bail!(
+                "Android signing storeFile is not a regular file: {}",
+                candidate.display()
+            );
+        }
+        let canonical = fs::canonicalize(&candidate).with_context(|| {
+            format!("resolving Android signing keystore {}", candidate.display())
+        })?;
+        if !is_android_keystore_path(&canonical) {
+            bail!(
+                "Android signing storeFile does not use a supported keystore file extension: {}",
+                candidate.display()
+            );
+        }
+        if !canonical.starts_with(root) {
+            bail!(
+                "Android signing keystore is outside the project root: {}",
+                candidate.display()
+            );
+        }
+        if !matches.contains(&canonical) {
+            matches.push(canonical);
+        }
+    }
+
+    let [keystore] = matches.as_slice() else {
+        if matches.is_empty() {
+            bail!("Android signing storeFile does not resolve to a project file");
+        }
+        bail!("Android signing storeFile resolves to multiple project files");
+    };
+    Ok(keystore.clone())
+}
+
+fn is_android_keystore_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["jks", "keystore", "p12", "pfx"]
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+        })
+}
+
+fn normalized_relative_path(path: &Path, root: &Path) -> Result<String> {
+    Ok(path
+        .strip_prefix(root)
+        .with_context(|| {
+            format!(
+                "path {} is outside Android project root {}",
+                path.display(),
+                root.display()
+            )
+        })?
+        .to_string_lossy()
+        .replace('\\', "/"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -493,21 +796,27 @@ pub fn android_preview_cache_policy(
         .with_context(|| format!("resolving Android preview root: {}", root.display()))?;
     let mut native = NativeInputs::scan(&root)?;
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&root)?;
-    let (signing_disabled_reason, debug_keystore_identity) =
-        android_cache_signing_policy(&root, release, &mut native)?;
+    let signing_policy = android_cache_signing_policy(&root, release, &mut native)?;
     let (_, rustc_fingerprint) = rustc_identity()?;
     let (_, toolchain_disabled_reason) = bind_android_toolchain_identity(
         &mut native,
         &rustc_fingerprint,
         android_toolchain_fingerprint(),
     );
+    let signing_disabled_reason = if signing_policy.signing_identity.is_some() {
+        Some("Android custom/release signing cache reuse is limited to non-live builds".into())
+    } else {
+        signing_policy.disabled_reason
+    };
     Ok(AndroidPreviewCachePolicy {
         disabled_reason: combine_cache_hit_disabled_reasons([
             toolchain_disabled_reason,
             signing_disabled_reason,
             build_script_disabled_reason,
         ]),
-        debug_keystore_hash: debug_keystore_identity.map(|identity| identity.sha256),
+        debug_keystore_hash: signing_policy
+            .debug_keystore_identity
+            .map(|identity| identity.sha256),
     })
 }
 
@@ -543,8 +852,10 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         .extend(snapshot.manifest.excluded_sensitive_files.iter().cloned());
     native.excluded_sensitive_files.sort();
     native.excluded_sensitive_files.dedup();
-    let (signing_disabled_reason, debug_keystore_identity) =
-        android_cache_signing_policy(&snapshot.root, release, &mut native)?;
+    let signing_policy = android_cache_signing_policy(&root, release, &mut native)?;
+    if let Some(identity) = &signing_policy.signing_identity {
+        identity.copy_into_snapshot(&snapshot, &root)?;
+    }
     let (toolchain_fingerprint, toolchain_disabled_reason) = bind_android_toolchain_identity(
         &mut native,
         &rustc_fingerprint,
@@ -552,7 +863,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     );
     let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
         toolchain_disabled_reason,
-        signing_disabled_reason,
+        signing_policy.disabled_reason,
         build_script_disabled_reason,
     ]);
     let key = build_key_from_inputs(
@@ -572,7 +883,8 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         layout,
         snapshot,
         cache_hit_disabled_reason,
-        debug_keystore_identity,
+        debug_keystore_identity: signing_policy.debug_keystore_identity,
+        signing_identity: signing_policy.signing_identity,
     })
 }
 
@@ -743,22 +1055,101 @@ fn android_cache_signing_policy(
     root: &Path,
     release: bool,
     native: &mut NativeInputs,
-) -> Result<(Option<String>, Option<AndroidDebugKeystoreIdentity>)> {
-    let has_custom_signing = !release
-        && native.excluded_sensitive_files.is_empty()
-        && has_custom_android_signing_config(root, native)?;
-    let identity = if !release && native.excluded_sensitive_files.is_empty() && !has_custom_signing
+) -> Result<AndroidCacheSigningPolicy> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("resolving Android signing project root {}", root.display()))?;
+    let has_custom_signing = has_custom_android_signing_config(&root, native)?;
+
+    if has_custom_signing {
+        let supported = supported_android_signing_config(&root, native)?;
+        let identity = if supported {
+            android_custom_signing_identity(&root).ok().flatten()
+        } else {
+            None
+        };
+        if let Some(identity) = identity {
+            let keystore_relative = normalized_relative_path(&identity.keystore_path, &root)?;
+            let has_unsupported_sensitive_input =
+                native.excluded_sensitive_files.iter().any(|path| {
+                    path != ANDROID_KEYSTORE_PROPERTIES_RELATIVE && path != &keystore_relative
+                });
+            if has_unsupported_sensitive_input {
+                return Ok(AndroidCacheSigningPolicy {
+                    disabled_reason: Some(
+                        "local sensitive Android configuration disables cache reuse".into(),
+                    ),
+                    debug_keystore_identity: None,
+                    signing_identity: None,
+                });
+            }
+            native.external_hashes.insert(
+                ANDROID_SIGNING_EXTERNAL_HASH.into(),
+                identity.fingerprint.clone(),
+            );
+            return Ok(AndroidCacheSigningPolicy {
+                disabled_reason: None,
+                debug_keystore_identity: None,
+                signing_identity: Some(identity),
+            });
+        }
+
+        native
+            .external_hashes
+            .insert(ANDROID_SIGNING_EXTERNAL_HASH.into(), "unavailable".into());
+        return Ok(AndroidCacheSigningPolicy {
+            disabled_reason: Some(
+                if supported {
+                    "Android custom signing inputs are unavailable or outside the project root; cache reuse is disabled"
+                } else {
+                    "Android custom signing configuration is not a supported local keystore.properties layout; cache reuse is disabled"
+                }
+                .into(),
+            ),
+            debug_keystore_identity: None,
+            signing_identity: None,
+        });
+    }
+
+    let has_unsupported_sensitive_input = native
+        .excluded_sensitive_files
+        .iter()
+        .any(|path| path != ANDROID_KEYSTORE_PROPERTIES_RELATIVE);
+    if has_unsupported_sensitive_input {
+        return Ok(AndroidCacheSigningPolicy {
+            disabled_reason: Some(
+                "local sensitive Android configuration disables cache reuse".into(),
+            ),
+            debug_keystore_identity: None,
+            signing_identity: None,
+        });
+    }
+
+    if native
+        .excluded_sensitive_files
+        .iter()
+        .any(|path| path == ANDROID_KEYSTORE_PROPERTIES_RELATIVE)
     {
+        return Ok(AndroidCacheSigningPolicy {
+            disabled_reason: Some(
+                "local sensitive Android configuration disables cache reuse".into(),
+            ),
+            debug_keystore_identity: None,
+            signing_identity: None,
+        });
+    }
+
+    let identity = if !release {
         default_android_debug_keystore_identity()?
     } else {
         None
     };
-    Ok(android_cache_hit_eligibility(
-        native,
-        release,
-        has_custom_signing,
-        identity,
-    ))
+    let (disabled_reason, debug_keystore_identity) =
+        android_cache_hit_eligibility(native, release, false, identity);
+    Ok(AndroidCacheSigningPolicy {
+        disabled_reason,
+        debug_keystore_identity,
+        signing_identity: None,
+    })
 }
 
 fn android_cache_hit_eligibility(
@@ -817,17 +1208,79 @@ fn has_custom_android_signing_config(root: &Path, native: &NativeInputs) -> Resu
         "keyPassword",
     ];
 
+    for (_, script) in android_signing_marker_scripts(root, native)? {
+        if SIGNING_MARKERS.iter().any(|marker| script.contains(marker)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn android_signing_marker_scripts<'a>(
+    root: &Path,
+    native: &'a NativeInputs,
+) -> Result<Vec<(&'a String, String)>> {
+    let mut scripts = Vec::new();
     for relative in native.files.keys().filter(|path| {
         path.starts_with("mobile/android/gradle/")
             && (path.ends_with(".gradle") || path.ends_with(".gradle.kts"))
     }) {
         let script = fs::read_to_string(root.join(relative))
             .with_context(|| format!("reading Android Gradle script {}", relative))?;
-        if SIGNING_MARKERS.iter().any(|marker| script.contains(marker)) {
-            return Ok(true);
-        }
+        scripts.push((relative, script));
     }
-    Ok(false)
+    Ok(scripts)
+}
+
+fn supported_android_signing_config(root: &Path, native: &NativeInputs) -> Result<bool> {
+    let scripts = android_signing_marker_scripts(root, native)?;
+    let signing_scripts = scripts
+        .iter()
+        .filter(|(_, script)| {
+            [
+                "signingConfig",
+                "signingConfigs",
+                "storeFile",
+                "storePassword",
+                "keyAlias",
+                "keyPassword",
+            ]
+            .iter()
+            .any(|marker| script.contains(marker))
+        })
+        .collect::<Vec<_>>();
+    let [(relative, script)] = signing_scripts.as_slice() else {
+        return Ok(false);
+    };
+    if relative.as_str() != "mobile/android/gradle/app/build.gradle"
+        && relative.as_str() != "mobile/android/gradle/app/build.gradle.kts"
+    {
+        return Ok(false);
+    }
+    if ![
+        "signingConfig",
+        "signingConfigs",
+        "storeFile",
+        "keystoreProperties",
+        "keystore.properties",
+        "keystoreProperties.load",
+    ]
+    .iter()
+    .all(|marker| script.contains(marker))
+    {
+        return Ok(false);
+    }
+
+    // The supported subset reads the checked-in app build script directly.
+    // Applied scripts, custom providers and other plugin-owned signing paths
+    // remain bypassed because their hidden inputs cannot be proven here.
+    if script.contains("apply from:")
+        || script.contains("apply(from")
+        || script.contains("signingConfigProvider")
+    {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn default_android_debug_keystore_identity() -> Result<Option<AndroidDebugKeystoreIdentity>> {
@@ -1626,6 +2079,257 @@ mod tests {
 
         let native = NativeInputs::scan(root.path()).unwrap();
         assert!(has_custom_android_signing_config(root.path(), &native).unwrap());
+    }
+
+    #[test]
+    fn supported_android_signing_identity_is_hashed_and_revalidated() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                plugins { id("com.android.application") }
+                val keystoreProperties = java.util.Properties()
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                android {
+                    signingConfigs {
+                        create("release") {
+                            storeFile = file(keystoreProperties["storeFile"] as String)
+                        }
+                    }
+                    buildTypes { release { signingConfig = signingConfigs.getByName("release") } }
+                }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            "storeFile=release.jks\nstorePassword=secret-value\n",
+        )
+        .unwrap();
+        fs::write(app.join("release.jks"), b"keystore-one").unwrap();
+
+        let mut native = NativeInputs::scan(root.path()).unwrap();
+        let policy = android_cache_signing_policy(root.path(), true, &mut native).unwrap();
+        assert!(policy.disabled_reason.is_none());
+        assert!(policy.debug_keystore_identity.is_none());
+        let identity = policy.signing_identity.unwrap();
+        assert_eq!(identity.fingerprint().len(), 64);
+        assert_eq!(
+            native
+                .external_hashes
+                .get(ANDROID_SIGNING_EXTERNAL_HASH)
+                .map(String::as_str),
+            Some(identity.fingerprint())
+        );
+        assert!(identity.verify_unchanged().is_ok());
+        assert!(
+            !serde_json::to_string(&native)
+                .unwrap()
+                .contains("secret-value")
+        );
+        let first_native_digest = native.digest();
+
+        fs::write(app.join("release.jks"), b"keystore-two").unwrap();
+        assert!(identity.verify_unchanged().is_err());
+        let mut second_native = NativeInputs::scan(root.path()).unwrap();
+        let second_policy =
+            android_cache_signing_policy(root.path(), true, &mut second_native).unwrap();
+        assert!(second_policy.signing_identity.is_some());
+        assert_ne!(first_native_digest, second_native.digest());
+    }
+
+    #[test]
+    fn android_custom_signing_rejects_external_and_symlink_keystores() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            "signingConfigs { create(\"release\") { storeFile = file(keystoreProperties[\"storeFile\"]) } }\nkeystoreProperties.load(FileInputStream(\"keystore.properties\"))\nsigningConfig\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            "storeFile=../outside.jks\n",
+        )
+        .unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("outside.jks"), b"outside").unwrap();
+        fs::remove_file(root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE)).unwrap();
+        fs::write(
+            root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            format!(
+                "storeFile={}\n",
+                outside.path().join("outside.jks").display()
+            ),
+        )
+        .unwrap();
+
+        let mut native = NativeInputs::scan(root.path()).unwrap();
+        let policy = android_cache_signing_policy(root.path(), true, &mut native).unwrap();
+        assert!(policy.signing_identity.is_none());
+        assert!(
+            policy
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("unavailable"))
+        );
+
+        #[cfg(unix)]
+        {
+            let inside = app.join("link.jks");
+            std::os::unix::fs::symlink(outside.path().join("outside.jks"), &inside).unwrap();
+            fs::write(
+                root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+                "storeFile=link.jks\n",
+            )
+            .unwrap();
+            let mut native = NativeInputs::default();
+            native.files.insert(
+                "mobile/android/gradle/app/build.gradle.kts".into(),
+                "script".into(),
+            );
+            native.excluded_sensitive_files.extend([
+                ANDROID_KEYSTORE_PROPERTIES_RELATIVE.into(),
+                "mobile/android/gradle/app/link.jks".into(),
+            ]);
+            let policy = android_cache_signing_policy(root.path(), true, &mut native).unwrap();
+            assert!(policy.signing_identity.is_none());
+            assert!(policy.disabled_reason.is_some());
+        }
+    }
+
+    #[test]
+    fn complex_android_signing_scripts_remain_cache_disabled() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        let build_logic = root.path().join("mobile/android/gradle/build-logic");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&build_logic).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            "signingConfigs { create(\"release\") { storeFile = file(keystoreProperties[\"storeFile\"]) } }\nkeystoreProperties.load(FileInputStream(\"keystore.properties\"))\nsigningConfig\n",
+        )
+        .unwrap();
+        fs::write(
+            build_logic.join("signing.gradle.kts"),
+            "signingConfig = remoteSigningConfig()\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            "storeFile=release.jks\n",
+        )
+        .unwrap();
+        fs::write(app.join("release.jks"), b"keystore").unwrap();
+
+        let mut native = NativeInputs::scan(root.path()).unwrap();
+        let policy = android_cache_signing_policy(root.path(), true, &mut native).unwrap();
+        assert!(policy.signing_identity.is_none());
+        assert!(
+            policy
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("not a supported"))
+        );
+    }
+
+    #[test]
+    fn android_build_plan_copies_supported_signing_inputs_without_manifest_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                plugins { id("com.android.application") }
+                val keystoreProperties = java.util.Properties()
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                android {
+                    signingConfigs { create("release") { storeFile = file(keystoreProperties["storeFile"] as String) } }
+                    buildTypes { release { signingConfig = signingConfigs.getByName("release") } }
+                }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            "storeFile=release.jks\nstorePassword=secret-value\n",
+        )
+        .unwrap();
+        fs::write(app.join("release.jks"), b"private-keystore-bytes").unwrap();
+        fs::create_dir_all(root.path().join("app/src")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/src/lib.rs"),
+            "pub fn value() -> u8 { 1 }\n",
+        )
+        .unwrap();
+        let status = Command::new("cargo")
+            .current_dir(root.path())
+            .args(["generate-lockfile"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let plan = android_build_plan(root.path(), true, &["arm64-v8a".into()]).unwrap();
+        assert!(plan.signing_identity.is_some());
+        let snapshot_properties = plan
+            .snapshot
+            .root
+            .join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE);
+        let snapshot_keystore = plan
+            .snapshot
+            .root
+            .join("mobile/android/gradle/app/release.jks");
+        assert!(snapshot_properties.is_file());
+        assert!(snapshot_keystore.is_file());
+        assert!(
+            plan.snapshot
+                .manifest
+                .excluded_sensitive_files
+                .contains(&ANDROID_KEYSTORE_PROPERTIES_RELATIVE.to_string())
+        );
+        assert!(
+            plan.snapshot
+                .manifest
+                .excluded_sensitive_files
+                .contains(&"mobile/android/gradle/app/release.jks".to_string())
+        );
+        let serialized_manifest = serde_json::to_string(&plan.snapshot.manifest).unwrap();
+        assert!(!serialized_manifest.contains("secret-value"));
+        assert!(!serialized_manifest.contains("private-keystore-bytes"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&snapshot_properties)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&snapshot_keystore)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

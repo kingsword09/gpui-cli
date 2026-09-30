@@ -1031,14 +1031,23 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     let layout = &plan.layout;
 
     let reusable = plan.cache_hit_disabled_reason.is_none();
+    if let Some(identity) = &plan.signing_identity {
+        identity.verify_unchanged()?;
+    }
     if reusable && let Some(identity) = &plan.debug_keystore_identity {
         identity.verify_unchanged()?;
     }
     let role = coordinated_build(layout, &plan.key, reusable, || {
+        if let Some(identity) = &plan.signing_identity {
+            identity.verify_unchanged()?;
+        }
         let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
             AndroidBuildCacheLookup::Miss(reason.clone())
         } else {
             if let Some(identity) = &plan.debug_keystore_identity {
+                identity.verify_unchanged()?;
+            }
+            if let Some(identity) = &plan.signing_identity {
                 identity.verify_unchanged()?;
             }
             lookup_verified_android_apk(project, layout, &plan.key, release)
@@ -1047,6 +1056,14 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
             AndroidBuildCacheLookup::Hit { manifest, .. } => {
                 if let Some(identity) = &plan.debug_keystore_identity {
                     identity.verify_unchanged()?;
+                }
+                if let Some(identity) = &plan.signing_identity {
+                    identity.verify_unchanged()?;
+                    ensure_installable_apk(&apk_path_at(
+                        project,
+                        release,
+                        layout.android_gradle_build_dir.as_deref(),
+                    )?)?;
                 }
                 println!(
                     "  {} Android BuildKey cache hit: {} verified artifact(s)",
@@ -1112,10 +1129,19 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
         )?;
 
         let apk = apk_path_at(project, release, Some(gradle_build_dir))?;
+        if plan.signing_identity.is_some() {
+            ensure_installable_apk(&apk)?;
+        }
         if let Some(identity) = &plan.debug_keystore_identity {
             identity.verify_unchanged()?;
         }
+        if let Some(identity) = &plan.signing_identity {
+            identity.verify_unchanged()?;
+        }
         publish_android_build_manifest(layout, &apk)?;
+        if let Some(identity) = &plan.signing_identity {
+            identity.verify_unchanged()?;
+        }
         println!(
             "  {} artifact manifest: {}",
             "✓".green(),
@@ -1134,15 +1160,24 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
             manifest.files.len()
         );
     }
+    if let Some(identity) = &plan.signing_identity {
+        identity.verify_unchanged()?;
+    }
     if reusable && let Some(identity) = &plan.debug_keystore_identity {
         identity.verify_unchanged()?;
     }
     match lookup_verified_android_apk(project, layout, &plan.key, release) {
-        AndroidBuildCacheLookup::Hit { .. } => apk_path_at(
-            project,
-            release,
-            plan.layout.android_gradle_build_dir.as_deref(),
-        ),
+        AndroidBuildCacheLookup::Hit { .. } => {
+            let apk = apk_path_at(
+                project,
+                release,
+                plan.layout.android_gradle_build_dir.as_deref(),
+            )?;
+            if plan.signing_identity.is_some() {
+                ensure_installable_apk(&apk)?;
+            }
+            Ok(apk)
+        }
         AndroidBuildCacheLookup::Miss(reason) => {
             bail!("Android build completed without the expected APK outputs: {reason}");
         }
