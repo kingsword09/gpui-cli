@@ -21,15 +21,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 
-pub const BUILD_COORDINATOR_SCHEMA_VERSION: u32 = 1;
+pub const BUILD_COORDINATOR_SCHEMA_VERSION: u32 = 2;
 pub const BUILD_COORDINATOR_CANCELLED_ERROR: &str = "coordinated BuildKey subscriber cancelled";
 pub const BUILD_COORDINATOR_PARTIAL_ERROR: &str =
     "coordinated BuildKey attempt produced partial artifacts";
+pub const BUILD_COORDINATOR_FENCING_LOST_ERROR: &str = "coordinated BuildKey owner fencing lost";
 pub const BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR: &str =
     "coordinated BuildKey leader superseded";
 pub const BUILD_COORDINATOR_LEADER_CANCELLED_ERROR: &str =
@@ -37,7 +38,10 @@ pub const BUILD_COORDINATOR_LEADER_CANCELLED_ERROR: &str =
 const BUILD_COORDINATOR_BUILD_KIND: &str = "build";
 const BUILD_COORDINATOR_PREVIEW_KIND: &str = "preview";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const HEARTBEAT_SUSPECT_AFTER: Duration = Duration::from_secs(30);
 const LEADER_ABANDONED_ERROR: &str = "build leader exited before publishing a terminal state";
+const LEADER_HEARTBEAT_STALE_ERROR: &str = "build leader heartbeat became stale";
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -61,8 +65,10 @@ pub struct BuildCoordinatorRecord {
     pub owner_id: String,
     pub pid: u32,
     pub started_at_ms: u64,
+    pub heartbeat_at_ms: u64,
     pub finished_at_ms: Option<u64>,
     pub state: BuildCoordinatorState,
+    pub fencing_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -91,6 +97,173 @@ pub struct BuildCoordinatorOutcome {
 struct BuildCoordinatorSubscription {
     path: PathBuf,
     _file: File,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HeartbeatOutcome {
+    Continue,
+    Terminal,
+}
+
+/// Refreshes the durable coordinator record while a leader owns the output
+/// lock. The OS output lock remains the liveness authority; this heartbeat is
+/// diagnostic and, together with the fencing token, prevents a stale leader
+/// from publishing over a newer attempt.
+struct BuildCoordinatorHeartbeat {
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    error: Arc<Mutex<Option<String>>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl BuildCoordinatorHeartbeat {
+    fn start(layout: &BuildOutputLayout, building: &BuildCoordinatorRecord) -> Result<Self> {
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+        let error = Arc::new(Mutex::new(None));
+        let thread_stop = Arc::clone(&stop);
+        let thread_error = Arc::clone(&error);
+        let thread_layout = layout.clone();
+        let expected = building.clone();
+        let handle = thread::Builder::new()
+            .name(format!(
+                "gpui-coordinator-heartbeat-{}",
+                building.attempt_id
+            ))
+            .spawn(move || {
+                coordinator_heartbeat_loop(thread_layout, expected, thread_error, thread_stop)
+            })
+            .context("starting BuildKey coordinator heartbeat")?;
+        Ok(Self {
+            stop,
+            error,
+            handle: Some(handle),
+        })
+    }
+
+    fn stop(mut self) -> Result<()> {
+        let (lock, condition) = &*self.stop;
+        if let Ok(mut stopped) = lock.lock() {
+            *stopped = true;
+            condition.notify_all();
+        }
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("BuildKey coordinator heartbeat thread panicked"))?;
+        }
+        if let Some(error) = self
+            .error
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            bail!("{error}");
+        }
+        Ok(())
+    }
+}
+
+fn coordinator_heartbeat_loop(
+    layout: BuildOutputLayout,
+    expected: BuildCoordinatorRecord,
+    error: Arc<Mutex<Option<String>>>,
+    stop: Arc<(Mutex<bool>, Condvar)>,
+) {
+    loop {
+        let (lock, condition) = &*stop;
+        let guard = match lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                record_heartbeat_error(&error, "coordinator heartbeat stop state was poisoned");
+                return;
+            }
+        };
+        let (guard, _) = match condition.wait_timeout(guard, HEARTBEAT_INTERVAL) {
+            Ok(result) => result,
+            Err(_) => {
+                record_heartbeat_error(&error, "coordinator heartbeat stop state was poisoned");
+                return;
+            }
+        };
+        if *guard {
+            return;
+        }
+        drop(guard);
+
+        match refresh_coordinator_heartbeat(&layout, &expected) {
+            Ok(HeartbeatOutcome::Continue) => {}
+            Ok(HeartbeatOutcome::Terminal) => return,
+            Err(error_value) => {
+                record_heartbeat_error(&error, &format!("{error_value:#}"));
+                return;
+            }
+        }
+    }
+}
+
+fn refresh_coordinator_heartbeat(
+    layout: &BuildOutputLayout,
+    expected: &BuildCoordinatorRecord,
+) -> Result<HeartbeatOutcome> {
+    let state_lock = open_state_lock(&layout.root)?;
+    let Some(current) = read_record(layout, &expected.kind)? else {
+        drop(state_lock);
+        bail!(BUILD_COORDINATOR_FENCING_LOST_ERROR);
+    };
+    if !same_coordinator_owner(&current, expected) {
+        drop(state_lock);
+        bail!(BUILD_COORDINATOR_FENCING_LOST_ERROR);
+    }
+    if current.state != BuildCoordinatorState::Building {
+        drop(state_lock);
+        return Ok(HeartbeatOutcome::Terminal);
+    }
+    let mut refreshed = current;
+    refreshed.heartbeat_at_ms = timestamp_ms();
+    write_record_locked(layout, &refreshed)?;
+    drop(state_lock);
+    Ok(HeartbeatOutcome::Continue)
+}
+
+fn same_coordinator_owner(
+    current: &BuildCoordinatorRecord,
+    expected: &BuildCoordinatorRecord,
+) -> bool {
+    current.schema_version == expected.schema_version
+        && current.kind == expected.kind
+        && current.platform == expected.platform
+        && current.key_hash == expected.key_hash
+        && current.attempt_id == expected.attempt_id
+        && current.owner_id == expected.owner_id
+        && current.fencing_token == expected.fencing_token
+}
+
+fn ensure_current_owner_locked(
+    layout: &BuildOutputLayout,
+    expected: &BuildCoordinatorRecord,
+) -> Result<BuildCoordinatorRecord> {
+    let Some(current) = read_record(layout, &expected.kind)? else {
+        bail!(BUILD_COORDINATOR_FENCING_LOST_ERROR);
+    };
+    if current.state != BuildCoordinatorState::Building
+        || !same_coordinator_owner(&current, expected)
+    {
+        bail!(BUILD_COORDINATOR_FENCING_LOST_ERROR);
+    }
+    Ok(current)
+}
+
+fn heartbeat_is_stale(record: &BuildCoordinatorRecord) -> bool {
+    let suspect_after_ms = HEARTBEAT_SUSPECT_AFTER
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    timestamp_ms().saturating_sub(record.heartbeat_at_ms) > suspect_after_ms
+}
+
+fn record_heartbeat_error(target: &Mutex<Option<String>>, message: &str) {
+    if let Ok(mut error) = target.lock() {
+        *error = Some(message.to_owned());
+    }
 }
 
 #[derive(Clone)]
@@ -198,6 +371,7 @@ impl BuildCoordinatorLeaderControl {
             None => {}
         }
 
+        ensure_current_owner_locked(&self.inner.layout, &self.inner.building)?;
         let terminal = self.terminal_record(result.as_ref().err());
         let state_result = write_record_locked(&self.inner.layout, &terminal);
         *self
@@ -231,6 +405,7 @@ impl BuildCoordinatorLeaderControl {
 
     fn terminal_record(&self, error: Option<&anyhow::Error>) -> BuildCoordinatorRecord {
         let mut record = self.inner.building.clone();
+        record.heartbeat_at_ms = timestamp_ms();
         record.finished_at_ms = Some(timestamp_ms());
         record.state = terminal_state(error);
         record.error = error.map(format_error);
@@ -301,6 +476,7 @@ impl BuildProcessCancellationProbe for BuildCoordinatorLeaderControl {
                 BuildCoordinatorCancellationReason::CallerCancelled,
             ),
         };
+        ensure_current_owner_locked(&self.inner.layout, &self.inner.building)?;
         let terminal_error = anyhow::anyhow!(error);
         let terminal = self.terminal_record(Some(&terminal_error));
         write_record_locked(&self.inner.layout, &terminal)?;
@@ -499,6 +675,7 @@ where
                         record.error.as_deref(),
                         Some(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)
                             | Some(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR)
+                            | Some(LEADER_HEARTBEAT_STALE_ERROR)
                     ) && active_subscriber_count(layout, &record.attempt_id)? > 0
                     {
                         bail!(
@@ -521,6 +698,7 @@ where
 
         let attempt_id = unique_id("attempt");
         let owner_id = unique_id("coordinator");
+        let fencing_token = unique_id("fence");
         let started_at_ms = timestamp_ms();
         let building = BuildCoordinatorRecord {
             schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
@@ -531,12 +709,15 @@ where
             owner_id,
             pid: process::id(),
             started_at_ms,
+            heartbeat_at_ms: started_at_ms,
             finished_at_ms: None,
             state: BuildCoordinatorState::Building,
+            fencing_token,
             error: None,
         };
         let subscription = subscribe(layout, &attempt_id)?;
         write_record(layout, &building)?;
+        let heartbeat = BuildCoordinatorHeartbeat::start(layout, &building)?;
         let control_cancellation_reason = Arc::clone(&cancellation_reason);
         let control =
             BuildCoordinatorLeaderControl::new(layout, building, subscription, move || {
@@ -549,6 +730,10 @@ where
         let result = match build_once(&control) {
             Ok(()) => verify(layout, key_hash),
             Err(error) => Err(error),
+        };
+        let result = match heartbeat.stop() {
+            Ok(()) => result,
+            Err(error) => Err(error).context("BuildKey coordinator heartbeat failed"),
         };
         let result = match result {
             Err(error) if format!("{error:#}").contains("superseded") => {
@@ -614,6 +799,7 @@ where
                         record.error.as_deref(),
                         Some(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)
                             | Some(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR)
+                            | Some(LEADER_HEARTBEAT_STALE_ERROR)
                     ) && active_subscriber_count(layout, &record.attempt_id)? > 0
                     {
                         bail!(
@@ -636,27 +822,29 @@ where
 
         let attempt_id = unique_id("attempt");
         let owner_id = unique_id("coordinator");
+        let fencing_token = unique_id("fence");
         let started_at_ms = timestamp_ms();
+        let building = BuildCoordinatorRecord {
+            schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
+            kind: kind.to_owned(),
+            platform: layout.platform,
+            key_hash: key_hash.to_string(),
+            attempt_id: attempt_id.clone(),
+            owner_id: owner_id.clone(),
+            pid: process::id(),
+            started_at_ms,
+            heartbeat_at_ms: started_at_ms,
+            finished_at_ms: None,
+            state: BuildCoordinatorState::Building,
+            fencing_token,
+            error: None,
+        };
         // The leader is also a live subscriber. Keeping this OS-locked file
         // until the terminal state is published prevents a concurrent caller
         // from treating a still-returning failed leader as abandoned.
         let mut leader_subscription = Some(subscribe(layout, &attempt_id)?);
-        write_record(
-            layout,
-            &BuildCoordinatorRecord {
-                schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
-                kind: kind.to_owned(),
-                platform: layout.platform,
-                key_hash: key_hash.to_string(),
-                attempt_id: attempt_id.clone(),
-                owner_id: owner_id.clone(),
-                pid: process::id(),
-                started_at_ms,
-                finished_at_ms: None,
-                state: BuildCoordinatorState::Building,
-                error: None,
-            },
-        )?;
+        write_record(layout, &building)?;
+        let heartbeat = BuildCoordinatorHeartbeat::start(layout, &building)?;
 
         let build_once = build
             .take()
@@ -666,12 +854,17 @@ where
             Ok(()) => verify(layout, key_hash),
             Err(error) => Err(error),
         };
-        let mut result = match result {
+        let result = match result {
             Err(error) if format!("{error:#}").contains("superseded") => {
                 Err(anyhow::anyhow!(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR))
             }
             result => result,
         };
+        let result = match heartbeat.stop() {
+            Ok(()) => result,
+            Err(error) => Err(error).context("BuildKey coordinator heartbeat failed"),
+        };
+        let mut result = result;
         let superseded = result
             .as_ref()
             .err()
@@ -711,22 +904,15 @@ where
             }
         }
 
-        let terminal = BuildCoordinatorRecord {
-            schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
-            kind: kind.to_owned(),
-            platform: layout.platform,
-            key_hash: key_hash.to_string(),
-            attempt_id: attempt_id.clone(),
-            owner_id,
-            pid: process::id(),
-            started_at_ms,
-            finished_at_ms: Some(timestamp_ms()),
-            state: terminal_state(result.as_ref().err()),
-            error: result.as_ref().err().map(format_error),
-        };
+        let terminal = terminal_record(&building, result.as_ref().err());
         let state_result = match terminal_state_lock.as_ref() {
-            Some(_) => write_record_locked(layout, &terminal),
-            None => write_record(layout, &terminal),
+            Some(_) => publish_terminal_record_locked(layout, &building, &terminal),
+            None => {
+                let state_lock = open_state_lock(&layout.root)?;
+                let result = publish_terminal_record_locked(layout, &building, &terminal);
+                drop(state_lock);
+                result
+            }
         };
         drop(lock);
         drop(terminal_state_lock);
@@ -798,15 +984,28 @@ fn wait_for_attempt(
                                 kind: kind.to_owned(),
                                 platform: layout.platform,
                                 key_hash: key_hash.to_string(),
-                                attempt_id: record.attempt_id,
-                                owner_id: record.owner_id,
+                                attempt_id: record.attempt_id.clone(),
+                                owner_id: record.owner_id.clone(),
                                 pid: record.pid,
                                 started_at_ms: record.started_at_ms,
+                                heartbeat_at_ms: timestamp_ms(),
                                 finished_at_ms: Some(timestamp_ms()),
                                 state: BuildCoordinatorState::Failed,
-                                error: Some(LEADER_ABANDONED_ERROR.into()),
+                                fencing_token: record.fencing_token.clone(),
+                                error: Some(if heartbeat_is_stale(&record) {
+                                    LEADER_HEARTBEAT_STALE_ERROR.into()
+                                } else {
+                                    LEADER_ABANDONED_ERROR.into()
+                                }),
                             };
-                            write_record(layout, &abandoned)?;
+                            let state_lock = open_state_lock(&layout.root)?;
+                            if let Some(current) = read_record(layout, kind)?
+                                && current.state == BuildCoordinatorState::Building
+                                && same_coordinator_owner(&current, &record)
+                            {
+                                write_record_locked(layout, &abandoned)?;
+                            }
+                            drop(state_lock);
                             drop(lock);
                             drop(subscription);
                             return Ok(WaitOutcome::Abandoned);
@@ -827,6 +1026,7 @@ fn wait_for_attempt(
                             Some(LEADER_ABANDONED_ERROR)
                                 | Some(BUILD_COORDINATOR_LEADER_SUPERSEDED_ERROR)
                                 | Some(BUILD_COORDINATOR_LEADER_CANCELLED_ERROR)
+                                | Some(LEADER_HEARTBEAT_STALE_ERROR)
                         ) {
                             drop(subscription);
                             return Ok(WaitOutcome::Abandoned);
@@ -860,15 +1060,28 @@ fn wait_for_attempt(
                             kind: kind.to_owned(),
                             platform: layout.platform,
                             key_hash: key_hash.to_string(),
-                            attempt_id: record.attempt_id,
-                            owner_id: record.owner_id,
+                            attempt_id: record.attempt_id.clone(),
+                            owner_id: record.owner_id.clone(),
                             pid: record.pid,
                             started_at_ms: record.started_at_ms,
+                            heartbeat_at_ms: timestamp_ms(),
                             finished_at_ms: Some(timestamp_ms()),
                             state: BuildCoordinatorState::Failed,
-                            error: Some(LEADER_ABANDONED_ERROR.into()),
+                            fencing_token: record.fencing_token.clone(),
+                            error: Some(if heartbeat_is_stale(&record) {
+                                LEADER_HEARTBEAT_STALE_ERROR.into()
+                            } else {
+                                LEADER_ABANDONED_ERROR.into()
+                            }),
                         };
-                        write_record(layout, &abandoned)?;
+                        let state_lock = open_state_lock(&layout.root)?;
+                        if let Some(current) = read_record(layout, kind)?
+                            && current.state == BuildCoordinatorState::Building
+                            && same_coordinator_owner(&current, &record)
+                        {
+                            write_record_locked(layout, &abandoned)?;
+                        }
+                        drop(state_lock);
                     }
                     drop(lock);
                     drop(subscription);
@@ -1211,6 +1424,27 @@ fn terminal_state(error: Option<&anyhow::Error>) -> BuildCoordinatorState {
     }
 }
 
+fn terminal_record(
+    building: &BuildCoordinatorRecord,
+    error: Option<&anyhow::Error>,
+) -> BuildCoordinatorRecord {
+    let mut terminal = building.clone();
+    terminal.heartbeat_at_ms = timestamp_ms();
+    terminal.finished_at_ms = Some(timestamp_ms());
+    terminal.state = terminal_state(error);
+    terminal.error = error.map(format_error);
+    terminal
+}
+
+fn publish_terminal_record_locked(
+    layout: &BuildOutputLayout,
+    building: &BuildCoordinatorRecord,
+    terminal: &BuildCoordinatorRecord,
+) -> Result<()> {
+    ensure_current_owner_locked(layout, building)?;
+    write_record_locked(layout, terminal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1250,6 +1484,135 @@ mod tests {
             .unwrap()
             .write_atomic(&layout.artifact_manifest_path())
             .unwrap();
+    }
+
+    fn building_record(
+        layout: &BuildOutputLayout,
+        kind: &str,
+        attempt_id: &str,
+        owner_id: &str,
+        fencing_token: &str,
+        heartbeat_at_ms: u64,
+    ) -> BuildCoordinatorRecord {
+        BuildCoordinatorRecord {
+            schema_version: BUILD_COORDINATOR_SCHEMA_VERSION,
+            kind: kind.to_owned(),
+            platform: layout.platform,
+            key_hash: layout.key_hash.clone(),
+            attempt_id: attempt_id.to_owned(),
+            owner_id: owner_id.to_owned(),
+            pid: process::id(),
+            started_at_ms: heartbeat_at_ms,
+            heartbeat_at_ms,
+            finished_at_ms: None,
+            state: BuildCoordinatorState::Building,
+            fencing_token: fencing_token.to_owned(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn coordinator_heartbeat_refreshes_only_the_current_fence() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        fs::create_dir_all(&layout.root).unwrap();
+        let building = building_record(
+            &layout,
+            BUILD_COORDINATOR_BUILD_KIND,
+            "attempt-a",
+            "owner-a",
+            "fence-a",
+            1,
+        );
+        write_record(&layout, &building).unwrap();
+
+        assert_eq!(
+            refresh_coordinator_heartbeat(&layout, &building).unwrap(),
+            HeartbeatOutcome::Continue
+        );
+        let refreshed = read_record(&layout, BUILD_COORDINATOR_BUILD_KIND)
+            .unwrap()
+            .unwrap();
+        assert!(refreshed.heartbeat_at_ms >= building.heartbeat_at_ms);
+        assert_eq!(refreshed.fencing_token, "fence-a");
+
+        let replacement = building_record(
+            &layout,
+            BUILD_COORDINATOR_BUILD_KIND,
+            "attempt-b",
+            "owner-b",
+            "fence-b",
+            refreshed.heartbeat_at_ms,
+        );
+        write_record(&layout, &replacement).unwrap();
+        let error = refresh_coordinator_heartbeat(&layout, &building).unwrap_err();
+        assert!(format!("{error:#}").contains(BUILD_COORDINATOR_FENCING_LOST_ERROR));
+        assert_eq!(
+            read_record(&layout, BUILD_COORDINATOR_BUILD_KIND)
+                .unwrap()
+                .unwrap()
+                .attempt_id,
+            "attempt-b"
+        );
+    }
+
+    #[test]
+    fn terminal_publish_refuses_a_replaced_coordinator_owner() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        fs::create_dir_all(&layout.root).unwrap();
+        let building = building_record(
+            &layout,
+            BUILD_COORDINATOR_BUILD_KIND,
+            "attempt-a",
+            "owner-a",
+            "fence-a",
+            timestamp_ms(),
+        );
+        write_record(&layout, &building).unwrap();
+        let replacement = building_record(
+            &layout,
+            BUILD_COORDINATOR_BUILD_KIND,
+            "attempt-b",
+            "owner-b",
+            "fence-b",
+            timestamp_ms(),
+        );
+        write_record(&layout, &replacement).unwrap();
+
+        let terminal = terminal_record(&building, None);
+        let state_lock = open_state_lock(&layout.root).unwrap();
+        let error = publish_terminal_record_locked(&layout, &building, &terminal).unwrap_err();
+        drop(state_lock);
+        assert!(format!("{error:#}").contains(BUILD_COORDINATOR_FENCING_LOST_ERROR));
+        assert_eq!(
+            read_record(&layout, BUILD_COORDINATOR_BUILD_KIND)
+                .unwrap()
+                .unwrap()
+                .attempt_id,
+            "attempt-b"
+        );
+    }
+
+    #[test]
+    fn stale_heartbeat_never_bypasses_the_output_os_lock() {
+        let base = tempfile::tempdir().unwrap();
+        let layout = layout(base.path());
+        fs::create_dir_all(&layout.root).unwrap();
+        let stale = building_record(
+            &layout,
+            BUILD_COORDINATOR_BUILD_KIND,
+            "attempt-a",
+            "owner-a",
+            "fence-a",
+            1,
+        );
+        assert!(heartbeat_is_stale(&stale));
+        write_record(&layout, &stale).unwrap();
+
+        let lock = BuildOutputLock::acquire(&layout).unwrap();
+        assert!(BuildOutputLock::try_acquire(&layout).unwrap().is_none());
+        drop(lock);
     }
 
     #[test]
@@ -2075,8 +2438,10 @@ mod tests {
             owner_id: "stale-owner".into(),
             pid: 1,
             started_at_ms: 1,
+            heartbeat_at_ms: 1,
             finished_at_ms: None,
             state: BuildCoordinatorState::Building,
+            fencing_token: "stale-fence".into(),
             error: None,
         };
         write_record(&layout, &stale).unwrap();
