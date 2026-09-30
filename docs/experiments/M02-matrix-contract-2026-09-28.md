@@ -39,6 +39,10 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 - scenario executor 在初始 prepare/reset/observation 阶段失败时，也会先调用 runner 的
   finalization boundary 再 cleanup；因此已启动但未发布 `scenario_ready` 的移动 preview
   仍有机会收集 native logs 和其他 post-run evidence，原始失败仍保留为主错误。
+- action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
+  `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
+  失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
+  或据此伪造 passed。
 - gpui check --matrix <file> 已接入 admission、并行 executor 和本机 desktop scenario
   runner；它输出完整 matrix report，required 非 passed 会以失败退出。移动 cell 现在通过
   control-driven scenario runner 执行同一套 step/observation/action/reset 边界，并由父进程
@@ -70,6 +74,8 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   admission 或 screenshot 成功不会替它们伪造通过。
 - early prepare failure 的 finalization 只保证证据收集顺序，不把未 ready 的 preview 变成
   passed；finalization 本身失败仍按 inconclusive/cleanup 边界记录。
+- 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；
+  unknown 结果仍为 inconclusive，不能重放或降格成普通失败/通过。
 - 没有完成 frozen snapshot build、真实 macOS+iOS simulator+Android emulator 矩阵报告、
   远程 runner 或完整设备故障矩阵；这些仍是 M02 后续验收。
 

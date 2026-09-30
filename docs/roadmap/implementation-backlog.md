@@ -566,7 +566,8 @@ assert、capture 的状态转移。断言支持 schema v1 的语义字段、runt
 伪造成失败。每步保留 observation/log 序号、action/断言/capture 证据；终止步骤后的依赖
 步骤显式 `skipped`，cleanup 错误不会覆盖原始失败或 unknown；初始 prepare/reset/observation
 失败时先调用 finalization，再执行 cleanup，以保留已启动移动 preview 的 native-log/post-run
-evidence。记录见
+evidence；action operation 错误详情包含 operation ID 时，step action evidence 保留其状态和
+ID，unknown 仍为 inconclusive 且不得重放或伪造成 passed。记录见
 [S04 check core](../experiments/S04-check-core-2026-09-28.md)。
 
 当前 desktop 接线已交付：`gpui check --scenario <id> --target desktop` 启动隔离的
@@ -694,8 +695,9 @@ output layout 并串行同 key cell，#165 已让 preview builder 锁定对应 o
 control scenario cell 保留完整 CheckReport；#211 又接入 supervisor-owned delegated lease、实际
 run 的 capture/native-log/stop evidence 和 `CheckContext.mobile_evidence`；#213 又将 Android
 display evidence 传入 capture/check evidence；#215 又让初始 prepare/reset/observation 失败的
-scenario 先 finalize 再 cleanup，保留已启动移动 preview 的 post-run evidence；跨命令共享构建
-所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入。
+scenario 先 finalize 再 cleanup，保留已启动移动 preview 的 post-run evidence；#217 又在 action
+operation 错误详情含 ID 时保留 step action status/operation ID，unknown 仍不重放且保持
+inconclusive；跨命令共享构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
