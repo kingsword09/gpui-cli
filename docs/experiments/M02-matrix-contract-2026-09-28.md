@@ -36,6 +36,9 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
   logs；process identity/log assignment 不确定时为 inconclusive，capture artifact 仍保留。
 - mobile cleanup 即使 prepare/launch/capture 中途失败也会尝试 stop_owned，随后释放本次
   host lease；它不关闭用户启动的 simulator/emulator，也不把 lease 丢失当作成功。
+- scenario executor 在初始 prepare/reset/observation 阶段失败时，也会先调用 runner 的
+  finalization boundary 再 cleanup；因此已启动但未发布 `scenario_ready` 的移动 preview
+  仍有机会收集 native logs 和其他 post-run evidence，原始失败仍保留为主错误。
 - gpui check --matrix <file> 已接入 admission、并行 executor 和本机 desktop scenario
   runner；它输出完整 matrix report，required 非 passed 会以失败退出。移动 cell 现在通过
   control-driven scenario runner 执行同一套 step/observation/action/reset 边界，并由父进程
@@ -65,6 +68,8 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   scene capture 或视觉 baseline 通过。
 - semantics、input 和 reset 必须由当前移动 runtime/control provider 实际声明并成功响应；
   admission 或 screenshot 成功不会替它们伪造通过。
+- early prepare failure 的 finalization 只保证证据收集顺序，不把未 ready 的 preview 变成
+  passed；finalization 本身失败仍按 inconclusive/cleanup 边界记录。
 - 没有完成 frozen snapshot build、真实 macOS+iOS simulator+Android emulator 矩阵报告、
   远程 runner 或完整设备故障矩阵；这些仍是 M02 后续验收。
 
