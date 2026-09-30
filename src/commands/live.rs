@@ -1437,7 +1437,8 @@ fn build_android_apk_live(
     verify_android_preview_signing_inputs(project, outputs.as_ref())?;
     if let Some(outputs) = &outputs
         && let Some(key_hash) = outputs.build_key_hash.as_deref()
-        && let Some(expected_keystore_hash) = outputs.android_debug_keystore_hash.as_deref()
+        && (outputs.android_debug_keystore_hash.is_some()
+            || outputs.android_signing_fingerprint.is_some())
         && outputs.cache_hit_disabled_reason.is_none()
     {
         let jni_libs_dir = outputs
@@ -1451,13 +1452,16 @@ fn build_android_apk_live(
         let apk_output_dir = gradle_build_dir.join("outputs/apk/debug");
         let layout = preview_android_output_layout(outputs, key_hash);
         let verify = |layout: &BuildOutputLayout, key_hash: &str| {
-            let current_keystore_hash = android_debug_keystore_hash()?
-                .context("default Android debug keystore is unavailable for preview reuse")?;
-            if current_keystore_hash != expected_keystore_hash {
-                bail!(
-                    "Android debug keystore changed after the preview BuildKey was planned; restart the preview"
-                );
+            if let Some(expected_keystore_hash) = outputs.android_debug_keystore_hash.as_deref() {
+                let current_keystore_hash = android_debug_keystore_hash()?
+                    .context("default Android debug keystore is unavailable for preview reuse")?;
+                if current_keystore_hash != expected_keystore_hash {
+                    bail!(
+                        "Android debug keystore changed after the preview BuildKey was planned; restart the preview"
+                    );
+                }
             }
+            verify_android_preview_signing_inputs(project, Some(outputs))?;
             verify_preview_android_output(layout, key_hash, jni_libs_dir, &apk_output_dir)
         };
         coordinate_preview_build_controlled(
@@ -1502,7 +1506,8 @@ fn build_android_apk_live_once(
     let cache_key = outputs.and_then(|outputs| outputs.build_key_hash.as_deref());
     let cache_hit_enabled = outputs.is_some_and(|outputs| {
         outputs.cache_hit_disabled_reason.is_none()
-            && outputs.android_debug_keystore_hash.is_some()
+            && (outputs.android_debug_keystore_hash.is_some()
+                || outputs.android_signing_fingerprint.is_some())
             && cache_key.is_some()
     });
     if let Some(outputs) = outputs
@@ -1512,17 +1517,16 @@ fn build_android_apk_live_once(
     }
     if cache_hit_enabled {
         let outputs = outputs.expect("cache hit requires preview outputs");
-        let expected_keystore_hash = outputs
-            .android_debug_keystore_hash
-            .as_deref()
-            .expect("cache hit requires the Android debug keystore hash");
-        let current_keystore_hash = android_debug_keystore_hash()?
-            .context("default Android debug keystore is unavailable for preview cache reuse")?;
-        if current_keystore_hash != expected_keystore_hash {
-            bail!(
-                "Android debug keystore changed after the preview BuildKey was planned; restart the preview"
-            );
+        if let Some(expected_keystore_hash) = outputs.android_debug_keystore_hash.as_deref() {
+            let current_keystore_hash = android_debug_keystore_hash()?
+                .context("default Android debug keystore is unavailable for preview cache reuse")?;
+            if current_keystore_hash != expected_keystore_hash {
+                bail!(
+                    "Android debug keystore changed after the preview BuildKey was planned; restart the preview"
+                );
+            }
         }
+        verify_android_preview_signing_inputs(project, Some(outputs))?;
 
         match super::run::apk_path_at(project, false, gradle_build_dir.as_deref()) {
             Ok(apk) => {
@@ -1629,9 +1633,7 @@ fn build_android_apk_live_once(
                 );
             }
         }
-        if outputs.android_signing_fingerprint.is_none() {
-            publish_preview_android_manifest(&outputs.output_root, key_hash, &jni_libs_dir, &apk)?;
-        }
+        publish_preview_android_manifest(&outputs.output_root, key_hash, &jni_libs_dir, &apk)?;
     }
     verify_android_preview_signing_inputs(project, outputs)?;
     println!("  {} {}", "✓".green(), apk.display());
