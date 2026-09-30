@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-09-30，主分支 `058d2c6`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-09-30，主分支 `8da659e`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -369,8 +369,9 @@ iOS/Android 的安装、启动、Android 配置/资源写入包进 lease fencing
 截图命令及 `gpui device capture` 也已通过同一 lease 接入。`gpui check --matrix` 的移动
 scenario driver 现在复用该 lease 做 native capture；#211 又让 matrix supervisor 持有唯一
 lease、preview 子进程使用 owner delegation，并把实际 run 的 capture/native-log/stop evidence
-写入 `CheckContext.mobile_evidence`；设备重连状态机、完整截图 artifact manifest 和真实设备矩阵
-证据仍未完成，不能把当前测试写成 M01/M02 的真实设备验收。记录见
+写入 `CheckContext.mobile_evidence`；#213 又让 Android capture best-effort 补充逻辑 viewport、
+scale、方向和保守前台包名，并在 probe 缺失时保留 unknown；设备重连状态机、完整截图 artifact
+manifest 和真实设备矩阵证据仍未完成，不能把当前测试写成 M01/M02 的真实设备验收。记录见
 [M03 device lease](../experiments/M03-device-lease-2026-09-28.md)。
 
 ### M04 · 冻结源码与确定构建键
@@ -597,8 +598,10 @@ snapshot，所有 cell 复用其 runtime root/hash。完整 GUI check cleanup/re
 当前 context 已随单场景 `CheckReport` 和每个 control scenario `MatrixCellResult` 输出；
 matrix control cell 现在也保留完整 steps/证据/cleanup，#211 又让移动 preview 使用 supervisor-owned
 delegated lease，并把实际 run 的 capture/native-log/stop evidence 写入
-`CheckContext.mobile_evidence`；admission-unavailable 与 capture-only mobile lifecycle cell
-不生成伪造 scenario report。移动完整语义/输入和真实设备验收仍未完成。
+`CheckContext.mobile_evidence`；#213 又将 Android capture 的逻辑 viewport、scale、方向和保守
+前台包名写入 artifact/check evidence，缺失 probe 保持 unknown；admission-unavailable 与
+capture-only mobile lifecycle cell 不生成伪造 scenario report。移动完整语义/输入和真实设备
+验收仍未完成。
 
 视觉 baseline 静态契约已单独交付：`src/scenario/baseline.rs` 读取项目内
 `dev/baselines/<target>/<baseline_id>/manifest.json`，拒绝越界/符号链接/超限文件，校验
@@ -667,11 +670,13 @@ artifact 接线和报告证据见
 2. 启动日志 collector，在 early native crash、PID 切换、app channel 未建立时仍有证据；不能归属的日志单独保存。
 3. 将安装/launch/进程证据分离；断线不等于退出，设备截图不等于 scene capture。
 4. 分别跑完整 GPUI Android emulator/iOS simulator 应用，包含键盘、系统弹窗、旋转和后台切换。
+5. Android capture 通过 display probe 记录像素/逻辑尺寸、density-derived scale、方向和明确
+   foreground marker；命令或厂商输出缺失时报告 unknown，不从 PNG 猜测环境。
 
 PR 拆分：runner trait/契约（已交付）→ iOS simulator adapter（已交付基础路径）→ Android adapter
 （已交付基础路径）→ Android process identity（已交付）→ iOS simulator process probe（当前切片）
 → mobile fault evidence boundary（当前切片）→ delegated lease/same-run evidence（已交付切片）
-→ 真模拟器故障矩阵。验收
+→ Android display evidence（已交付）→ 真模拟器故障矩阵。验收
 M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 desktop；不以宿主 APK 打包
 测试宣称运行通过。契约记录见
 [M01 runner contract](../experiments/M01-runner-contract-2026-09-28.md)。
@@ -685,8 +690,9 @@ scenario driver。#157 已接入 M04 的共享冻结 snapshot 输入边界，#15
 传入 MatrixReport，#161 已将 target-specific BuildKey 写入 context，#163 已绑定 source-project
 output layout 并串行同 key cell，#165 已让 preview builder 锁定对应 output root，#167 已让
 control scenario cell 保留完整 CheckReport；#211 又接入 supervisor-owned delegated lease、实际
-run 的 capture/native-log/stop evidence 和 `CheckContext.mobile_evidence`；跨命令共享构建所有权、
-移动完整语义/输入 scenario 和真实矩阵仍未接入。
+run 的 capture/native-log/stop evidence 和 `CheckContext.mobile_evidence`；#213 又将 Android
+display evidence 传入 capture/check evidence；跨命令共享构建所有权、移动完整语义/输入 scenario
+和真实矩阵仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
