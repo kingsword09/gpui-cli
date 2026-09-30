@@ -102,6 +102,7 @@ pub struct IosBuildPlan {
     pub layout: BuildOutputLayout,
     pub snapshot: FrozenBuildRoot,
     pub cache_hit_disabled_reason: Option<String>,
+    pub physical_signing_identity: Option<IosPhysicalSigningIdentity>,
 }
 
 pub struct AndroidBuildPlan {
@@ -122,6 +123,28 @@ pub struct AndroidPreviewCachePolicy {
 pub struct AndroidDebugKeystoreIdentity {
     path: PathBuf,
     sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IosPhysicalSigningIdentity {
+    fingerprint: String,
+}
+
+impl IosPhysicalSigningIdentity {
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Refuses to reuse or publish a physical-device artifact if the local
+    /// signing identities or provisioning profiles changed during the build.
+    pub fn verify_unchanged(&self) -> Result<()> {
+        let current = ios_physical_signing_fingerprint()?
+            .context("iOS physical signing identities or provisioning profiles unavailable")?;
+        if current != self.fingerprint {
+            bail!("iOS physical signing inputs changed during the build");
+        }
+        Ok(())
+    }
 }
 
 impl AndroidDebugKeystoreIdentity {
@@ -209,9 +232,13 @@ pub fn ios_build_plan(root: &Path, release: bool, rust_target: &str) -> Result<I
     let xcode_fingerprint = ios_xcode_sdk_fingerprint(rust_target);
     let (toolchain_fingerprint, cache_hit_disabled_reason) =
         bind_ios_toolchain_identity(&mut native, &rustc_fingerprint, xcode_fingerprint);
+    let physical = rust_target == "aarch64-apple-ios";
+    let (signing_disabled_reason, physical_signing_identity) =
+        bind_ios_physical_signing_identity(&mut native, physical)?;
     let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
         cache_hit_disabled_reason,
         build_script_disabled_reason,
+        signing_disabled_reason,
     ]);
     let key = build_key_from_inputs(
         &snapshot.manifest,
@@ -229,6 +256,7 @@ pub fn ios_build_plan(root: &Path, release: bool, rust_target: &str) -> Result<I
         layout,
         snapshot,
         cache_hit_disabled_reason,
+        physical_signing_identity,
     })
 }
 
@@ -241,6 +269,8 @@ pub fn ios_build_key(root: &Path, release: bool, rust_target: &str) -> Result<Bu
     let xcode_fingerprint = ios_xcode_sdk_fingerprint(rust_target);
     let (toolchain_fingerprint, _) =
         bind_ios_toolchain_identity(&mut native, &rustc_fingerprint, xcode_fingerprint);
+    let physical = rust_target == "aarch64-apple-ios";
+    let _ = bind_ios_physical_signing_identity(&mut native, physical)?;
     build_key_from_inputs(
         &manifest,
         manifest.digest(),
@@ -298,6 +328,113 @@ fn bind_ios_toolchain_identity(
         format!("{:x}", Sha256::digest(combined.as_bytes())),
         disabled_reason,
     )
+}
+
+fn bind_ios_physical_signing_identity(
+    native: &mut NativeInputs,
+    physical: bool,
+) -> Result<(Option<String>, Option<IosPhysicalSigningIdentity>)> {
+    if !physical {
+        return Ok((None, None));
+    }
+    let fingerprint = ios_physical_signing_fingerprint()?;
+    let identity = fingerprint.map(|fingerprint| IosPhysicalSigningIdentity { fingerprint });
+    match identity {
+        Some(identity) => {
+            native
+                .external_hashes
+                .insert("ios.physical-signing".into(), identity.fingerprint.clone());
+            Ok((None, Some(identity)))
+        }
+        None => {
+            native
+                .external_hashes
+                .insert("ios.physical-signing".into(), "unavailable".into());
+            Ok((
+                Some(
+                    "iOS physical signing identities or provisioning profiles are unavailable; cache reuse is disabled"
+                        .into(),
+                ),
+                None,
+            ))
+        }
+    }
+}
+
+fn ios_physical_signing_fingerprint() -> Result<Option<String>> {
+    if !cfg!(target_os = "macos") {
+        return Ok(None);
+    }
+
+    let identities = Command::new("security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+        .context("reading iOS code-signing identities")?;
+    if !identities.status.success() {
+        return Ok(None);
+    }
+    let identity_fingerprints = String::from_utf8_lossy(&identities.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (_, remainder) = line.split_once(')')?;
+            let fingerprint = remainder.split_whitespace().next()?;
+            (fingerprint.len() == 40 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .then(|| fingerprint.to_ascii_uppercase())
+        })
+        .collect::<Vec<_>>();
+    if identity_fingerprints.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let mut profile_hashes = Vec::new();
+    for profiles_dir in [
+        home.join("Library/MobileDevice/Provisioning Profiles"),
+        home.join("Library/Developer/Xcode/UserData/Provisioning Profiles"),
+    ] {
+        let entries = match fs::read_dir(&profiles_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context("scanning iOS provisioning profiles"),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension() != Some(OsStr::new("mobileprovision")) {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                continue;
+            }
+            let bytes = fs::read(&path)
+                .with_context(|| format!("reading iOS provisioning profile {}", path.display()))?;
+            profile_hashes.push(format!("{:x}", Sha256::digest(bytes)));
+        }
+    }
+    Ok(ios_signing_fingerprint(
+        &identity_fingerprints,
+        &profile_hashes,
+    ))
+}
+
+fn ios_signing_fingerprint(identities: &[String], profiles: &[String]) -> Option<String> {
+    if identities.is_empty() || profiles.is_empty() {
+        return None;
+    }
+    let mut identities = identities.to_vec();
+    identities.sort();
+    identities.dedup();
+    let mut profiles = profiles.to_vec();
+    profiles.sort();
+    profiles.dedup();
+    let material = format!(
+        "identities={}\nprofiles={}",
+        identities.join("\n"),
+        profiles.join("\n")
+    );
+    Some(format!("{:x}", Sha256::digest(material.as_bytes())))
 }
 
 /// Collects the BuildKey and isolated output layout used by a non-live
@@ -1000,6 +1137,71 @@ mod tests {
                 .get("ios.xcode-sdk-toolchain")
                 .map(String::as_str),
             Some("unavailable")
+        );
+    }
+
+    #[test]
+    fn ios_physical_signing_identity_is_keyed_and_missing_inputs_disable_reuse() {
+        let mut simulator_native = NativeInputs::default();
+        let (simulator_reason, simulator_identity) =
+            bind_ios_physical_signing_identity(&mut simulator_native, false).unwrap();
+        assert!(simulator_reason.is_none());
+        assert!(simulator_identity.is_none());
+        assert!(simulator_native.external_hashes.is_empty());
+
+        let mut unavailable_native = NativeInputs::default();
+        let (unavailable_reason, unavailable_identity) =
+            bind_ios_physical_signing_identity(&mut unavailable_native, true)
+                .unwrap_or_else(|error| panic!("unexpected signing probe error: {error:#}"));
+        if cfg!(target_os = "macos") {
+            // The test host may have no signing identities or profiles; the
+            // helper must then conservatively disable physical reuse.
+            if unavailable_identity.is_none() {
+                assert!(
+                    unavailable_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("signing identities"))
+                );
+                assert_eq!(
+                    unavailable_native
+                        .external_hashes
+                        .get("ios.physical-signing")
+                        .map(String::as_str),
+                    Some("unavailable")
+                );
+            }
+        } else {
+            assert!(unavailable_identity.is_none());
+            assert!(
+                unavailable_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("signing identities"))
+            );
+        }
+
+        let mut first = NativeInputs::default();
+        let first_identity = IosPhysicalSigningIdentity {
+            fingerprint: "signing-a".into(),
+        };
+        first.external_hashes.insert(
+            "ios.physical-signing".into(),
+            first_identity.fingerprint.clone(),
+        );
+        let mut second = NativeInputs::default();
+        second
+            .external_hashes
+            .insert("ios.physical-signing".into(), "signing-b".into());
+        assert_ne!(first.digest(), second.digest());
+
+        assert_eq!(
+            ios_signing_fingerprint(
+                &["BBBB".into(), "AAAA".into(), "AAAA".into()],
+                &["profile-b".into(), "profile-a".into(), "profile-a".into()],
+            ),
+            ios_signing_fingerprint(
+                &["AAAA".into(), "BBBB".into()],
+                &["profile-a".into(), "profile-b".into()],
+            )
         );
     }
 

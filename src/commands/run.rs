@@ -482,15 +482,8 @@ fn lookup_ios_app_for_target(
     layout: &BuildOutputLayout,
     key: &crate::runner::build_key::BuildKey,
     app_path: &Path,
-    physical_device: bool,
 ) -> BuildCacheLookup {
-    if physical_device {
-        BuildCacheLookup::Miss(
-            "physical-device cache reuse is disabled until signing inputs are represented in the BuildKey".into(),
-        )
-    } else {
-        lookup_verified_ios_app(layout, key, app_path)
-    }
+    lookup_verified_ios_app(layout, key, app_path)
 }
 
 /// Builds the Rust staticlib and app, or reuses a verified simulator bundle.
@@ -516,12 +509,18 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
         .context("iOS output layout did not provide a DerivedData path")?;
     let app_path = xcode_app_path(derived_dir, &scheme, device, release);
 
-    let reusable = plan.cache_hit_disabled_reason.is_none() && !device;
+    if device && let Some(identity) = &plan.physical_signing_identity {
+        identity.verify_unchanged()?;
+    }
+    let reusable = plan.cache_hit_disabled_reason.is_none();
     let role = coordinated_build(layout, &plan.key, reusable, || {
+        if device && let Some(identity) = &plan.physical_signing_identity {
+            identity.verify_unchanged()?;
+        }
         let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
             BuildCacheLookup::Miss(reason.clone())
         } else {
-            lookup_ios_app_for_target(layout, &plan.key, &app_path, device)
+            lookup_ios_app_for_target(layout, &plan.key, &app_path)
         };
         match cache_lookup {
             BuildCacheLookup::Hit(manifest) => {
@@ -609,7 +608,13 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
                 app_path.display()
             );
         }
+        if device && let Some(identity) = &plan.physical_signing_identity {
+            identity.verify_unchanged()?;
+        }
         publish_ios_build_manifest(layout, &app_path)?;
+        if device && let Some(identity) = &plan.physical_signing_identity {
+            identity.verify_unchanged()?;
+        }
         println!(
             "  {} artifact manifest: {}",
             "✓".green(),
@@ -620,7 +625,7 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
     })?;
     if role == Some(BuildCoordinatorRole::Follower)
         && let BuildCacheLookup::Hit(manifest) =
-            lookup_ios_app_for_target(layout, &plan.key, &app_path, false)
+            lookup_ios_app_for_target(layout, &plan.key, &app_path)
     {
         println!(
             "  {} iOS BuildKey cache hit: {} verified artifact(s)",
@@ -628,19 +633,13 @@ pub fn build_ios_app(project: &Project, target: &IosTarget, release: bool) -> Re
             manifest.files.len()
         );
     }
-    if device {
-        match lookup_verified(layout, &plan.key) {
-            BuildCacheLookup::Hit(_) => {}
-            BuildCacheLookup::Miss(reason) => {
-                bail!("iOS build completed without a verified artifact: {reason}");
-            }
-        }
-    } else {
-        match lookup_ios_app_for_target(layout, &plan.key, &app_path, false) {
-            BuildCacheLookup::Hit(_) => {}
-            BuildCacheLookup::Miss(reason) => {
-                bail!("iOS build completed without the expected app bundle: {reason}");
-            }
+    if device && let Some(identity) = &plan.physical_signing_identity {
+        identity.verify_unchanged()?;
+    }
+    match lookup_ios_app_for_target(layout, &plan.key, &app_path) {
+        BuildCacheLookup::Hit(_) => {}
+        BuildCacheLookup::Miss(reason) => {
+            bail!("iOS build completed without the expected app bundle: {reason}");
         }
     }
     Ok(app_path)
@@ -1549,8 +1548,8 @@ mod tests {
             BuildCacheLookup::Hit(_)
         ));
         assert!(matches!(
-            lookup_ios_app_for_target(&layout, &key, &app_path, true),
-            BuildCacheLookup::Miss(reason) if reason.contains("signing inputs")
+            lookup_ios_app_for_target(&layout, &key, &app_path),
+            BuildCacheLookup::Hit(_)
         ));
 
         fs::write(app_path.join("unexpected-resource"), b"extra output").unwrap();
