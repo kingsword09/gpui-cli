@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-09-30，主分支 `a8a484f`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-09-30，主分支 `058d2c6`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -367,8 +367,10 @@ scroll（当前已交付）→ 通用滚动容器显式声明契约（当前已�
 文件名和 fencing lost 已有纯 Rust 验证。`commands/run.rs` 与 `commands/live.rs` 已将
 iOS/Android 的安装、启动、Android 配置/资源写入包进 lease fencing；iOS/Android 原生 PNG
 截图命令及 `gpui device capture` 也已通过同一 lease 接入。`gpui check --matrix` 的移动
-scenario driver 现在复用该 lease 做 native capture；设备重连状态机、完整截图 artifact
-manifest 和真实设备矩阵证据仍未完成，不能把当前测试写成 M01/M02 的真实设备验收。记录见
+scenario driver 现在复用该 lease 做 native capture；#211 又让 matrix supervisor 持有唯一
+lease、preview 子进程使用 owner delegation，并把实际 run 的 capture/native-log/stop evidence
+写入 `CheckContext.mobile_evidence`；设备重连状态机、完整截图 artifact manifest 和真实设备矩阵
+证据仍未完成，不能把当前测试写成 M01/M02 的真实设备验收。记录见
 [M03 device lease](../experiments/M03-device-lease-2026-09-28.md)。
 
 ### M04 · 冻结源码与确定构建键
@@ -593,8 +595,10 @@ snapshot，所有 cell 复用其 runtime root/hash。完整 GUI check cleanup/re
 [S04 matrix build output layout](../experiments/S04-matrix-build-output-layout-2026-09-29.md) 以及
 [S04 matrix cell reports](../experiments/S04-matrix-cell-reports-2026-09-29.md)。
 当前 context 已随单场景 `CheckReport` 和每个 control scenario `MatrixCellResult` 输出；
-matrix control cell 现在也保留完整 steps/证据/cleanup，admission-unavailable 与 capture-only
-mobile lifecycle cell 不生成伪造 scenario report。
+matrix control cell 现在也保留完整 steps/证据/cleanup，#211 又让移动 preview 使用 supervisor-owned
+delegated lease，并把实际 run 的 capture/native-log/stop evidence 写入
+`CheckContext.mobile_evidence`；admission-unavailable 与 capture-only mobile lifecycle cell
+不生成伪造 scenario report。移动完整语义/输入和真实设备验收仍未完成。
 
 视觉 baseline 静态契约已单独交付：`src/scenario/baseline.rs` 读取项目内
 `dev/baselines/<target>/<baseline_id>/manifest.json`，拒绝越界/符号链接/超限文件，校验
@@ -666,7 +670,8 @@ artifact 接线和报告证据见
 
 PR 拆分：runner trait/契约（已交付）→ iOS simulator adapter（已交付基础路径）→ Android adapter
 （已交付基础路径）→ Android process identity（已交付）→ iOS simulator process probe（当前切片）
-→ mobile fault evidence boundary（当前切片）→ 真模拟器故障矩阵。验收
+→ mobile fault evidence boundary（当前切片）→ delegated lease/same-run evidence（已交付切片）
+→ 真模拟器故障矩阵。验收
 M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 desktop；不以宿主 APK 打包
 测试宣称运行通过。契约记录见
 [M01 runner contract](../experiments/M01-runner-contract-2026-09-28.md)。
@@ -679,8 +684,9 @@ M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 deskto
 scenario driver。#157 已接入 M04 的共享冻结 snapshot 输入边界，#159 已将 per-cell context
 传入 MatrixReport，#161 已将 target-specific BuildKey 写入 context，#163 已绑定 source-project
 output layout 并串行同 key cell，#165 已让 preview builder 锁定对应 output root，#167 已让
-control scenario cell 保留完整 CheckReport；跨命令共享构建所有权、移动完整 scenario 证据和真实矩阵
-仍未接入。
+control scenario cell 保留完整 CheckReport；#211 又接入 supervisor-owned delegated lease、实际
+run 的 capture/native-log/stop evidence 和 `CheckContext.mobile_evidence`；跨命令共享构建所有权、
+移动完整语义/输入 scenario 和真实矩阵仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
@@ -691,7 +697,7 @@ PR 拆分：matrix plan/status/summary 契约与纯 scheduler（已交付）→ 
 （已交付）→ target/scenario admission 与 host/ABI/toolchain preflight（已交付）→
 跨目标并行与 supervisor 内资源锁（已交付）→ mobile runner cell lifecycle（已交付）→
 matrix CLI 与 desktop scenario factory（已交付）→移动 scenario driver 的
-control/native capture、session fencing 和 report context（已交付切片）→ frozen build、host inventory 完整重连和真实矩阵
+control/native capture、session fencing、delegated lease 和 report context（已交付切片）→ frozen build、host inventory 完整重连和真实矩阵
 验收。
 
 当前契约、移动 scenario driver 边界与 admission 记录见
