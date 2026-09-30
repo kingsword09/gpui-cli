@@ -578,6 +578,7 @@ mod tests {
             build_key: None,
             environment: Some(json!({"theme": "light"})),
             uncontrolled_inputs: vec!["network".into()],
+            mobile_evidence: None,
         };
         let mut runner = FakeRunner {
             outcomes: BTreeMap::from([(

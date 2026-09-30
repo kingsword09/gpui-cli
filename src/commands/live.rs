@@ -44,7 +44,7 @@ use crate::runner::build_inputs::{
     android_custom_signing_fingerprint, android_debug_keystore_hash,
 };
 use crate::runner::build_manifest::BuildArtifactManifest;
-use crate::runner::lease::DeviceLeaseSession;
+use crate::runner::lease::{DeviceLeaseDelegation, DeviceLeaseSession};
 use crate::runner::output_layout::{
     BuildOutputLayout, BuildPlatform, PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE,
 };
@@ -2167,21 +2167,43 @@ pub fn handle_preview(
     flags: &DeviceFlags,
 ) -> Result<()> {
     let plan = resolve_plan(project, target, flags)?;
-    let preleased = std::env::var_os("GPUI_PREVIEW_PRELEASED").is_some();
-    let device_lease = if preleased {
-        None
-    } else {
-        match &plan {
-            Plan::Desktop => None,
-            Plan::Ios { id, .. } => Some(
-                DeviceLeaseSession::acquire(&project.root, id)
-                    .context("acquiring the iOS preview device lease")?,
-            ),
-            Plan::Android { serial, .. } => Some(
-                DeviceLeaseSession::acquire(&project.root, serial)
-                    .context("acquiring the Android preview device lease")?,
-            ),
+    let delegated_lease = std::env::var_os("GPUI_PREVIEW_DEVICE_LEASE_DELEGATION")
+        .map(|value| {
+            serde_json::from_str::<DeviceLeaseDelegation>(&value.to_string_lossy())
+                .context("parsing the delegated preview device lease")
+        })
+        .transpose()?;
+    let device_lease = match (&plan, delegated_lease) {
+        (Plan::Desktop, Some(_)) => {
+            bail!("a delegated device lease cannot be used by a desktop preview")
         }
+        (Plan::Ios { id, .. }, Some(delegation)) => {
+            let lease = DeviceLeaseSession::from_delegation(delegation)
+                .map_err(anyhow::Error::new)
+                .context("opening the delegated iOS preview device lease")?;
+            if lease.owner().device_id != *id {
+                bail!("delegated iOS lease does not match the selected simulator")
+            }
+            Some(lease)
+        }
+        (Plan::Android { serial, .. }, Some(delegation)) => {
+            let lease = DeviceLeaseSession::from_delegation(delegation)
+                .map_err(anyhow::Error::new)
+                .context("opening the delegated Android preview device lease")?;
+            if lease.owner().device_id != *serial {
+                bail!("delegated Android lease does not match the selected device")
+            }
+            Some(lease)
+        }
+        (Plan::Desktop, None) => None,
+        (Plan::Ios { id, .. }, None) => Some(
+            DeviceLeaseSession::acquire(&project.root, id)
+                .context("acquiring the iOS preview device lease")?,
+        ),
+        (Plan::Android { serial, .. }, None) => Some(
+            DeviceLeaseSession::acquire(&project.root, serial)
+                .context("acquiring the Android preview device lease")?,
+        ),
     };
     let target_id = match &plan {
         Plan::Desktop => format!("desktop:{}", std::env::consts::OS),
