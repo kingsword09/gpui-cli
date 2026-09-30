@@ -194,9 +194,18 @@ impl MobileRunner for AndroidRunner {
     ) -> Result<CaptureArtifact> {
         let output = scope.output.clone();
         let serial = self.serial.clone();
+        let bundle_id = self.bundle_id.clone();
         let result = run_leased_workload(&scope.identity, lease, "android.capture", || {
             android::capture_screenshot(&serial, &output)?;
-            CaptureArtifact::from_png(scope, "adb.exec_out.screencap", true)
+            let mut artifact = CaptureArtifact::from_png(scope, "adb.exec_out.screencap", true)?;
+            if let Ok(display) = android::display_evidence(&serial, &bundle_id) {
+                artifact.logical_width = display.logical_width;
+                artifact.logical_height = display.logical_height;
+                artifact.scale_milli = display.scale_milli;
+                artifact.orientation = display.orientation;
+                artifact.foreground_app = display.foreground_app;
+            }
+            Ok(artifact)
         });
         self.record(
             &scope.identity,

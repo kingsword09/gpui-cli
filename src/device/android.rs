@@ -709,6 +709,101 @@ pub fn wait_for_app_process(serial: &str, bundle_id: &str) -> Result<Option<AppP
     }
 }
 
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct DisplayEvidence {
+    pub logical_width: Option<u32>,
+    pub logical_height: Option<u32>,
+    pub scale_milli: Option<u32>,
+    pub orientation: Option<String>,
+    pub foreground_app: Option<String>,
+}
+
+/// Probes display metadata independently from screenshot bytes. Missing or
+/// vendor-specific shell output remains an unknown field instead of being
+/// converted into a guessed viewport.
+pub fn display_evidence(serial: &str, bundle_id: &str) -> Result<DisplayEvidence> {
+    let adb = adb().context("`adb` was not found")?;
+    let size = try_capture(&adb, &["-s", serial, "shell", "wm", "size"])
+        .as_deref()
+        .and_then(parse_display_size);
+    let density = try_capture(&adb, &["-s", serial, "shell", "wm", "density"])
+        .as_deref()
+        .and_then(parse_display_density);
+    let orientation = try_capture(&adb, &["-s", serial, "shell", "dumpsys", "input"])
+        .as_deref()
+        .and_then(parse_surface_orientation);
+    let foreground_app = try_capture(
+        &adb,
+        &["-s", serial, "shell", "dumpsys", "activity", "activities"],
+    )
+    .and_then(|output| parse_foreground_app(&output, bundle_id));
+
+    let scale_milli = density.and_then(|value| u32::try_from(u64::from(value) * 1000 / 160).ok());
+    let (logical_width, logical_height) = match (size, density) {
+        (Some((width, height)), Some(density)) if density > 0 => (
+            u32::try_from(u64::from(width) * 160 / u64::from(density)).ok(),
+            u32::try_from(u64::from(height) * 160 / u64::from(density)).ok(),
+        ),
+        _ => (None, None),
+    };
+    Ok(DisplayEvidence {
+        logical_width,
+        logical_height,
+        scale_milli,
+        orientation,
+        foreground_app,
+    })
+}
+
+fn parse_display_size(output: &str) -> Option<(u32, u32)> {
+    output.lines().rev().find_map(|line| {
+        let value = line.split_once(':')?.1.trim();
+        let (width, height) = value.split_once('x')?;
+        let width = width.parse().ok()?;
+        let height = height.parse().ok()?;
+        (width > 0 && height > 0).then_some((width, height))
+    })
+}
+
+fn parse_display_density(output: &str) -> Option<u32> {
+    output.lines().rev().find_map(|line| {
+        let value = line.split_once(':')?.1.trim();
+        let density = value.parse().ok()?;
+        (density > 0).then_some(density)
+    })
+}
+
+fn parse_foreground_app(output: &str, bundle_id: &str) -> Option<String> {
+    const FOREGROUND_MARKERS: [&str; 3] = ["mResumedActivity:", "mFocusedApp=", "mCurrentFocus="];
+    output
+        .lines()
+        .map(str::trim_start)
+        .find(|line| {
+            FOREGROUND_MARKERS
+                .iter()
+                .any(|marker| line.starts_with(marker))
+                && line.contains(bundle_id)
+        })
+        .map(|_| bundle_id.to_owned())
+}
+
+fn parse_surface_orientation(output: &str) -> Option<String> {
+    let value = output.lines().find_map(|line| {
+        let (_, value) = line.split_once("SurfaceOrientation:")?;
+        value.trim().parse::<u8>().ok()
+    })?;
+    Some(
+        match value {
+            0 => "portrait",
+            1 => "landscape",
+            2 => "reverse_portrait",
+            3 => "reverse_landscape",
+            _ => return None,
+        }
+        .into(),
+    )
+}
+
 fn parse_proc_stat_start_time(stat: &str) -> Result<u64> {
     let open = stat.find('(').context("process stat has no command name")?;
     let close = stat
@@ -1036,6 +1131,40 @@ mod tests {
             ..process.clone()
         };
         assert_ne!(process.start_token(), reused_pid.start_token());
+    }
+
+    #[test]
+    fn display_metadata_parsers_keep_unknown_vendor_output_unset() {
+        assert_eq!(
+            parse_display_size("Physical size: 1080x2400\n"),
+            Some((1080, 2400))
+        );
+        assert_eq!(
+            parse_display_size("Override size: 720x1280\n"),
+            Some((720, 1280))
+        );
+        assert_eq!(parse_display_density("Physical density: 420\n"), Some(420));
+        assert_eq!(
+            parse_surface_orientation("SurfaceOrientation: 1\n"),
+            Some("landscape".into())
+        );
+        assert_eq!(parse_surface_orientation("rotation=unknown\n"), None);
+        assert_eq!(parse_display_size("Physical size: 0x0\n"), None);
+        assert_eq!(parse_display_density("Override density: 0\n"), None);
+        assert_eq!(
+            parse_foreground_app(
+                "mResumedActivity: ActivityRecord{u0 com.example.app/.MainActivity}\n",
+                "com.example.app"
+            ),
+            Some("com.example.app".into())
+        );
+        assert_eq!(
+            parse_foreground_app(
+                "mResumedActivity: ActivityRecord{u0 com.other/.MainActivity}\nHistory: com.example.app/.OldActivity\n",
+                "com.example.app"
+            ),
+            None
+        );
     }
 
     #[test]
