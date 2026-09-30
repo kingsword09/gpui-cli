@@ -47,3 +47,11 @@ signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive �
   manifest/coordinator；release-only、复杂/远端 signing 仍只允许受控 frozen snapshot 构建，不发布
   可复用 manifest，也不进入 preview coordinator。
 - 本切片没有新增 emulator/device 安装、启动、capture 或完整 scenario 连续验收证据。
+
+## 关联的移动 scenario evidence
+
+PR #211（squash `058d2c6`）修正了 Android preview 被 `gpui check --matrix` 消费时的 lease/evidence
+归属：matrix supervisor 持有唯一设备 OS lease，preview 子进程只接收 owner path、session 和
+fencing token 摘要的 delegated view；capture、native logs、stop evidence 绑定 preview 实际 run，
+并进入 `CheckContext.mobile_evidence`。这使显式 debug custom-signing preview 的产物消费与设备证据
+可以分开审计，但不增加 release-only/复杂 signing 支持，也不构成真实设备矩阵或完整语义/输入验收。
