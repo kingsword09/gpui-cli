@@ -462,7 +462,9 @@ terminal result 并只让取消的 leader 返回 cancellation，无 follower 时
 仍被 follower 需要的构建。#197 增加显式 `Cancelled` terminal state：无 follower 可消费的 caller-cancel
 不再伪装成普通失败；waiter 释放旧 subscription 并重新竞争，普通编译错误仍为 `Failed`，superseded
 仍是 retryable `Failed` marker。
-M04 仍未完成：`Partial` 终态/部分产物消费契约、heartbeat/fencing、preview/check orchestration 的其余部分，以及
+#199 增加 `Partial` terminal state：调用方显式返回 partial marker 时保留该诊断；attempt 不验证、共享或
+命中不完整输出，follower 放弃旧引用并重新竞争。它不提供 partial artifact manifest、恢复或渐进消费。
+M04 仍未完成：heartbeat/fencing、preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
@@ -504,7 +506,7 @@ Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次
 第一次 miss、第二次同 key hit 和 APK ABI；它不包含完整 GPUI app 或设备运行，记录见
 [T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。真实在途
 preview/check 任务共享仍未接入；#177 已将普通 build/run 接入共享 coordinator，但取消引用/终止、
-queued/cancelled/partial 状态和预热仍未实现；本地 `build.rs` 项目已保守 bypass artifact cache reuse，记录见
+queued 状态和预热仍未实现；coordinator `Partial` 仅作为不可复用的诊断终态；本地 `build.rs` 项目已保守 bypass artifact cache reuse，记录见
 [T06 build-script cache bypass](../experiments/T06-build-script-cache-bypass-2026-09-28.md)。
 `gpui cache clean --max-bytes` 已提供按 BuildKey 大小预算的显式清理，
 活动锁和不安全目录会跳过，记录见
