@@ -1,8 +1,8 @@
 # T06：Android local custom/release signing BuildKey（2026-09-30）
 
-状态：PR #205 已 squash 合并为 `142f58b`。本切片为非 live 的 Android `build`/`run` 补齐一段
-可证明的本地 custom/release signing 输入边界；不把复杂 Gradle、远端插件或 live preview 的
-signing-sensitive 输出标为可复用。
+状态：PR #205 已 squash 合并为 `142f58b`；后续 live frozen-preview 接线仍在当前实现切片中。
+本切片为 Android `build`/`run` 和 matrix/live frozen build 补齐一段可证明的本地 custom/release
+signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive 输出标为可复用。
 
 ## 实现范围
 
@@ -21,6 +21,9 @@ signing-sensitive 输出标为可复用。
 - custom debug 与已配置签名的 release build/run 都在 BuildKey 匹配时允许 artifact manifest 命中。
   cache lookup 前、Gradle 前后、manifest 发布前后和最终消费前均复核 signing inputs；建模的 release
   若产出 `-unsigned.apk`，不会作为签名敏感缓存继续发布/消费。
+- matrix frozen Android preview 会把同一组批准的 properties/keystore 以 `0600` 副本注入 snapshot，
+  并把 fingerprint 传入 preview 子进程；cargo-ndk/Gradle 前后复核该 fingerprint。custom signing
+  preview 允许正常构建和运行，但不发布/消费 preview artifact manifest，也不进入 preview coordinator。
 
 ## 验证
 
@@ -37,6 +40,7 @@ signing-sensitive 输出标为可复用。
 
 - Gradle wrapper distribution、AGP/plugin 隐藏读取、NDK/build-script I/O、远端 signing 服务、私钥
   可用性和同 revision 工具包内容变化仍未形成完整输入闭包。
-- Android live preview 仍只复用 default-debug signing；custom/release/signing-sensitive preview
-  不进入 preview coordinator，需后续单独接入并验证。
+- Android live preview 只有 default-debug signing 进入 verified manifest/coordinator；custom/release/
+  signing-sensitive preview 现在可以在受控 frozen snapshot 中构建，但仍不发布可复用 manifest 或
+  进入 preview coordinator。
 - 本切片没有新增 emulator/device 安装、启动、capture 或完整 scenario 连续验收证据。
