@@ -453,7 +453,9 @@ BuildKey 不可复用路径仍保留原有锁流程。含未建模输入的路�
 retryable superseded terminal marker，使旧 attempt 的 followers 释放引用并重新竞争；follower 的取消
 不会终止仍 current 的 leader。subscriber 注册、计数、coordinator record 与 cache-clean 检查共用短时
 state lock，避免刚创建的 subscriber 被误判为 stale。该机制尚不是完整 last-reference 状态机：没有
-`cancelled`/`partial` 终态，active count 不授权忽略 leader 自己的 revision，也无 heartbeat/fencing。
+`cancelled`/`partial` 终态，active count 不授权忽略 leader 自己的 revision；#201 又增加 coordinator schema v2
+的 owner fencing token 和 heartbeat，stale heartbeat 只作诊断，terminal publish 必须重新验证当前 owner，
+接管仍需要 output OS lock。
 #193 又增加 caller-cancel reason：leader 在 state lock 内先释放自身引用再计数；有 follower 时发布可复用
 terminal result 并只让取消的 leader 返回 cancellation，无 follower 时发布 retryable cancellation marker。
 #195 又把 leader control 接到 desktop/iOS simulator/Android default-debug preview 的 owned process loop：
@@ -464,7 +466,7 @@ terminal result 并只让取消的 leader 返回 cancellation，无 follower 时
 仍是 retryable `Failed` marker。
 #199 增加 `Partial` terminal state：调用方显式返回 partial marker 时保留该诊断；attempt 不验证、共享或
 命中不完整输出，follower 放弃旧引用并重新竞争。它不提供 partial artifact manifest、恢复或渐进消费。
-M04 仍未完成：heartbeat/fencing、preview/check orchestration 的其余部分，以及
+M04 仍未完成：签名敏感输入、preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
