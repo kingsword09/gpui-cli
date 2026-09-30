@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-09-30（Asia/Shanghai）。核查代码：`8da659e`（PR #213 squash merge）。
+更新日期：2026-09-30（Asia/Shanghai）。核查代码：`2087d52`（PR #215 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -34,7 +34,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing preview 的 BuildKey coordinator、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening | partial artifact 的消费/恢复契约、Android release-only/复杂/远端 signing 输入、真实环境适配、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续验收及 MCP |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing preview 的 BuildKey coordinator、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening、early mobile scenario failure finalization | partial artifact 的消费/恢复契约、Android release-only/复杂/远端 signing 输入、真实环境适配、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture、同一 delegated lease 下的 run/capture/log/cleanup evidence、Android capture 的 best-effort viewport/scale/orientation/foreground metadata | 完整三端同快照矩阵、真实设备环境元数据与故障/重连、完整语义与输入证据、repro 和 L2/L3 CI |
 | G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing live preview verified cache hit 和显式清理 | 缓存输入遗漏、iOS physical live preview、Android release-only/复杂或远端 signing cache hit、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
@@ -77,6 +77,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `a8a484f`（#209） | Android live preview 对显式 `buildTypes.debug.signingConfig` 的 custom-debug signing 纳入 signing fingerprint，verified JNI/APK manifest 与 preview coordinator 可复用；构建前后和 manifest 验证前后重核验输入 | release-only、复杂 DSL、插件/远端 signing 继续 bypass；Gradle/AGP/NDK 隐藏输入和真实设备验收仍未完成 |
 | `058d2c6`（#211） | matrix mobile preview 由 supervisor 持有唯一 OS lease，子进程使用不含原始 token 的 delegated owner 校验；capture/native logs/stop evidence 绑定实际 preview run，finalize 后写入 `CheckContext.mobile_evidence`，日志无法归属时保持 inconclusive | 修复 lease/evidence 归属边界，不等于真实 iOS/Android 矩阵、完整语义/输入、键盘/旋转/重连或设备故障验收已通过 |
 | `8da659e`（#213） | Android capture 在 PNG artifact 上补充 `wm size`/`wm density` 推导的逻辑 viewport 与 scale、`dumpsys input` 方向和明确前台标记中的目标包名；探测失败保持 unknown，并向 check evidence 暴露缺失原因 | 仅完成 best-effort parser/attachment 与纯 Rust 边界测试；未完成真实设备厂商差异、前台切换、旋转/DPI 变体或完整 M01/M02 验收 |
+| `2087d52`（#215） | scenario executor 在初始 prepare/reset/observation 失败时先调用 finalization 再 cleanup，保留已启动移动 preview 的 native-log/post-run evidence，同时保留原始失败 | 只修复证据收集顺序；未 ready 的 preview 仍不得通过，finalization 失败和真实设备连续验收仍按 inconclusive/未完成处理 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -111,7 +112,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | A02 | planned | action/operation/check 可复用；无 MCP 动作/取消/owner 适配 |
 | A03 | planned | pin/manifest/registry 可复用；无 context 命令、版本知识索引或工作流包 |
 | S05 | planned | 无类型化热参数、overlay revision、撤销/固化及收益实验 |
-| M01 | in_progress | iOS/Android adapter、capture/log snapshot、进程身份与 fault evidence；移动 preview 已通过 delegated lease 复核 owner，并将 capture/log/stop 绑定实际 run；Android capture 已补 best-effort viewport/scale/orientation/foreground metadata；缺完整日志/设备故障、真实环境变体和 UI 变体验收 |
+| M01 | in_progress | iOS/Android adapter、capture/log snapshot、进程身份与 fault evidence；移动 preview 已通过 delegated lease 复核 owner，并将 capture/log/stop 绑定实际 run；Android capture 已补 best-effort viewport/scale/orientation/foreground metadata；early scenario failure 也先 finalize evidence；缺完整日志/设备故障、真实环境变体和 UI 变体验收 |
 | M02 | in_progress | 配置展开、admission、并行/资源锁、matrix CLI、移动 control/native capture、共享 frozen snapshot/target output lock、control scenario cell 完整报告、移动 delegated lease 与 `CheckContext.mobile_evidence`；普通 build/run 已有跨命令构建所有权，仍缺完整语义/输入 scenario 和三端矩阵 |
 | M05 | planned | 无 repro export/inspect/run、脱敏和干净环境重放 |
 | Q01 | planned | 已有三 OS CLI/macOS 模板/Android 宿主 CI；尚无该工作包的完整真实 GUI/设备 L2/L3 门禁 |
@@ -212,6 +213,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | 本地运行时验证（PR #213） | 378 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check 均通过 |
 | PR #213 CI | 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
 | PR #213 合并 | squash merge `8da659e`；无发布/tag |
+| 本地运行时验证（PR #215） | 379 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check 均通过 |
+| PR #215 CI | 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
+| PR #215 合并 | squash merge `2087d52`；无发布/tag |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
