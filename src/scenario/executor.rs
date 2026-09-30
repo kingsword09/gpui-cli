@@ -779,7 +779,7 @@ fn finish_step(
                     status,
                     before,
                     Some(error.as_check_error()),
-                    None,
+                    action_evidence_from_driver_error(&error),
                     None,
                     None,
                 ),
@@ -787,6 +787,25 @@ fn finish_step(
             )
         }
     }
+}
+
+fn action_evidence_from_driver_error(error: &DriverError) -> Option<ActionEvidence> {
+    let operation_id = error
+        .details
+        .as_ref()
+        .and_then(|details| details["operation"]["operation_id"].as_str())
+        .map(str::to_owned)?;
+    let status = match error.kind {
+        DriverErrorKind::Unknown => ActionStatus::Unknown,
+        DriverErrorKind::Cancelled => ActionStatus::Cancelled,
+        DriverErrorKind::Failed | DriverErrorKind::Unavailable | DriverErrorKind::Timeout => {
+            ActionStatus::Failed
+        }
+    };
+    Some(ActionEvidence {
+        status,
+        operation_id: Some(operation_id),
+    })
 }
 
 /// Evaluate one schema-v1 assertion against one immutable observation.
@@ -1443,6 +1462,58 @@ mod tests {
         assert_eq!(
             report.primary_error.as_ref().unwrap().code,
             "observation_unknown"
+        );
+    }
+
+    #[test]
+    fn operation_error_retains_operation_id_in_action_evidence() {
+        let action = ScenarioStep {
+            id: "click".into(),
+            kind: "click".into(),
+            selector: Some(selector("counter.value")),
+            assertion: None,
+            expected: None,
+            label: None,
+            require: Vec::new(),
+            baseline_id: None,
+            text: None,
+            mode: "replace".into(),
+            button: "primary".into(),
+            key: None,
+            delta_x: 0,
+            delta_y: 0,
+            duration_ms: 0,
+            timeout_ms: None,
+        };
+        let mut runner = FakeRunner {
+            prepared: Some(Ok(observation(
+                "o-1",
+                vec![node("counter.value", json!(0))],
+            ))),
+            actions: VecDeque::from([Err(DriverError {
+                kind: DriverErrorKind::Unknown,
+                code: "action_outcome_unknown".into(),
+                message: "operation completed but its outcome is unknown".into(),
+                details: Some(json!({
+                    "operation": {"operation_id": "op-unknown-1"}
+                })),
+            })]),
+            ..FakeRunner::default()
+        };
+
+        let report = execute(&mut runner, &scenario(vec![action]), None);
+        assert_eq!(report.status, CheckStatus::Inconclusive);
+        assert_eq!(report.steps[0].status, StepStatus::Inconclusive);
+        assert_eq!(
+            report.steps[0]
+                .action
+                .as_ref()
+                .and_then(|action| action.operation_id.as_deref()),
+            Some("op-unknown-1")
+        );
+        assert_eq!(
+            report.steps[0].action.as_ref().unwrap().status,
+            ActionStatus::Unknown
         );
     }
 
