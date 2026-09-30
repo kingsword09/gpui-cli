@@ -858,13 +858,16 @@ pub fn android_preview_cache_policy(
     let mut native = NativeInputs::scan(&root)?;
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&root)?;
     let signing_policy = android_cache_signing_policy(&root, release, &mut native)?;
+    let debug_custom_signing = android_debug_variant_uses_custom_signing(&root, &native)?;
     let (_, rustc_fingerprint) = rustc_identity()?;
     let (_, toolchain_disabled_reason) = bind_android_toolchain_identity(
         &mut native,
         &rustc_fingerprint,
         android_toolchain_fingerprint(),
     );
-    let signing_disabled_reason = if signing_policy.signing_identity.is_some() {
+    let signing_disabled_reason = if signing_policy.signing_identity.is_some()
+        && (!debug_custom_signing.unwrap_or(false) || release)
+    {
         Some("Android custom/release signing cache reuse is limited to non-live builds".into())
     } else {
         signing_policy.disabled_reason
@@ -1345,6 +1348,192 @@ fn supported_android_signing_config(root: &Path, native: &NativeInputs) -> Resul
         return Ok(false);
     }
     Ok(true)
+}
+
+fn android_debug_variant_uses_custom_signing(
+    root: &Path,
+    native: &NativeInputs,
+) -> Result<Option<bool>> {
+    if !supported_android_signing_config(root, native)? {
+        return Ok(None);
+    }
+    let scripts = android_signing_marker_scripts(root, native)?;
+    let [(relative, script)] = scripts.as_slice() else {
+        return Ok(None);
+    };
+    if relative.as_str() != "mobile/android/gradle/app/build.gradle"
+        && relative.as_str() != "mobile/android/gradle/app/build.gradle.kts"
+    {
+        return Ok(None);
+    }
+    let Some(build_types) = gradle_named_block(script, "buildTypes") else {
+        return Ok(None);
+    };
+    let Some(debug) = gradle_named_block(build_types, "debug") else {
+        return Ok(None);
+    };
+    Ok(Some(gradle_contains_identifier(debug, "signingConfig")))
+}
+
+fn gradle_named_block<'a>(source: &'a str, wanted: &str) -> Option<&'a str> {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &source[position..end] == wanted
+                && let Some(opening) = gradle_skip_trivia(source, end)
+                && bytes.get(opening) == Some(&b'{')
+            {
+                let closing = gradle_matching_brace(source, opening)?;
+                return Some(&source[opening + 1..closing]);
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    None
+}
+
+fn gradle_contains_identifier(source: &str, wanted: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &source[position..end] == wanted {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_next_code_position(source: &str, cursor: usize) -> Option<usize> {
+    let position = gradle_skip_trivia(source, cursor)?;
+    let byte = *source.as_bytes().get(position)?;
+    if byte == b'"' || byte == b'\'' {
+        return gradle_next_code_position(source, gradle_skip_string(source, position)?);
+    }
+    Some(position)
+}
+
+fn gradle_skip_trivia(source: &str, mut cursor: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    loop {
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"//") {
+            cursor += 2;
+            while bytes.get(cursor).is_some_and(|byte| *byte != b'\n') {
+                cursor += 1;
+            }
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+            cursor = gradle_skip_block_comment(source, cursor)?;
+            continue;
+        }
+        return Some(cursor);
+    }
+}
+
+fn gradle_skip_block_comment(source: &str, mut cursor: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth: usize = 0;
+    while cursor + 1 < bytes.len() {
+        match &bytes[cursor..cursor + 2] {
+            b"/*" => {
+                depth += 1;
+                cursor += 2;
+            }
+            b"*/" => {
+                depth = depth.checked_sub(1)?;
+                cursor += 2;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn gradle_skip_string(source: &str, opening: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let quote = *bytes.get(opening)?;
+    let triple = quote == b'"' && bytes.get(opening..opening + 3) == Some(b"\"\"\"");
+    let width = if triple { 3 } else { 1 };
+    let mut cursor = opening + width;
+    while cursor < bytes.len() {
+        if triple {
+            if bytes.get(cursor..cursor + 3) == Some(b"\"\"\"") {
+                return Some(cursor + 3);
+            }
+            cursor += 1;
+        } else if bytes[cursor] == b'\\' {
+            cursor += 2;
+        } else if bytes[cursor] == quote {
+            return Some(cursor + 1);
+        } else {
+            cursor += 1;
+        }
+    }
+    None
+}
+
+fn gradle_matching_brace(source: &str, opening: usize) -> Option<usize> {
+    if source.as_bytes().get(opening) != Some(&b'{') {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let mut cursor = opening + 1;
+    let mut depth: usize = 1;
+    while cursor < bytes.len() {
+        if bytes.get(cursor..cursor + 2) == Some(b"//") {
+            cursor = gradle_skip_trivia(source, cursor)?;
+        } else if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+            cursor = gradle_skip_block_comment(source, cursor)?;
+        } else if bytes[cursor] == b'"' || bytes[cursor] == b'\'' {
+            cursor = gradle_skip_string(source, cursor)?;
+        } else {
+            match bytes[cursor] {
+                b'{' => {
+                    depth += 1;
+                    cursor += 1;
+                }
+                b'}' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(cursor);
+                    }
+                    cursor += 1;
+                }
+                _ => cursor += 1,
+            }
+        }
+    }
+    None
+}
+
+fn is_gradle_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_gradle_identifier_continue(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn default_android_debug_keystore_identity() -> Result<Option<AndroidDebugKeystoreIdentity>> {
@@ -2146,6 +2335,54 @@ mod tests {
     }
 
     #[test]
+    fn android_debug_variant_signing_is_detected_conservatively() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                val keystoreProperties = java.util.Properties()
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                android {
+                    signingConfigs { create("release") { storeFile = file(keystoreProperties["storeFile"]) } }
+                    buildTypes {
+                        release { signingConfig = signingConfigs.getByName("release") }
+                        debug { signingConfig = signingConfigs.getByName("release") }
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert_eq!(
+            android_debug_variant_uses_custom_signing(root.path(), &native).unwrap(),
+            Some(true)
+        );
+
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                val keystoreProperties = java.util.Properties()
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                android {
+                    signingConfigs { create("release") { storeFile = file(keystoreProperties["storeFile"]) } }
+                    buildTypes {
+                        release { signingConfig = signingConfigs.getByName("release") }
+                        debug { isDebuggable = true }
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert_eq!(
+            android_debug_variant_uses_custom_signing(root.path(), &native).unwrap(),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn supported_android_signing_identity_is_hashed_and_revalidated() {
         let root = tempfile::tempdir().unwrap();
         let app = root.path().join("mobile/android/gradle/app");
@@ -2297,6 +2534,42 @@ mod tests {
             policy.android_signing_fingerprint,
             android_custom_signing_fingerprint(root.path()).unwrap()
         );
+        assert!(policy.debug_keystore_hash.is_none());
+    }
+
+    #[test]
+    fn android_preview_policy_allows_explicit_custom_debug_signing_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                signingConfigs { create("debugCustom") { storeFile = file(keystoreProperties["storeFile"]) } }
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                android {
+                    buildTypes {
+                        debug { signingConfig = signingConfigs.getByName("debugCustom") }
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            "storeFile=debug.jks\n",
+        )
+        .unwrap();
+        fs::write(app.join("debug.jks"), b"private-debug-keystore").unwrap();
+
+        let policy = android_preview_cache_policy(root.path(), false).unwrap();
+        assert!(
+            !policy
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("custom/release signing cache reuse"))
+        );
+        assert!(policy.android_signing_fingerprint.is_some());
         assert!(policy.debug_keystore_hash.is_none());
     }
 
