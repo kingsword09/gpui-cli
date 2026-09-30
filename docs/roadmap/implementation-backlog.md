@@ -459,8 +459,10 @@ terminal result 并只让取消的 leader 返回 cancellation，无 follower 时
 #195 又把 leader control 接到 desktop/iOS simulator/Android default-debug preview 的 owned process loop：
 最后引用 caller-cancel 终止整个 process tree，有 follower 时释放 leader 引用并继续构建；superseded
 仍终止旧 attempt 并让 follower 重新竞争。`Build::is_current_for_coordinated_work` 在共享期间不误杀
-仍被 follower 需要的构建。
-M04 仍未完成：失败/取消/partial 终态、heartbeat/fencing、preview/check orchestration 的其余部分，以及
+仍被 follower 需要的构建。#197 增加显式 `Cancelled` terminal state：无 follower 可消费的 caller-cancel
+不再伪装成普通失败；waiter 释放旧 subscription 并重新竞争，普通编译错误仍为 `Failed`，superseded
+仍是 retryable `Failed` marker。
+M04 仍未完成：`Partial` 终态/部分产物消费契约、heartbeat/fencing、preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
