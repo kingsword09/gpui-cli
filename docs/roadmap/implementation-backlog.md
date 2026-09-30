@@ -466,7 +466,9 @@ terminal result 并只让取消的 leader 返回 cancellation，无 follower 时
 仍是 retryable `Failed` marker。
 #199 增加 `Partial` terminal state：调用方显式返回 partial marker 时保留该诊断；attempt 不验证、共享或
 命中不完整输出，follower 放弃旧引用并重新竞争。它不提供 partial artifact manifest、恢复或渐进消费。
-M04 仍未完成：签名敏感输入、preview/check orchestration 的其余部分，以及
+#203 又将 physical iOS 的 code-signing identity/profile 摘要纳入 BuildKey；签名输入缺失或变化时保持
+cache bypass/拒绝发布，签名可用时允许 physical manifest 命中。Android release/custom signing 仍未建模。
+M04 仍未完成：preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
 从快照读取 scenario/matrix 并让所有 cell preview 从同一 runtime root 启动；原项目 root 仍仅
