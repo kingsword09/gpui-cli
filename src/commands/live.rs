@@ -40,7 +40,9 @@ use crate::runner::build_coordinator::{
     BuildCoordinatorLeaderControl, BuildCoordinatorOutcome,
     coordinate_preview_build_with_leader_control,
 };
-use crate::runner::build_inputs::android_debug_keystore_hash;
+use crate::runner::build_inputs::{
+    android_custom_signing_fingerprint, android_debug_keystore_hash,
+};
 use crate::runner::build_manifest::BuildArtifactManifest;
 use crate::runner::lease::DeviceLeaseSession;
 use crate::runner::output_layout::{
@@ -102,6 +104,7 @@ pub struct PreviewBuildOutputs {
     pub build_key_hash: Option<String>,
     pub cache_hit_disabled_reason: Option<String>,
     pub android_debug_keystore_hash: Option<String>,
+    pub android_signing_fingerprint: Option<String>,
     pub jni_libs_dir: Option<PathBuf>,
     pub gradle_build_dir: Option<PathBuf>,
     pub ios_derived_data_dir: Option<PathBuf>,
@@ -117,6 +120,8 @@ impl PreviewBuildOutputs {
             build_key_hash: std::env::var("GPUI_PREVIEW_BUILD_KEY_HASH").ok(),
             cache_hit_disabled_reason: std::env::var("GPUI_PREVIEW_CACHE_HIT_DISABLED_REASON").ok(),
             android_debug_keystore_hash: std::env::var("GPUI_PREVIEW_ANDROID_DEBUG_KEYSTORE_HASH")
+                .ok(),
+            android_signing_fingerprint: std::env::var("GPUI_PREVIEW_ANDROID_SIGNING_FINGERPRINT")
                 .ok(),
             jni_libs_dir: std::env::var_os("GPUI_PREVIEW_JNI_LIBS_DIR").map(PathBuf::from),
             gradle_build_dir: std::env::var_os("GPUI_PREVIEW_GRADLE_BUILD_DIR").map(PathBuf::from),
@@ -1429,6 +1434,7 @@ fn build_android_apk_live(
     outputs: Option<&PreviewBuildOutputs>,
 ) -> Result<Option<std::path::PathBuf>> {
     let outputs = outputs.cloned();
+    verify_android_preview_signing_inputs(project, outputs.as_ref())?;
     if let Some(outputs) = &outputs
         && let Some(key_hash) = outputs.build_key_hash.as_deref()
         && let Some(expected_keystore_hash) = outputs.android_debug_keystore_hash.as_deref()
@@ -1487,6 +1493,7 @@ fn build_android_apk_live_once(
     } else {
         None
     };
+    verify_android_preview_signing_inputs(project, outputs)?;
     let abis = android_abis()?;
     let jni_libs_dir = outputs
         .and_then(|outputs| outputs.jni_libs_dir.clone())
@@ -1590,6 +1597,7 @@ fn build_android_apk_live_once(
     if !error::run_cargo_json(&mut ndk, build, "cargo.ndk")?.success {
         return Ok(None);
     }
+    verify_android_preview_signing_inputs(project, outputs)?;
 
     check_android_libraries_at(&jni_libs_dir, &project.app_lib_name(), &abis)?;
 
@@ -1606,6 +1614,7 @@ fn build_android_apk_live_once(
         ),
         build,
     )?;
+    verify_android_preview_signing_inputs(project, outputs)?;
 
     let apk = super::run::apk_path_at(project, false, gradle_build_dir.as_deref())?;
     if let Some(outputs) = outputs
@@ -1620,10 +1629,31 @@ fn build_android_apk_live_once(
                 );
             }
         }
-        publish_preview_android_manifest(&outputs.output_root, key_hash, &jni_libs_dir, &apk)?;
+        if outputs.android_signing_fingerprint.is_none() {
+            publish_preview_android_manifest(&outputs.output_root, key_hash, &jni_libs_dir, &apk)?;
+        }
     }
+    verify_android_preview_signing_inputs(project, outputs)?;
     println!("  {} {}", "✓".green(), apk.display());
     Ok(Some(apk))
+}
+
+fn verify_android_preview_signing_inputs(
+    project: &Project,
+    outputs: Option<&PreviewBuildOutputs>,
+) -> Result<()> {
+    let Some(expected) = outputs.and_then(|outputs| outputs.android_signing_fingerprint.as_deref())
+    else {
+        return Ok(());
+    };
+    let current = android_custom_signing_fingerprint(&project.root)?
+        .context("Android custom signing inputs are unavailable in the preview workspace")?;
+    if current != expected {
+        bail!(
+            "Android custom signing inputs changed or were not copied into the frozen preview workspace"
+        );
+    }
+    Ok(())
 }
 
 /// Streams external tool output into the live event store and terminal.

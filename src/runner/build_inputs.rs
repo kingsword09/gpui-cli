@@ -73,34 +73,42 @@ impl FrozenBuildRoot {
     /// short-lived snapshot. The file is never included in the public input
     /// manifest or BuildKey material directly; callers add only a digest.
     fn copy_sensitive_file(&self, source: &Path, relative: &Path) -> Result<PathBuf> {
-        let metadata = fs::symlink_metadata(source)
-            .with_context(|| format!("checking sensitive signing input {}", source.display()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!(
-                "sensitive signing input is not a regular file: {}",
-                source.display()
-            );
-        }
-        let destination = self.root.join(relative);
-        if !destination.starts_with(&self.root) {
-            bail!("sensitive signing input escapes frozen workspace");
-        }
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(source, &destination).with_context(|| {
-            format!(
-                "copying sensitive signing input {} into snapshot",
-                source.display()
-            )
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(destination)
+        copy_sensitive_file_to_root(&self.root, source, relative)
     }
+}
+
+fn copy_sensitive_file_to_root(
+    destination_root: &Path,
+    source: &Path,
+    relative: &Path,
+) -> Result<PathBuf> {
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("checking sensitive signing input {}", source.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "sensitive signing input is not a regular file: {}",
+            source.display()
+        );
+    }
+    let destination = destination_root.join(relative);
+    if !destination.starts_with(destination_root) {
+        bail!("sensitive signing input escapes frozen workspace");
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source, &destination).with_context(|| {
+        format!(
+            "copying sensitive signing input {} into snapshot",
+            source.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(destination)
 }
 
 /// Frozen inputs shared by a strict check invocation.
@@ -154,6 +162,7 @@ pub struct AndroidBuildPlan {
 pub struct AndroidPreviewCachePolicy {
     pub disabled_reason: Option<String>,
     pub debug_keystore_hash: Option<String>,
+    pub android_signing_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -203,6 +212,58 @@ impl AndroidSigningIdentity {
         }
         Ok(())
     }
+}
+
+/// Copies the supported local Android signing inputs into an existing frozen
+/// workspace for a matrix/live preview. Secrets remain outside the public
+/// input manifest; only the BuildKey fingerprint is returned.
+pub fn prepare_android_signing_snapshot(
+    source_root: &Path,
+    snapshot_root: &Path,
+) -> Result<Option<String>> {
+    let source_root = fs::canonicalize(source_root).with_context(|| {
+        format!(
+            "resolving Android signing source root {}",
+            source_root.display()
+        )
+    })?;
+    let snapshot_root = fs::canonicalize(snapshot_root).with_context(|| {
+        format!(
+            "resolving Android signing snapshot root {}",
+            snapshot_root.display()
+        )
+    })?;
+    let native = NativeInputs::scan(&source_root)?;
+    if !has_custom_android_signing_config(&source_root, &native)?
+        || !supported_android_signing_config(&source_root, &native)?
+    {
+        return Ok(None);
+    }
+    let Some(identity) = android_custom_signing_identity(&source_root).ok().flatten() else {
+        return Ok(None);
+    };
+    let properties_relative = identity
+        .properties_path
+        .strip_prefix(&source_root)
+        .context("Android signing properties escaped the project root")?;
+    let keystore_relative = identity
+        .keystore_path
+        .strip_prefix(&source_root)
+        .context("Android signing keystore escaped the project root")?;
+    copy_sensitive_file_to_root(
+        &snapshot_root,
+        &identity.properties_path,
+        properties_relative,
+    )?;
+    copy_sensitive_file_to_root(&snapshot_root, &identity.keystore_path, keystore_relative)?;
+    identity.verify_unchanged()?;
+    Ok(Some(identity.fingerprint().to_owned()))
+}
+
+/// Returns the fingerprint of the supported local Android signing inputs at
+/// `root`, without exposing properties or keystore contents.
+pub fn android_custom_signing_fingerprint(root: &Path) -> Result<Option<String>> {
+    Ok(android_custom_signing_identity(root)?.map(|identity| identity.fingerprint().to_owned()))
 }
 
 fn hash_regular_file(path: &Path) -> Result<String> {
@@ -785,9 +846,9 @@ pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<
 }
 
 /// Returns the cache-safety inputs needed by a live Android preview. The
-/// preview receives its BuildKey from the check planner, so this helper only
-/// carries the policy decision and the external debug-keystore identity that
-/// must remain unchanged while the preview build runs.
+/// preview receives its BuildKey from the check planner; default-debug carries
+/// its keystore identity for reusable output, while supported custom signing
+/// carries a fingerprint but deliberately remains cache-disabled.
 pub fn android_preview_cache_policy(
     root: &Path,
     release: bool,
@@ -817,6 +878,9 @@ pub fn android_preview_cache_policy(
         debug_keystore_hash: signing_policy
             .debug_keystore_identity
             .map(|identity| identity.sha256),
+        android_signing_fingerprint: signing_policy
+            .signing_identity
+            .map(|identity| identity.fingerprint),
     })
 }
 
@@ -2138,6 +2202,102 @@ mod tests {
             android_cache_signing_policy(root.path(), true, &mut second_native).unwrap();
         assert!(second_policy.signing_identity.is_some());
         assert_ne!(first_native_digest, second_native.digest());
+    }
+
+    #[test]
+    fn android_signing_snapshot_copies_only_supported_inputs() {
+        let source = tempfile::tempdir().unwrap();
+        let snapshot = tempfile::tempdir().unwrap();
+        let app = source.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                signingConfigs { create("release") { storeFile = file(keystoreProperties["storeFile"]) } }
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                signingConfig
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            source.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            "storeFile=release.jks\nstorePassword=secret-value\n",
+        )
+        .unwrap();
+        fs::write(app.join("release.jks"), b"private-keystore").unwrap();
+
+        let expected = android_custom_signing_fingerprint(source.path())
+            .unwrap()
+            .unwrap();
+        let copied = prepare_android_signing_snapshot(source.path(), snapshot.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(copied, expected);
+        assert!(
+            snapshot
+                .path()
+                .join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE)
+                .is_file()
+        );
+        assert!(
+            snapshot
+                .path()
+                .join("mobile/android/gradle/app/release.jks")
+                .is_file()
+        );
+        assert_eq!(
+            android_custom_signing_fingerprint(snapshot.path())
+                .unwrap()
+                .as_deref(),
+            Some(expected.as_str())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(snapshot.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn android_preview_policy_exposes_signing_fingerprint_but_disables_live_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                signingConfigs { create("release") { storeFile = file(keystoreProperties["storeFile"]) } }
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                signingConfig
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            "storeFile=release.jks\n",
+        )
+        .unwrap();
+        fs::write(app.join("release.jks"), b"private-keystore").unwrap();
+
+        let policy = android_preview_cache_policy(root.path(), false).unwrap();
+        assert!(
+            policy
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("limited to non-live"))
+        );
+        assert_eq!(
+            policy.android_signing_fingerprint,
+            android_custom_signing_fingerprint(root.path()).unwrap()
+        );
+        assert!(policy.debug_keystore_hash.is_none());
     }
 
     #[test]
