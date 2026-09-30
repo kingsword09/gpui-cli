@@ -448,6 +448,11 @@ pub fn execute<R: ScenarioRunner>(
         Ok(observation) => observation,
         Err(error) => {
             set_driver_failure(&mut report, &error);
+            // A mobile preview may already have launched before the initial
+            // reset/observation preparation fails. Give the runner one
+            // finalization boundary before cleanup so native logs and other
+            // post-run evidence are not lost on an early scenario failure.
+            let _ = runner.finalize(deadline);
             let cleanup = runner.cleanup();
             report.context = runner.context();
             refresh_fixture_hash(&mut report, runner);
@@ -1307,6 +1312,43 @@ mod tests {
             "cleanup_failed"
         );
         assert_eq!(report.steps[0].status, StepStatus::Passed);
+    }
+
+    #[test]
+    fn prepare_failure_finalizes_before_cleanup_for_mobile_evidence() {
+        let mut runner = FakeRunner {
+            prepared: Some(Err(DriverError::unknown(
+                "preview_not_ready",
+                "preview exited before scenario_ready",
+            ))),
+            finalize: Some(Ok(())),
+            context: Some(CheckContext {
+                reset_generation: None,
+                snapshot_hash: None,
+                build_key: None,
+                environment: Some(json!({"os": "android"})),
+                uncontrolled_inputs: Vec::new(),
+                mobile_evidence: Some(json!({"native_logs": {"assigned_to_run": true}})),
+            }),
+            ..FakeRunner::default()
+        };
+        let report = execute(
+            &mut runner,
+            &scenario(vec![assert_step("initial", "value_equals", Some(json!(0)))]),
+            None,
+        );
+
+        assert_eq!(report.status, CheckStatus::Inconclusive);
+        assert_eq!(
+            report.primary_error.as_ref().unwrap().code,
+            "preview_not_ready"
+        );
+        assert!(runner.finalize.is_none());
+        assert_eq!(
+            report.context.as_ref().unwrap().mobile_evidence,
+            Some(json!({"native_logs": {"assigned_to_run": true}}))
+        );
+        assert!(report.cleanup.succeeded);
     }
 
     #[test]
