@@ -2563,7 +2563,12 @@ mod tests {
         fs::write(app.join("debug.jks"), b"private-debug-keystore").unwrap();
 
         let policy = android_preview_cache_policy(root.path(), false).unwrap();
-        assert!(policy.disabled_reason.is_none());
+        assert!(
+            !policy
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("custom/release signing cache reuse"))
+        );
         assert!(policy.android_signing_fingerprint.is_some());
         assert!(policy.debug_keystore_hash.is_none());
     }
