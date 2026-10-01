@@ -431,6 +431,7 @@ struct MobileCapture {
     captures: Vec<CaptureArtifact>,
     native_logs: Option<LogEvidence>,
     stop: Option<StopEvidence>,
+    cleanup_errors: Vec<String>,
 }
 
 impl MobileCapture {
@@ -488,6 +489,7 @@ impl MobileCapture {
             captures: Vec::new(),
             native_logs: None,
             stop: None,
+            cleanup_errors: Vec::new(),
         })
     }
 
@@ -625,27 +627,26 @@ impl MobileCapture {
                 "preserved_resources": stop.preserved_resources,
                 "at_ms": stop.at_ms,
             })),
+            "cleanup_errors": self.cleanup_errors,
         })
     }
 
     fn cleanup(&mut self) -> Result<()> {
-        let stop_result = if let Some(lease) = self.lease.as_ref() {
-            self.runner
-                .stop_owned(&self.identity, lease)
-                .map(|stop| {
-                    self.stop = Some(stop);
-                })
-                .map_err(|error| anyhow::anyhow!("{error:#}"))
-        } else {
-            Ok(())
-        };
-        let release_result = self
-            .lease
-            .take()
-            .map(|lease| lease.release().map_err(|error| anyhow::anyhow!("{error}")));
-        stop_result?;
-        if let Some(result) = release_result {
-            result?;
+        let mut errors = Vec::new();
+        if let Some(lease) = self.lease.as_ref() {
+            match self.runner.stop_owned(&self.identity, lease) {
+                Ok(stop) => self.stop = Some(stop),
+                Err(error) => errors.push(format!("stop_owned: {error:#}")),
+            }
+        }
+        if let Some(lease) = self.lease.take()
+            && let Err(error) = lease.release()
+        {
+            errors.push(format!("lease_release: {error}"));
+        }
+        self.cleanup_errors.extend(errors.iter().cloned());
+        if !errors.is_empty() {
+            bail!("{}", errors.join("; "));
         }
         Ok(())
     }
@@ -2315,7 +2316,9 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    struct EvidenceMobileRunner;
+    struct EvidenceMobileRunner {
+        fail_stop: bool,
+    }
 
     impl MobileRunner for EvidenceMobileRunner {
         fn describe(&self) -> &RunnerInfo {
@@ -2388,6 +2391,9 @@ mod tests {
             identity: &RunIdentity,
             _lease: &DeviceLeaseSession,
         ) -> Result<StopEvidence> {
+            if self.fail_stop {
+                return Err(anyhow::anyhow!("fake stop failed"));
+            }
             Ok(StopEvidence {
                 run_id: identity.run_id.clone(),
                 stopped_owned_process: false,
@@ -2447,7 +2453,7 @@ mod tests {
         };
         let identity = request.prepare(&lease).unwrap().identity;
         let mut capture = MobileCapture {
-            runner: Box::new(EvidenceMobileRunner),
+            runner: Box::new(EvidenceMobileRunner { fail_stop: false }),
             lease: Some(lease),
             identity,
             run_id_bound: false,
@@ -2455,6 +2461,7 @@ mod tests {
             captures: Vec::new(),
             native_logs: None,
             stop: None,
+            cleanup_errors: Vec::new(),
         };
 
         let errors = capture.finalize_and_cleanup();
@@ -2468,6 +2475,44 @@ mod tests {
             "preview run identity was unavailable before scenario_ready"
         );
         assert_eq!(evidence["stop"]["run_id"], "prepared-run");
+        assert!(capture.lease.is_none());
+    }
+
+    #[test]
+    fn cleanup_failure_retains_mobile_evidence_and_releases_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = DeviceLeaseSession::acquire(root.path(), "evidence-device-cleanup").unwrap();
+        let request = RunRequest {
+            run_id: "ready-run".into(),
+            project_id: "project".into(),
+            device_id: "evidence-device-cleanup".into(),
+            bundle_id: "com.example.app".into(),
+            artifact_root: root.path().join("artifacts"),
+            abi: Some("x86_64".into()),
+        };
+        let identity = request.prepare(&lease).unwrap().identity;
+        let mut capture = MobileCapture {
+            runner: Box::new(EvidenceMobileRunner { fail_stop: true }),
+            lease: Some(lease),
+            identity,
+            run_id_bound: true,
+            artifact_root: root.path().join("artifacts"),
+            captures: Vec::new(),
+            native_logs: None,
+            stop: None,
+            cleanup_errors: Vec::new(),
+        };
+
+        let errors = capture.finalize_and_cleanup();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("cleaning up mobile evidence"));
+        let evidence = capture.evidence();
+        assert_eq!(evidence["native_logs"]["assigned_to_run"], true);
+        assert_eq!(evidence["stop"], Value::Null);
+        assert_eq!(
+            evidence["cleanup_errors"][0],
+            "stop_owned: fake stop failed"
+        );
         assert!(capture.lease.is_none());
     }
 
