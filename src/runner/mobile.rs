@@ -299,7 +299,10 @@ pub struct EvidenceEvent {
     pub seq: u64,
     pub at_ms: u64,
     pub run_id: String,
+    pub project_id: String,
     pub device_id: String,
+    pub lease_session_id: String,
+    pub fencing_token_sha256: String,
     pub stage: EvidenceStage,
     pub outcome: EvidenceOutcome,
     pub details: Value,
@@ -404,7 +407,10 @@ impl EvidenceLog {
             seq,
             at_ms,
             run_id: identity.run_id.clone(),
+            project_id: identity.project_id.clone(),
             device_id: identity.device_id.clone(),
+            lease_session_id: identity.lease_session_id.clone(),
+            fencing_token_sha256: identity.fencing_token_sha256.clone(),
             stage,
             outcome,
             details,
@@ -711,6 +717,11 @@ mod tests {
         assert_eq!(log.events[0].seq, 1);
         assert_eq!(log.events[1].seq, 2);
         assert_eq!(log.events[1].outcome, EvidenceOutcome::Unknown);
+        assert_eq!(log.events[0].project_id, "project-1");
+        assert_eq!(log.events[0].lease_session_id, "session-1");
+        assert_eq!(log.events[0].fencing_token_sha256.len(), 64);
+        let encoded = serde_json::to_string(&log).unwrap();
+        assert!(!encoded.contains("secret-token"));
     }
 
     #[test]
@@ -831,7 +842,10 @@ mod tests {
                     "seq": index + 1,
                     "at_ms": index,
                     "run_id": "run-1",
+                    "project_id": "project-1",
                     "device_id": "sim-1",
+                    "lease_session_id": "session-1",
+                    "fencing_token_sha256": token_sha256("secret-token"),
                     "stage": "launch",
                     "outcome": "succeeded",
                     "details": if index == 0 {
