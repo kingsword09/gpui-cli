@@ -52,6 +52,9 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
   lifecycle evidence 保留到 `MatrixReport.context.mobile_evidence`。capture-only cell 仍不生成
   没有 steps 的伪造 scenario `CheckReport`，但其可取得的生命周期证据不会因 cleanup 后才完成
   而丢失。
+- capture-only matrix adapter 和 control-driven scenario runner 都会把 `RunnerInfo` 与
+  `RunnerCapabilities` 写入 `mobile_evidence`，使报告能够追踪选定 runner、host、平台、架构、
+  设备类型、工具声明和能力边界；这些是声明性绑定，不冒充实时设备/前台/viewport 探针。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
@@ -95,6 +98,8 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
 - cleanup 完成后，matrix report 仍会读取 runner context；因此 capture-only mobile lifecycle
   cell 可以展示 launch/capture/native-log/stop/release/cleanup evidence，同时继续保持没有
   scenario steps 就不生成 scenario `CheckReport` 的边界。
+- mobile evidence 还会保留 runner identity/capability metadata；缺失或不可信的实时设备状态
+  仍必须由平台 probe/真实运行验收报告，不能从 `RunnerInfo` 推断。
 - 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；
   unknown 结果仍为 inconclusive，不能重放或降格成普通失败/通过。
 - 没有完成 frozen snapshot build、真实 macOS+iOS simulator+Android emulator 矩阵报告、

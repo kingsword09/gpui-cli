@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-09-30，主分支 `2087d52`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-01，主分支 `cbc0bc1`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -574,7 +574,8 @@ ID，unknown 仍为 inconclusive 且不得重放或伪造成 passed；移动 pre
 在串行和并行 cleanup 后重新读取 runner context，移动 adapter 因而能把 launch、capture、
 native logs、stop、lease release 和 cleanup errors 等 cleanup-finalized evidence 写入
 `MatrixReport.context.mobile_evidence`；capture-only cell 保留这些证据但不生成伪造的 scenario
-`CheckReport`。记录见
+`CheckReport`。两条移动路径也将 `RunnerInfo`/`RunnerCapabilities` 写入该 evidence，绑定
+runner、host、平台、架构、设备类型和声明能力；这些 metadata 不等于实际设备探针。记录见
 [S04 check core](../experiments/S04-check-core-2026-09-28.md)。
 
 当前 desktop 接线已交付：`gpui check --scenario <id> --target desktop` 启动隔离的
@@ -612,7 +613,8 @@ delegated lease，并把实际 run 的 capture/native-log/stop evidence 写入
 前台包名写入 artifact/check evidence，缺失 probe 保持 unknown；admission-unavailable 与
 capture-only mobile lifecycle cell 不生成伪造 scenario report；#223 又让 executor 在 cleanup 后
 重新读取 runner context，因此 capture-only cell 的 launch/capture/native-log/stop/release/cleanup
-evidence 也会进入 `MatrixReport`。移动完整语义/输入和真实设备验收仍未完成。
+evidence 也会进入 `MatrixReport`；#225 又把 runner identity/capability metadata 写入两条移动
+evidence 路径。移动完整语义/输入和真实设备验收仍未完成。
 
 视觉 baseline 静态契约已单独交付：`src/scenario/baseline.rs` 读取项目内
 `dev/baselines/<target>/<baseline_id>/manifest.json`，拒绝越界/符号链接/超限文件，校验
@@ -710,7 +712,7 @@ inconclusive；#219 又覆盖 pre-`scenario_ready` launch/registration failure�
 又把 cleanup stop/release 错误写入 mobile evidence 并保证 lease release 不被 stop failure
 跳过；#223 又让 matrix executor 在 cleanup 后读取 runner context，把 cleanup 才完成的
 stop/release/error evidence 传播到 `MatrixReport`，并为 capture-only cell 保留 lifecycle evidence
-而不生成 scenario report；跨命令
+而不生成 scenario report；#225 又写入 RunnerInfo/RunnerCapabilities 作为声明性环境绑定；跨命令
 共享构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
