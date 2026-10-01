@@ -570,7 +570,11 @@ evidence；action operation 错误详情包含 operation ID 时，step action ev
 ID，unknown 仍为 inconclusive 且不得重放或伪造成 passed；移动 preview 在 `scenario_ready`
 之前 launch/registration 等待失败时，也会保留可取得的 native-log/stop/lease evidence，标记
 `run_id_bound=false`，不生成没有 steps 的伪造 `CheckReport`；cleanup 的 stop/release 错误也
-保留在 `mobile_evidence.cleanup_errors`，stop 失败不能跳过 lease release。记录见
+保留在 `mobile_evidence.cleanup_errors`，stop 失败不能跳过 lease release。matrix executor
+在串行和并行 cleanup 后重新读取 runner context，移动 adapter 因而能把 launch、capture、
+native logs、stop、lease release 和 cleanup errors 等 cleanup-finalized evidence 写入
+`MatrixReport.context.mobile_evidence`；capture-only cell 保留这些证据但不生成伪造的 scenario
+`CheckReport`。记录见
 [S04 check core](../experiments/S04-check-core-2026-09-28.md)。
 
 当前 desktop 接线已交付：`gpui check --scenario <id> --target desktop` 启动隔离的
@@ -606,8 +610,9 @@ matrix control cell 现在也保留完整 steps/证据/cleanup，#211 又让移�
 delegated lease，并把实际 run 的 capture/native-log/stop evidence 写入
 `CheckContext.mobile_evidence`；#213 又将 Android capture 的逻辑 viewport、scale、方向和保守
 前台包名写入 artifact/check evidence，缺失 probe 保持 unknown；admission-unavailable 与
-capture-only mobile lifecycle cell 不生成伪造 scenario report。移动完整语义/输入和真实设备
-验收仍未完成。
+capture-only mobile lifecycle cell 不生成伪造 scenario report；#223 又让 executor 在 cleanup 后
+重新读取 runner context，因此 capture-only cell 的 launch/capture/native-log/stop/release/cleanup
+evidence 也会进入 `MatrixReport`。移动完整语义/输入和真实设备验收仍未完成。
 
 视觉 baseline 静态契约已单独交付：`src/scenario/baseline.rs` 读取项目内
 `dev/baselines/<target>/<baseline_id>/manifest.json`，拒绝越界/符号链接/超限文件，校验
@@ -703,7 +708,9 @@ operation 错误详情含 ID 时保留 step action status/operation ID，unknown
 inconclusive；#219 又覆盖 pre-`scenario_ready` launch/registration failure，返回
 `mobile_evidence`/artifact ids 并明确 `run_id_bound=false`，不生成伪造 scenario report；#221
 又把 cleanup stop/release 错误写入 mobile evidence 并保证 lease release 不被 stop failure
-跳过；跨命令
+跳过；#223 又让 matrix executor 在 cleanup 后读取 runner context，把 cleanup 才完成的
+stop/release/error evidence 传播到 `MatrixReport`，并为 capture-only cell 保留 lifecycle evidence
+而不生成 scenario report；跨命令
 共享构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
