@@ -204,6 +204,26 @@ impl CaptureArtifact {
             run_id: scope.identity.run_id.clone(),
         })
     }
+
+    /// Projects capture metadata into a bounded event detail value without
+    /// exposing the host path or any lease secret.
+    pub fn evidence_details(&self) -> Value {
+        serde_json::json!({
+            "artifact_id": self.artifact_id,
+            "provider": self.provider,
+            "bytes": self.bytes,
+            "sha256": self.sha256,
+            "width": self.width,
+            "height": self.height,
+            "logical_width": self.logical_width,
+            "logical_height": self.logical_height,
+            "scale_milli": self.scale_milli,
+            "orientation": self.orientation,
+            "system_ui": self.system_ui,
+            "foreground_app": self.foreground_app,
+            "run_id": self.run_id,
+        })
+    }
 }
 
 impl RunIdentity {
@@ -616,6 +636,32 @@ mod tests {
         assert!(!json.contains(lease.fencing_token()));
         assert_eq!(prepared.identity.fencing_token_sha256.len(), 64);
         drop(lease);
+    }
+
+    #[test]
+    fn capture_evidence_details_keep_environment_without_host_or_lease_secrets() {
+        let artifact = CaptureArtifact {
+            artifact_id: "png-hash".into(),
+            path: PathBuf::from("/private/host/capture.png"),
+            provider: "adb.exec_out.screencap".into(),
+            bytes: 42,
+            sha256: "hash".into(),
+            width: 1080,
+            height: 2400,
+            logical_width: Some(411),
+            logical_height: Some(914),
+            scale_milli: Some(2636),
+            orientation: Some("portrait".into()),
+            system_ui: true,
+            foreground_app: Some("com.example.app".into()),
+            run_id: "run-1".into(),
+        };
+        let details = artifact.evidence_details();
+        assert_eq!(details["logical_width"], 411);
+        assert_eq!(details["scale_milli"], 2636);
+        assert_eq!(details["foreground_app"], "com.example.app");
+        assert!(details.get("path").is_none());
+        assert!(details.get("fencing_token").is_none());
     }
 
     #[test]
