@@ -529,7 +529,7 @@ impl MobileCapture {
             .ok_or_else(|| anyhow::anyhow!("mobile capture lease has been released"))?;
         let artifact = self.runner.capture(&scope, lease)?;
         artifact
-            .verify()
+            .verify_for_identity(&self.identity)
             .context("verifying mobile screenshot artifact")?;
         self.captures.push(artifact.clone());
         Ok(screenshot_from_mobile_artifact(&artifact))
@@ -621,6 +621,7 @@ impl MobileCapture {
                 "system_ui": capture.system_ui,
                 "foreground_app": capture.foreground_app,
                 "path": relative_path(&capture.path),
+                "manifest_path": relative_path(&capture.manifest_path),
                 "run_id": capture.run_id,
             })).collect::<Vec<_>>(),
             "native_logs": self.native_logs.as_ref().map(|logs| json!({

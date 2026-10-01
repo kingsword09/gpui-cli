@@ -209,6 +209,7 @@ impl MobileRunner for AndroidRunner {
                 artifact.orientation = display.orientation;
                 artifact.foreground_app = display.foreground_app;
             }
+            artifact.publish_manifest(&scope.identity)?;
             Ok(artifact)
         });
         self.record(
