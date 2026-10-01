@@ -61,6 +61,9 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
   时写入摘要/hash；`truncated` 与 `dropped_events` 说明是否发生边界收缩，JSON 反序列化也会
   重新执行相同边界。事件序列用于诊断归属，不把纯 Rust 测试当作真实 simulator/emulator
   fault matrix。
+- capture-only matrix context 还会保留每个 `CaptureArtifact` 的 provider、相对路径、字节数、
+  hash、像素尺寸、逻辑 viewport、scale、方向、系统 UI 标记和保守的前台包名；缺失的 probe
+  字段继续保持 `null/unknown`，不会从 PNG 尺寸反推设备环境。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
@@ -108,6 +111,8 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   仍必须由平台 probe/真实运行验收报告，不能从 `RunnerInfo` 推断。
 - `EvidenceLog` 的 boundedness 只限制事件数量和 detail 序列化大小，保留最近事件并报告收缩诊断；
   它不自动增加 crash、ANR、重连、前台确认或完整 stop/log 语义，仍需真实平台运行记录。
+- capture environment 字段的传播只补齐报告可见性，不把 capture-only cell 提升为完整 scenario
+  steps，也不把保守 foreground marker 变成真实前台切换验收。
 - event log 只传播已有 adapter 事件，不自动增加 crash、ANR、重连或前台确认；这些仍需真实
   平台运行记录。
 - 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；
