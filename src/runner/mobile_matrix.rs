@@ -11,7 +11,7 @@ use super::matrix::{MatrixCellSpec, MatrixCellState};
 use super::matrix_executor::{MatrixCellExecution, MatrixCellRunner};
 use super::mobile::{
     CaptureArtifact, CaptureScope, LaunchEvidence, LogEvidence, MobileRunner, PreparedRun,
-    RunRequest, StopEvidence,
+    RunIdentity, RunRequest, StopEvidence,
 };
 use anyhow::{Result, bail};
 use serde_json::json;
@@ -24,6 +24,7 @@ pub struct MobileMatrixCellRunner<R> {
     lease: Option<DeviceLeaseSession>,
     request: RunRequest,
     artifact_root: PathBuf,
+    run_identity: Option<RunIdentity>,
     prepared: Option<PreparedRun>,
     launch: Option<LaunchEvidence>,
     captures: Vec<CaptureArtifact>,
@@ -45,6 +46,7 @@ impl<R: MobileRunner> MobileMatrixCellRunner<R> {
             lease: Some(lease),
             request,
             artifact_root: artifact_root.into(),
+            run_identity: None,
             prepared: None,
             launch: None,
             captures: Vec::new(),
@@ -91,6 +93,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             })?;
             self.request.prepare(lease)?
         };
+        self.run_identity = Some(prepared_seed.identity.clone());
         self.prepared = Some(prepared_seed);
         let prepared = {
             let lease = self.lease.as_ref().ok_or_else(|| {
@@ -98,6 +101,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             })?;
             self.runner.prepare(&self.request, lease)?
         };
+        self.run_identity = Some(prepared.identity.clone());
         self.prepared = Some(prepared.clone());
 
         Self::check_deadline(deadline, "launch")?;
@@ -224,6 +228,14 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             mobile_evidence: Some(json!({
                 "run_id": self.request.run_id,
                 "device_id": self.request.device_id,
+                "run_id_bound": self.run_identity.is_some(),
+                "run_identity": self.run_identity.as_ref().map(|identity| json!({
+                    "run_id": identity.run_id,
+                    "project_id": identity.project_id,
+                    "device_id": identity.device_id,
+                    "lease_session_id": identity.lease_session_id,
+                    "fencing_token_sha256": identity.fencing_token_sha256,
+                })),
                 "runner": self.runner.describe(),
                 "capabilities": self.runner.capabilities(),
                 "event_log": self.runner.evidence_log(),
@@ -501,6 +513,18 @@ mod tests {
         let context = adapter.context().unwrap();
         let evidence = context.mobile_evidence.unwrap();
         assert_eq!(evidence["lease_released"], true);
+        assert_eq!(evidence["run_id_bound"], true);
+        assert_eq!(evidence["run_identity"]["run_id"], "run-1");
+        assert_eq!(evidence["run_identity"]["device_id"], "fake-device");
+        assert!(evidence["run_identity"]["lease_session_id"].is_string());
+        assert_eq!(
+            evidence["run_identity"]["fencing_token_sha256"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+        assert!(evidence["run_identity"].get("fencing_token").is_none());
         assert_eq!(evidence["runner"]["runner_id"], "fake-mobile");
         assert_eq!(evidence["runner"]["stable_device_id"], "fake-device");
         assert_eq!(evidence["capabilities"]["foreground_probe"], false);
