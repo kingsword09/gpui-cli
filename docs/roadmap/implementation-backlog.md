@@ -569,7 +569,8 @@ assert、capture 的状态转移。断言支持 schema v1 的语义字段、runt
 evidence；action operation 错误详情包含 operation ID 时，step action evidence 保留其状态和
 ID，unknown 仍为 inconclusive 且不得重放或伪造成 passed；移动 preview 在 `scenario_ready`
 之前 launch/registration 等待失败时，也会保留可取得的 native-log/stop/lease evidence，标记
-`run_id_bound=false`，不生成没有 steps 的伪造 `CheckReport`。记录见
+`run_id_bound=false`，不生成没有 steps 的伪造 `CheckReport`；cleanup 的 stop/release 错误也
+保留在 `mobile_evidence.cleanup_errors`，stop 失败不能跳过 lease release。记录见
 [S04 check core](../experiments/S04-check-core-2026-09-28.md)。
 
 当前 desktop 接线已交付：`gpui check --scenario <id> --target desktop` 启动隔离的
@@ -700,7 +701,9 @@ display evidence 传入 capture/check evidence；#215 又让初始 prepare/reset
 scenario 先 finalize 再 cleanup，保留已启动移动 preview 的 post-run evidence；#217 又在 action
 operation 错误详情含 ID 时保留 step action status/operation ID，unknown 仍不重放且保持
 inconclusive；#219 又覆盖 pre-`scenario_ready` launch/registration failure，返回
-`mobile_evidence`/artifact ids 并明确 `run_id_bound=false`，不生成伪造 scenario report；跨命令
+`mobile_evidence`/artifact ids 并明确 `run_id_bound=false`，不生成伪造 scenario report；#221
+又把 cleanup stop/release 错误写入 mobile evidence 并保证 lease release 不被 stop failure
+跳过；跨命令
 共享构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。

@@ -44,6 +44,9 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
   与已有 artifact ids 返回到失败 cell；这条路径不生成伪造的 `CheckReport`。实际 preview
   run 尚未发布时，证据明确写入 `run_id_bound: false`，日志保持 unassigned，不把准备阶段的
   run ID 冒充为实际运行身份。
+- mobile cleanup 会独立记录 `stop_owned` 与 lease release 的错误到
+  `mobile_evidence.cleanup_errors`，即使 stop 失败也继续释放 lease；因此 cleanup failure 不会
+  丢失 run/device 归属证据，也不会把未执行的 stop 伪造成成功。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
@@ -82,6 +85,8 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
 - pre-`scenario_ready` 的 launch/registration failure 现在同样保留可取得的 native-log/stop/
   lease evidence，但没有 scenario steps，因此只记录为失败 cell，不生成完整 scenario report；
   未绑定实际 run 的日志保持 unassigned。
+- cleanup failure 现在同时保留在 scenario cleanup error 和 mobile evidence 的有界错误列表中；
+  stop 与 lease release 分别尝试，lease release 不因 stop failure 被跳过。
 - 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；
   unknown 结果仍为 inconclusive，不能重放或降格成普通失败/通过。
 - 没有完成 frozen snapshot build、真实 macOS+iOS simulator+Android emulator 矩阵报告、
