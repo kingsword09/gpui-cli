@@ -224,6 +224,8 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             mobile_evidence: Some(json!({
                 "run_id": self.request.run_id,
                 "device_id": self.request.device_id,
+                "runner": self.runner.describe(),
+                "capabilities": self.runner.capabilities(),
                 "lease_released": self.lease_released,
                 "launch": self.launch.as_ref().map(|launch| json!({
                     "run_id": launch.run_id,
@@ -486,6 +488,9 @@ mod tests {
         let context = adapter.context().unwrap();
         let evidence = context.mobile_evidence.unwrap();
         assert_eq!(evidence["lease_released"], true);
+        assert_eq!(evidence["runner"]["runner_id"], "fake-mobile");
+        assert_eq!(evidence["runner"]["stable_device_id"], "fake-device");
+        assert_eq!(evidence["capabilities"]["foreground_probe"], false);
         assert_eq!(evidence["native_logs"]["assigned_to_run"], true);
         assert_eq!(evidence["stop"]["run_id"], "run-1");
         assert_eq!(evidence["cleanup_errors"].as_array().unwrap().len(), 0);
