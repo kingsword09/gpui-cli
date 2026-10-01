@@ -9,8 +9,12 @@
 use super::lease::DeviceLeaseSession;
 use super::matrix::{MatrixCellSpec, MatrixCellState};
 use super::matrix_executor::{MatrixCellExecution, MatrixCellRunner};
-use super::mobile::{CaptureScope, MobileRunner, PreparedRun, RunRequest};
+use super::mobile::{
+    CaptureArtifact, CaptureScope, LaunchEvidence, LogEvidence, MobileRunner, PreparedRun,
+    RunRequest, StopEvidence,
+};
 use anyhow::{Result, bail};
+use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -21,6 +25,12 @@ pub struct MobileMatrixCellRunner<R> {
     request: RunRequest,
     artifact_root: PathBuf,
     prepared: Option<PreparedRun>,
+    launch: Option<LaunchEvidence>,
+    captures: Vec<CaptureArtifact>,
+    native_logs: Option<LogEvidence>,
+    stop: Option<StopEvidence>,
+    cleanup_errors: Vec<String>,
+    lease_released: bool,
 }
 
 impl<R: MobileRunner> MobileMatrixCellRunner<R> {
@@ -36,6 +46,12 @@ impl<R: MobileRunner> MobileMatrixCellRunner<R> {
             request,
             artifact_root: artifact_root.into(),
             prepared: None,
+            launch: None,
+            captures: Vec::new(),
+            native_logs: None,
+            stop: None,
+            cleanup_errors: Vec::new(),
+            lease_released: false,
         }
     }
 
@@ -90,6 +106,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("mobile matrix cell lease has already been released"))?;
         let launch = self.runner.launch(&prepared, lease)?;
+        self.launch = Some(launch.clone());
         if launch.process.exited {
             return Ok(MatrixCellExecution {
                 status: MatrixCellState::Failed,
@@ -121,6 +138,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("mobile matrix cell lease has already been released"))?;
         let capture = self.runner.capture(&scope, lease)?;
+        self.captures.push(capture.clone());
 
         Self::check_deadline(deadline, "native logs")?;
         let lease = self
@@ -131,6 +149,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             .runner
             .collect_logs(&prepared.identity, lease)
             .map_err(|error| anyhow::anyhow!("collecting mobile native logs: {error:#}"))?;
+        self.native_logs = Some(logs.clone());
 
         let (status, error) = if launch.process.pid.is_none() {
             (
@@ -162,34 +181,88 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
 
     fn cleanup_cell(&mut self, _cell: &MatrixCellSpec, _deadline: Instant) -> Result<()> {
         let prepared = self.prepared.take();
-        let stop_result = match (prepared.as_ref(), self.lease.as_ref()) {
-            (Some(prepared), Some(lease)) => self
-                .runner
-                .stop_owned(&prepared.identity, lease)
-                .map(|_| ())
-                .map_err(|error| anyhow::anyhow!("stopping mobile run: {error:#}")),
-            (Some(_), None) => Err(anyhow::anyhow!(
-                "mobile run was prepared after its lease was released"
-            )),
-            (None, _) => Ok(()),
-        };
-        let release_result = self
-            .lease
-            .take()
-            .map(|lease| lease.release().map_err(anyhow::Error::new));
-
         let mut errors = Vec::new();
-        if let Err(error) = stop_result {
-            errors.push(error.to_string());
+        match (prepared.as_ref(), self.lease.as_ref()) {
+            (Some(prepared), Some(lease)) => {
+                match self.runner.stop_owned(&prepared.identity, lease) {
+                    Ok(stop) => self.stop = Some(stop),
+                    Err(error) => errors.push(format!("stopping mobile run: {error:#}")),
+                }
+            }
+            (Some(_), None) => {
+                errors.push("mobile run was prepared after its lease was released".into())
+            }
+            (None, _) => {}
         }
-        if let Some(Err(error)) = release_result {
-            errors.push(format!("releasing mobile device lease: {error}"));
+        if let Some(lease) = self.lease.take() {
+            match lease.release() {
+                Ok(()) => self.lease_released = true,
+                Err(error) => errors.push(format!("releasing mobile device lease: {error}")),
+            }
         }
+        self.cleanup_errors.extend(errors.iter().cloned());
         if errors.is_empty() {
             Ok(())
         } else {
             bail!("{}", errors.join("; "))
         }
+    }
+
+    fn context(&self) -> Option<crate::scenario::executor::CheckContext> {
+        let relative_path = |path: &std::path::Path| {
+            path.strip_prefix(&self.artifact_root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned()
+        };
+        Some(crate::scenario::executor::CheckContext {
+            reset_generation: None,
+            snapshot_hash: None,
+            build_key: None,
+            environment: None,
+            uncontrolled_inputs: Vec::new(),
+            mobile_evidence: Some(json!({
+                "run_id": self.request.run_id,
+                "device_id": self.request.device_id,
+                "lease_released": self.lease_released,
+                "launch": self.launch.as_ref().map(|launch| json!({
+                    "run_id": launch.run_id,
+                    "installed": launch.installed,
+                    "process": launch.process,
+                    "channel": launch.channel,
+                    "at_ms": launch.at_ms,
+                })),
+                "captures": self.captures.iter().map(|capture| json!({
+                    "artifact_id": capture.artifact_id,
+                    "provider": capture.provider,
+                    "path": relative_path(&capture.path),
+                    "bytes": capture.bytes,
+                    "sha256": capture.sha256,
+                    "width": capture.width,
+                    "height": capture.height,
+                    "run_id": capture.run_id,
+                })).collect::<Vec<_>>(),
+                "native_logs": self.native_logs.as_ref().map(|logs| json!({
+                    "run_id": logs.run_id,
+                    "source": logs.source,
+                    "path": relative_path(&logs.path),
+                    "bytes": logs.bytes,
+                    "truncated": logs.truncated,
+                    "pid": logs.pid,
+                    "process_start_token_sha256": logs.process_start_token_sha256,
+                    "assigned_to_run": logs.assigned_to_run,
+                    "unassigned_reason": logs.unassigned_reason,
+                })),
+                "stop": self.stop.as_ref().map(|stop| json!({
+                    "run_id": stop.run_id,
+                    "stopped_owned_process": stop.stopped_owned_process,
+                    "removed_owned_resources": stop.removed_owned_resources,
+                    "preserved_resources": stop.preserved_resources,
+                    "at_ms": stop.at_ms,
+                })),
+                "cleanup_errors": self.cleanup_errors,
+            })),
+        })
     }
 }
 
@@ -410,6 +483,12 @@ mod tests {
             *events.lock().unwrap(),
             vec!["prepare", "launch", "capture", "logs", "stop"]
         );
+        let context = adapter.context().unwrap();
+        let evidence = context.mobile_evidence.unwrap();
+        assert_eq!(evidence["lease_released"], true);
+        assert_eq!(evidence["native_logs"]["assigned_to_run"], true);
+        assert_eq!(evidence["stop"]["run_id"], "run-1");
+        assert_eq!(evidence["cleanup_errors"].as_array().unwrap().len(), 0);
         assert!(!root.path().join("captures/android__smoke.png").exists());
     }
 
