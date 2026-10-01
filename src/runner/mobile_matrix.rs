@@ -13,7 +13,7 @@ use super::mobile::{
     CaptureArtifact, CaptureScope, LaunchEvidence, LogEvidence, MobileRunner, PreparedRun,
     RunIdentity, RunRequest, StopEvidence,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
@@ -141,7 +141,13 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             .lease
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("mobile matrix cell lease has already been released"))?;
-        let capture = self.runner.capture(&scope, lease)?;
+        let capture = self
+            .runner
+            .capture(&scope, lease)
+            .context("capturing mobile screenshot")?;
+        capture
+            .verify()
+            .context("verifying mobile screenshot artifact")?;
         self.captures.push(capture.clone());
 
         Self::check_deadline(deadline, "native logs")?;
@@ -410,22 +416,19 @@ mod tests {
             _lease: &DeviceLeaseSession,
         ) -> Result<CaptureArtifact> {
             self.event("capture");
-            Ok(CaptureArtifact {
-                artifact_id: "png-fake".into(),
-                path: scope.output.clone(),
-                provider: "fake".into(),
-                bytes: 1,
-                sha256: "fake".into(),
-                width: 1,
-                height: 1,
-                logical_width: Some(360),
-                logical_height: Some(800),
-                scale_milli: Some(3000),
-                orientation: Some("portrait".into()),
-                system_ui: true,
-                foreground_app: Some("com.example.app".into()),
-                run_id: scope.identity.run_id.clone(),
-            })
+            let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+            png.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
+            png.extend_from_slice(&1_u32.to_be_bytes());
+            png.extend_from_slice(&1_u32.to_be_bytes());
+            png.extend_from_slice(&[0; 5]);
+            fs::write(&scope.output, png).unwrap();
+            let mut artifact = CaptureArtifact::from_png(scope, "fake", true)?;
+            artifact.logical_width = Some(360);
+            artifact.logical_height = Some(800);
+            artifact.scale_milli = Some(3000);
+            artifact.orientation = Some("portrait".into());
+            artifact.foreground_app = Some("com.example.app".into());
+            Ok(artifact)
         }
 
         fn collect_logs(
@@ -502,7 +505,9 @@ mod tests {
             .run_cell(&cell(), Instant::now() + std::time::Duration::from_secs(1))
             .unwrap();
         assert_eq!(execution.status, MatrixCellState::Passed);
-        assert_eq!(execution.artifact_ids, vec!["png-fake"]);
+        assert_eq!(execution.artifact_ids.len(), 1);
+        assert!(execution.artifact_ids[0].starts_with("png-"));
+        assert_eq!(execution.artifact_ids[0].len(), 68);
         adapter
             .cleanup_cell(&cell(), Instant::now() + std::time::Duration::from_secs(1))
             .unwrap();
@@ -588,7 +593,9 @@ mod tests {
             execution.error.as_ref().map(|error| error.code.as_str()),
             Some("mobile_process_identity_unavailable")
         );
-        assert_eq!(execution.artifact_ids, vec!["png-fake"]);
+        assert_eq!(execution.artifact_ids.len(), 1);
+        assert!(execution.artifact_ids[0].starts_with("png-"));
+        assert_eq!(execution.artifact_ids[0].len(), 68);
         adapter.cleanup_cell(&cell(), Instant::now()).unwrap();
     }
 }
