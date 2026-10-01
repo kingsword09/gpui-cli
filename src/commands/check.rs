@@ -589,10 +589,18 @@ impl MobileCapture {
         };
         json!({
             "run_id": self.identity.run_id,
+            "project_id": self.identity.project_id,
             "run_id_bound": self.run_id_bound,
             "device_id": self.identity.device_id,
             "lease_session_id": self.identity.lease_session_id,
             "fencing_token_sha256": self.identity.fencing_token_sha256,
+            "run_identity": self.run_id_bound.then(|| json!({
+                "run_id": self.identity.run_id,
+                "project_id": self.identity.project_id,
+                "device_id": self.identity.device_id,
+                "lease_session_id": self.identity.lease_session_id,
+                "fencing_token_sha256": self.identity.fencing_token_sha256,
+            })),
             "runner": self.runner.describe(),
             "capabilities": self.runner.capabilities(),
             "event_log": self.runner.evidence_log(),
@@ -2477,6 +2485,9 @@ mod tests {
         assert!(errors[0].contains("finalizing mobile evidence"));
         let evidence = capture.evidence();
         assert_eq!(evidence["run_id_bound"], false);
+        assert_eq!(evidence["project_id"], "project");
+        assert_eq!(evidence["run_identity"], Value::Null);
+        assert!(evidence.get("fencing_token").is_none());
         assert_eq!(evidence["runner"]["runner_id"], "evidence-test");
         assert_eq!(evidence["capabilities"]["native_logs"], true);
         assert_eq!(evidence["event_log"]["contract_version"], 1);
@@ -2518,6 +2529,22 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("cleaning up mobile evidence"));
         let evidence = capture.evidence();
+        assert_eq!(evidence["project_id"], "project");
+        assert_eq!(evidence["run_identity"]["run_id"], "ready-run");
+        assert_eq!(evidence["run_identity"]["project_id"], "project");
+        assert_eq!(
+            evidence["run_identity"]["device_id"],
+            "evidence-device-cleanup"
+        );
+        assert!(evidence["run_identity"]["lease_session_id"].is_string());
+        assert_eq!(
+            evidence["run_identity"]["fencing_token_sha256"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
+        assert!(evidence["run_identity"].get("fencing_token").is_none());
         assert_eq!(evidence["native_logs"]["assigned_to_run"], true);
         assert_eq!(evidence["stop"], Value::Null);
         assert_eq!(
