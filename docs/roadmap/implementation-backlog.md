@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-01，主分支 `0e11688`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-01，主分支 `119f6ec`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -374,7 +374,9 @@ scale、方向和保守前台包名，并在 probe 缺失时保留 unknown；#23
 capture-only matrix context；#233 又在该 context 中保留 prepare 阶段的 run identity、lease session
 和 fencing token 摘要，原始 token 不进入 JSON；#235 又让 control-driven scenario evidence 补齐
 project identity，并在 run 绑定后保留嵌套 run identity；设备重连状态机、完整截图 artifact
-manifest 和真实设备矩阵证据仍未完成，不能把当前测试写成 M01/M02 的真实设备验收。记录见
+manifest 和真实设备矩阵证据仍未完成，不能把当前测试写成 M01/M02 的真实设备验收。#237 又把
+已取得 capture artifact/hash/viewport/scale/orientation/foreground metadata 写入 bounded capture
+event detail，不写 host path 或 lease secret。记录见
 [M03 device lease](../experiments/M03-device-lease-2026-09-28.md)。
 
 ### M04 · 冻结源码与确定构建键
@@ -585,7 +587,8 @@ runner、host、平台、架构、设备类型和声明能力；这些 metadata 
 还传播 capture provider/path/hash、逻辑 viewport、scale、方向、系统 UI 和前台包名等环境字段，
 并保留 prepare 阶段的 run identity、lease session 和 fencing token 摘要；原始 token 不进入 JSON。
 control-driven scenario evidence 还会补齐 project_id，并在 run 绑定后发布嵌套 run identity，未绑定时
-保持 null。记录见
+保持 null；capture event detail 也会保留已取得的 artifact/hash/viewport/scale/orientation/foreground
+metadata，不写 host path 或 lease secret。记录见
 [S04 check core](../experiments/S04-check-core-2026-09-28.md)。
 
 当前 desktop 接线已交付：`gpui check --scenario <id> --target desktop` 启动隔离的
@@ -628,7 +631,7 @@ evidence 路径；#227 又把 install/launch/capture/process/channel/log/stop ev
 又把 capture-only capture provider/path/hash、逻辑 viewport、scale、方向、系统 UI 和前台包名传播到
 matrix context；#233 又保留 prepare 阶段的 run identity、lease session 和 fencing token 摘要，原始
 token 不进入 JSON；#235 又让 control-driven scenario evidence 在 run 绑定后发布同一嵌套 identity，
-未绑定时保持 null。
+未绑定时保持 null；#237 又让 capture event detail 复用同一 bounded artifact metadata。
 移动完整语义/输入和真实设备验收仍未完成。
 
 视觉 baseline 静态契约已单独交付：`src/scenario/baseline.rs` 读取项目内
@@ -732,7 +735,8 @@ stop/release/error evidence 传播到 `MatrixReport`，并为 capture-only cell 
 边界，#231 又将 capture-only 的完整 CaptureArtifact 环境字段传播到 matrix context；#233 又将
 prepare 阶段的 run identity、lease session 和 fencing token 摘要保留到同一 context；#235 又让
 control-driven scenario evidence 在实际 run 绑定后发布同一嵌套 identity；跨命令共享
-构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入，真实 fault matrix 仍未接入。
+构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入，真实 fault matrix 仍未接入；capture
+event detail 的 metadata 传播也不替代这些验收。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。

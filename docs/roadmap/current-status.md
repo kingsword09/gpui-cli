@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-01（Asia/Shanghai）。核查代码：`0e11688`（PR #235 squash merge）。
+更新日期：2026-10-01（Asia/Shanghai）。核查代码：`119f6ec`（PR #237 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -42,6 +42,8 @@ scale、方向、系统 UI 和保守前台包名等环境字段，并保留 prep
 不进入 JSON，未建立身份时显式写入 `run_id_bound=false`。真实设备 fault matrix、重连和连续验收
 仍未完成。control-driven mobile scenario evidence 也补齐 `project_id`，并仅在实际 preview
 run 已绑定后发布嵌套 `run_identity`；`scenario_ready` 之前保持 `run_identity=null`。
+移动 runner 的 capture event 现在也保留已取得的 artifact/hash、像素与逻辑 viewport、scale、方向、
+系统 UI 和前台 marker；host path 与 lease secret 不进入事件详情，缺失探针继续保持 null/unknown。
 现阶段仍未完成
 preview/移动 capture-only 路径的完整 scenario 语义/输入验收、MCP、
 复现包或性能验证闭环。
@@ -109,6 +111,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `dda6ffe`（#231） | capture-only mobile matrix context 补齐 `CaptureArtifact` 的 provider/path/bytes/hash、逻辑 viewport、scale、方向、系统 UI 和前台包名字段，避免报告只剩像素尺寸与 run id | 只补证据传播，不等于厂商 display probe 稳定、真实前台切换/旋转/DPI 验收或完整设备矩阵已通过 |
 | `0073cf4`（#233） | capture-only mobile matrix context 保留 prepare 阶段的 `run_identity`，包括 run/project/device、lease session 和 fencing token 摘要；原始 fencing token 不进入 JSON，身份缺失时以 `run_id_bound=false` 表示 | 只补同一 run/lease 的可核对证据，不等于真实设备 lease 竞争、重连、token 轮换或完整移动 scenario 验收已通过 |
 | `0e11688`（#235） | control-driven mobile scenario evidence 补齐 `project_id`，并在 `run_id_bound=true` 时发布嵌套 `run_identity`；scenario_ready 前保持 null，原始 fencing token 仍不进入 JSON | 只统一 scenario 路径的身份证据形状，不等于 preview run 绑定之外的真实设备连续验收、重连或 token 轮换已通过 |
+| `119f6ec`（#237） | iOS/Android capture event detail 记录已取得的 artifact/hash、像素/逻辑尺寸、scale、方向、系统 UI、前台 marker 和 run id；不记录 host path 或 lease secret | 只增强有界事件序列的诊断可见性，不增加缺失的设备探针、真实前台切换或连续设备验收 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -279,6 +282,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | 本地运行时验证（PR #235） | 387 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check、package list 均通过 |
 | PR #235 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
 | PR #235 合并 | squash merge `0e11688`；无发布/tag |
+| 本地运行时验证（PR #237） | 388 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check、package list 均通过 |
+| PR #237 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
+| PR #237 合并 | squash merge `119f6ec`；无发布/tag |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
@@ -292,8 +298,8 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | matrix frozen inputs | #157 创建 shared snapshot，#159 写入 per-cell context，#161 写入 target-specific BuildKey，#163 绑定 source-project output layout 并串行同 key cell，#165 在 preview builder 取得该 output root 的跨进程锁，#167 保留 control scenario cell 的完整 CheckReport；仍未声称跨命令共享构建或真实三端 evidence | [S04 frozen matrix snapshot](../experiments/S04-frozen-matrix-snapshot-2026-09-29.md)、[S04 matrix context](../experiments/S04-matrix-context-2026-09-29.md)、[S04 matrix target BuildKey](../experiments/S04-matrix-target-build-key-2026-09-29.md)、[S04 matrix build output layout](../experiments/S04-matrix-build-output-layout-2026-09-29.md)、[S04 preview build output lock](../experiments/S04-preview-build-output-lock-2026-09-29.md)、[S04 matrix cell reports](../experiments/S04-matrix-cell-reports-2026-09-29.md) |
 | preview output lock | preview desktop/iOS/Android build 在 source-project target-specific root 上通过持久 lock file 做跨进程排他；锁 guard 覆盖 preview build 过程并在进程退出/崩溃时由 OS 释放；只验证 lock 阻塞和 guard drop 释放，不声称命中或合并构建 | [S04 preview build output lock](../experiments/S04-preview-build-output-lock-2026-09-29.md) |
 | matrix cell report | control scenario cell 的 `MatrixCellResult.check_report` 保留完整 steps、证据、primary error、cleanup 和 context，并通过 JSON round-trip 验证；executor 在 cleanup 后仍保留 runner context；unavailable/capture-only cell 不生成伪报告，但 capture-only lifecycle、runner metadata 与 event log 可见 | [S04 matrix cell reports](../experiments/S04-matrix-cell-reports-2026-09-29.md) |
-| mobile scenario lease/evidence | #211 由 matrix supervisor 持有唯一设备 OS lease，preview 子进程只使用 owner path/session/token digest delegation；capture/native logs/stop evidence 绑定 preview 实际 run 并进入 `CheckContext.mobile_evidence`；#217 让 action operation 错误保留 operation ID 与 action status；#219 覆盖 pre-`scenario_ready` launch/registration failure；#221 记录 cleanup stop/release 错误并保证 stop failure 后仍释放 lease；#223 让 cleanup 后完成的 context/evidence 进入 `MatrixReport`；#225 写入 RunnerInfo/RunnerCapabilities；#227 保留已有 EvidenceLog 的生命周期事件序列；#229 将事件数量、detail 大小、淘汰诊断和 JSON 反序列化统一设为有界；#231 将 capture-only 的完整环境字段传播进 matrix context；#233 保留 prepare 阶段的 run identity 和 fencing token 摘要，原始 token 不进入 JSON；#235 让 control-driven scenario evidence 在 run 绑定后也提供嵌套 run identity，未绑定时保持 null；unknown 仍为 inconclusive 且不重放；未声称真实设备矩阵已通过 | [M02 matrix contract](../experiments/M02-matrix-contract-2026-09-28.md) |
-| Android capture environment | #213 将 Android display probe 的逻辑 viewport、scale、方向和保守前台包名写入 capture/check evidence；#231 又将这些字段连同 provider/path/hash/system UI 传播到 capture-only matrix context；adb 或厂商输出缺失时保持 unknown；未声称真实设备环境验收已通过 | [M01 Android runner](../experiments/M01-android-runner-2026-09-28.md) |
+| mobile scenario lease/evidence | #211 由 matrix supervisor 持有唯一设备 OS lease，preview 子进程只使用 owner path/session/token digest delegation；capture/native logs/stop evidence 绑定 preview 实际 run 并进入 `CheckContext.mobile_evidence`；#217 让 action operation 错误保留 operation ID 与 action status；#219 覆盖 pre-`scenario_ready` launch/registration failure；#221 记录 cleanup stop/release 错误并保证 stop failure 后仍释放 lease；#223 让 cleanup 后完成的 context/evidence 进入 `MatrixReport`；#225 写入 RunnerInfo/RunnerCapabilities；#227 保留已有 EvidenceLog 的生命周期事件序列；#229 将事件数量、detail 大小、淘汰诊断和 JSON 反序列化统一设为有界；#231 将 capture-only 的完整环境字段传播进 matrix context；#233 保留 prepare 阶段的 run identity 和 fencing token 摘要，原始 token 不进入 JSON；#235 让 control-driven scenario evidence 在 run 绑定后也提供嵌套 run identity，未绑定时保持 null；#237 让 capture event detail 复用有界 artifact/hash/viewport/scale/orientation/foreground 元数据，不写 host path 或 lease secret；unknown 仍为 inconclusive 且不重放；未声称真实设备矩阵已通过 | [M02 matrix contract](../experiments/M02-matrix-contract-2026-09-28.md) |
+| Android capture environment | #213 将 Android display probe 的逻辑 viewport、scale、方向和保守前台包名写入 capture/check evidence；#231 又将这些字段连同 provider/path/hash/system UI 传播到 capture-only matrix context；#237 又把已取得字段写入 bounded capture event detail；adb 或厂商输出缺失时保持 unknown；未声称真实设备环境验收已通过 | [M01 Android runner](../experiments/M01-android-runner-2026-09-28.md) |
 | desktop preview cache hit | preview 专用 manifest 绑定 desktop platform/BuildKey hash，逐文件验证内容并要求唯一 Cargo 可执行文件；命中跳过 Cargo，任何验证失败都 miss 并回退正常构建 | [T06 desktop preview cache hit](../experiments/T06-desktop-preview-cache-hit-2026-09-29.md) |
 | iOS simulator live preview cache hit | preview 专用 manifest 绑定 iOS platform/BuildKey hash，逐文件验证 `.app` 内容并要求根正是当前 simulator bundle；命中跳过 rustup/Cargo/XcodeGen/`xcodebuild`，physical device 不命中 | [T06 iOS preview cache hit](../experiments/T06-ios-preview-cache-hit-2026-09-29.md) |
 | Android default-debug live preview cache hit | preview 专用 manifest 绑定 Android platform/BuildKey/ABI，逐文件验证 JNI staging 与 debug APK 输出；default debug keystore 和 cache policy 仍有效时命中并跳过 rustup/cargo-ndk/Gradle | [T06 Android preview cache hit](../experiments/T06-android-preview-cache-hit-2026-09-29.md) |
@@ -315,7 +321,7 @@ fixture 探针直接编译当前 `previews.rs`，只用最小 env/report bridge 
 PNG 仅有临时路径和记录 hash，未形成持久 CI 产物；#211/#223 修复该路径的 lease/run 归属与
 cleanup-finalized report evidence 接线，
 本轮没有重跑 GUI 或设备验收；#233 补充 capture-only 同一 run/lease 身份字段，#235 将同一边界
-传播到 control-driven scenario evidence。
+传播到 control-driven scenario evidence，#237 将已取得 capture metadata 写入事件序列。
 
 ## 6. 后续接续顺序
 
