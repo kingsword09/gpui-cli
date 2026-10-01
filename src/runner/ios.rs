@@ -130,6 +130,10 @@ impl MobileRunner for IosSimulatorRunner {
         self.capabilities.clone()
     }
 
+    fn evidence_log(&self) -> Option<&EvidenceLog> {
+        Some(&self.evidence)
+    }
+
     fn prepare(&mut self, request: &RunRequest, lease: &DeviceLeaseSession) -> Result<PreparedRun> {
         self.check_target(request)?;
         let prepared = request.prepare(lease)?;

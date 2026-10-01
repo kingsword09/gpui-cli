@@ -417,6 +417,14 @@ impl EvidenceLog {
 pub trait MobileRunner {
     fn describe(&self) -> &RunnerInfo;
     fn capabilities(&self) -> RunnerCapabilities;
+
+    /// Returns the bounded platform event sequence collected by adapters that
+    /// implement native lifecycle evidence. Runners without an event log may
+    /// leave this unset without changing the lifecycle contract.
+    fn evidence_log(&self) -> Option<&EvidenceLog> {
+        None
+    }
+
     fn prepare(&mut self, request: &RunRequest, lease: &DeviceLeaseSession) -> Result<PreparedRun>;
     fn launch(
         &mut self,

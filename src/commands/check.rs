@@ -595,6 +595,7 @@ impl MobileCapture {
             "fencing_token_sha256": self.identity.fencing_token_sha256,
             "runner": self.runner.describe(),
             "capabilities": self.runner.capabilities(),
+            "event_log": self.runner.evidence_log(),
             "captures": self.captures.iter().map(|capture| json!({
                 "artifact_id": capture.artifact_id,
                 "provider": capture.provider,
@@ -2314,7 +2315,7 @@ fn driver_to_anyhow(error: DriverError) -> anyhow::Error {
 mod tests {
     use super::*;
     use crate::runner::mobile::{
-        CaptureArtifact, LaunchEvidence, PreparedRun, RunnerCapabilities, RunnerInfo,
+        CaptureArtifact, EvidenceLog, LaunchEvidence, PreparedRun, RunnerCapabilities, RunnerInfo,
     };
     use std::collections::BTreeMap;
 
@@ -2344,6 +2345,11 @@ mod tests {
                 stop_owned: true,
                 ..RunnerCapabilities::default()
             }
+        }
+
+        fn evidence_log(&self) -> Option<&EvidenceLog> {
+            static LOG: std::sync::OnceLock<EvidenceLog> = std::sync::OnceLock::new();
+            Some(LOG.get_or_init(EvidenceLog::new))
         }
 
         fn prepare(
@@ -2473,6 +2479,7 @@ mod tests {
         assert_eq!(evidence["run_id_bound"], false);
         assert_eq!(evidence["runner"]["runner_id"], "evidence-test");
         assert_eq!(evidence["capabilities"]["native_logs"], true);
+        assert_eq!(evidence["event_log"]["contract_version"], 1);
         assert_eq!(evidence["native_logs"]["assigned_to_run"], false);
         assert_eq!(
             evidence["native_logs"]["unassigned_reason"],
