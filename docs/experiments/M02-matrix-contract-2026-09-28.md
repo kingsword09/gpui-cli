@@ -64,6 +64,10 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 - capture-only matrix context 还会保留每个 `CaptureArtifact` 的 provider、相对路径、字节数、
   hash、像素尺寸、逻辑 viewport、scale、方向、系统 UI 标记和保守的前台包名；缺失的 probe
   字段继续保持 `null/unknown`，不会从 PNG 尺寸反推设备环境。
+- capture-only matrix context 还会保留 prepare 阶段生成的 `RunIdentity`：`run_id`、`project_id`、
+  `device_id`、`lease_session_id` 和 `fencing_token_sha256`。原始 fencing token 不进入 JSON；
+  如果 prepare 无法建立身份，报告显式写入 `run_id_bound: false`，不把请求级 run id 冒充为
+  已绑定的 lease/run 身份。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
@@ -113,6 +117,8 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   它不自动增加 crash、ANR、重连、前台确认或完整 stop/log 语义，仍需真实平台运行记录。
 - capture environment 字段的传播只补齐报告可见性，不把 capture-only cell 提升为完整 scenario
   steps，也不把保守 foreground marker 变成真实前台切换验收。
+- run identity 字段只补充同一 run 与 delegated lease 的可核对归属；token 摘要不证明设备仍由
+  当前进程持有，原始 token 不可从 JSON 恢复，仍需真实 lease 竞争、重连和 fencing 验收。
 - event log 只传播已有 adapter 事件，不自动增加 crash、ANR、重连或前台确认；这些仍需真实
   平台运行记录。
 - 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；

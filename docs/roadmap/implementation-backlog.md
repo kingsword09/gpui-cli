@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-01，主分支 `dda6ffe`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-01，主分支 `0073cf4`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -371,7 +371,8 @@ scenario driver 现在复用该 lease 做 native capture；#211 又让 matrix su
 lease、preview 子进程使用 owner delegation，并把实际 run 的 capture/native-log/stop evidence
 写入 `CheckContext.mobile_evidence`；#213 又让 Android capture best-effort 补充逻辑 viewport、
 scale、方向和保守前台包名，并在 probe 缺失时保留 unknown；#231 又把这些环境字段传播到
-capture-only matrix context；设备重连状态机、完整截图 artifact
+capture-only matrix context；#233 又在该 context 中保留 prepare 阶段的 run identity、lease session
+和 fencing token 摘要，原始 token 不进入 JSON；设备重连状态机、完整截图 artifact
 manifest 和真实设备矩阵证据仍未完成，不能把当前测试写成 M01/M02 的真实设备验收。记录见
 [M03 device lease](../experiments/M03-device-lease-2026-09-28.md)。
 
@@ -580,7 +581,8 @@ runner、host、平台、架构、设备类型和声明能力；这些 metadata 
 `EvidenceLog` 也会作为有界事件序列一并保留：每个 run 最多保留 128 条事件，单条
 `details` 序列化结果最多 16 KiB；淘汰最旧事件、保留最新生命周期记录，超限 detail 改为摘要/hash，
 并以 `truncated`/`dropped_events` 记录诊断，反序列化同样执行边界。capture-only matrix context
-还传播 capture provider/path/hash、逻辑 viewport、scale、方向、系统 UI 和前台包名等环境字段。记录见
+还传播 capture provider/path/hash、逻辑 viewport、scale、方向、系统 UI 和前台包名等环境字段，
+并保留 prepare 阶段的 run identity、lease session 和 fencing token 摘要；原始 token 不进入 JSON。记录见
 [S04 check core](../experiments/S04-check-core-2026-09-28.md)。
 
 当前 desktop 接线已交付：`gpui check --scenario <id> --target desktop` 启动隔离的
@@ -621,7 +623,8 @@ capture-only mobile lifecycle cell 不生成伪造 scenario report；#223 又让
 evidence 也会进入 `MatrixReport`；#225 又把 runner identity/capability metadata 写入两条移动
 evidence 路径；#227 又把 install/launch/capture/process/channel/log/stop event log 写入报告；#231
 又把 capture-only capture provider/path/hash、逻辑 viewport、scale、方向、系统 UI 和前台包名传播到
-matrix context。
+matrix context；#233 又保留 prepare 阶段的 run identity、lease session 和 fencing token 摘要，原始
+token 不进入 JSON。
 移动完整语义/输入和真实设备验收仍未完成。
 
 视觉 baseline 静态契约已单独交付：`src/scenario/baseline.rs` 读取项目内
@@ -722,7 +725,8 @@ inconclusive；#219 又覆盖 pre-`scenario_ready` launch/registration failure�
 stop/release/error evidence 传播到 `MatrixReport`，并为 capture-only cell 保留 lifecycle evidence
 而不生成 scenario report；#225 又写入 RunnerInfo/RunnerCapabilities 作为声明性环境绑定；#227
 接通已有 EvidenceLog 报告传播，#229 为其补齐事件数量、detail 大小、淘汰诊断和 JSON 反序列化
-边界，#231 又将 capture-only 的完整 CaptureArtifact 环境字段传播到 matrix context；跨命令共享
+边界，#231 又将 capture-only 的完整 CaptureArtifact 环境字段传播到 matrix context；#233 又将
+prepare 阶段的 run identity、lease session 和 fencing token 摘要保留到同一 context；跨命令共享
 构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入，真实 fault matrix 仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
