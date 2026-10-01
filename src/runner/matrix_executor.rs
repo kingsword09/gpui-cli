@@ -69,6 +69,13 @@ pub trait MatrixCellRunner {
     -> Result<MatrixCellExecution>;
 
     fn cleanup_cell(&mut self, cell: &MatrixCellSpec, deadline: Instant) -> Result<()>;
+
+    /// Returns evidence that is finalized by cleanup. Mobile lifecycle
+    /// adapters use this to publish stop/release evidence after the cell has
+    /// relinquished its device resources.
+    fn context(&self) -> Option<crate::scenario::executor::CheckContext> {
+        None
+    }
 }
 
 /// Runs admitted cells through one runner adapter and produces the same report
@@ -137,7 +144,7 @@ pub fn execute_matrix<R: MatrixCellRunner>(
             } else {
                 (execution.status, execution.error)
             };
-            let context = execution.context;
+            let context = runner.context().or(execution.context);
             let check_report = execution.check_report;
             scheduler.complete_with_context(
                 &cell_id,
@@ -373,7 +380,7 @@ where
     } else {
         (execution.status, execution.error)
     };
-    let context = execution.context;
+    let context = runner.context().or(execution.context);
     let check_report = execution.check_report;
     let artifact_ids = execution.artifact_ids;
     drop(resource_guard);
@@ -598,6 +605,49 @@ mod tests {
         assert_eq!(
             json["cells"][0]["context"]["snapshot_hash"],
             "snapshot-hash"
+        );
+    }
+
+    #[test]
+    fn executor_publishes_context_finalized_during_cleanup() {
+        struct CleanupContextRunner {
+            cleaned: bool,
+        }
+
+        impl MatrixCellRunner for CleanupContextRunner {
+            fn run_cell(
+                &mut self,
+                _cell: &MatrixCellSpec,
+                _deadline: Instant,
+            ) -> Result<MatrixCellExecution> {
+                Ok(MatrixCellExecution::passed(Vec::new()))
+            }
+
+            fn cleanup_cell(&mut self, _cell: &MatrixCellSpec, _deadline: Instant) -> Result<()> {
+                self.cleaned = true;
+                Ok(())
+            }
+
+            fn context(&self) -> Option<CheckContext> {
+                self.cleaned.then_some(CheckContext {
+                    reset_generation: None,
+                    snapshot_hash: None,
+                    build_key: None,
+                    environment: None,
+                    uncontrolled_inputs: Vec::new(),
+                    mobile_evidence: Some(json!({"lease_released": true})),
+                })
+            }
+        }
+
+        let mut runner = CleanupContextRunner { cleaned: false };
+        let mut one_cell_plan = plan();
+        one_cell_plan.cells.truncate(1);
+        let report = execute_matrix(one_cell_plan, &mut runner, Instant::now()).unwrap();
+
+        assert_eq!(
+            report.cells[0].context.as_ref().unwrap().mobile_evidence,
+            Some(json!({"lease_released": true}))
         );
     }
 
