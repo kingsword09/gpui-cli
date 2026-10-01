@@ -205,6 +205,58 @@ impl CaptureArtifact {
         })
     }
 
+    /// Revalidates the on-disk capture before it is published as matrix or
+    /// scenario evidence. A runner may return after another process has
+    /// replaced the output, so the metadata captured at write time is not
+    /// sufficient on its own.
+    pub fn verify(&self) -> Result<()> {
+        verify_capture_path(&self.path)?;
+        let metadata = fs::metadata(&self.path)
+            .with_context(|| format!("reading capture metadata at {}", self.path.display()))?;
+        if !metadata.is_file() {
+            bail!(
+                "capture output is not a regular file: {}",
+                self.path.display()
+            );
+        }
+        if metadata.len() == 0 || metadata.len() > MAX_CAPTURE_BYTES {
+            bail!(
+                "capture output size {} is outside the allowed range",
+                metadata.len()
+            );
+        }
+        let bytes = fs::read(&self.path)
+            .with_context(|| format!("reading capture output {}", self.path.display()))?;
+        if bytes.len() as u64 != self.bytes {
+            bail!(
+                "capture byte count changed: expected {}, found {}",
+                self.bytes,
+                bytes.len()
+            );
+        }
+        let actual_sha256 = sha256(&bytes);
+        if actual_sha256 != self.sha256 {
+            bail!("capture SHA-256 changed after publication");
+        }
+        let (width, height) = png_dimensions(&bytes)?;
+        if (width, height) != (self.width, self.height) {
+            bail!(
+                "capture dimensions changed: expected {}x{}, found {}x{}",
+                self.width,
+                self.height,
+                width,
+                height
+            );
+        }
+        let expected_artifact_id = format!("png-{actual_sha256}");
+        if self.artifact_id != expected_artifact_id {
+            bail!(
+                "capture artifact id does not match its SHA-256: expected {expected_artifact_id}"
+            );
+        }
+        Ok(())
+    }
+
     /// Projects capture metadata into a bounded event detail value without
     /// exposing the host path or any lease secret.
     pub fn evidence_details(&self) -> Value {
@@ -228,19 +280,23 @@ impl CaptureArtifact {
 
 impl RunIdentity {
     fn verify_output_path(&self, path: &Path) -> Result<()> {
-        if path.as_os_str().is_empty() {
-            bail!("capture output path is empty");
-        }
-        if let Ok(metadata) = fs::symlink_metadata(path)
-            && metadata.file_type().is_symlink()
-        {
-            bail!(
-                "refusing to read capture through symbolic link: {}",
-                path.display()
-            );
-        }
-        Ok(())
+        verify_capture_path(path)
     }
+}
+
+fn verify_capture_path(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        bail!("capture output path is empty");
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        bail!(
+            "refusing to read capture through symbolic link: {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -976,5 +1032,38 @@ mod tests {
         assert_eq!((artifact.width, artifact.height), (2, 3));
         assert!(artifact.system_ui);
         assert_eq!(artifact.run_id, identity.run_id);
+    }
+
+    #[test]
+    fn capture_artifact_verification_rejects_replaced_output() {
+        let root = lease_root();
+        let output = root.path().join("capture.png");
+        let identity = RunIdentity {
+            run_id: "run-1".into(),
+            project_id: "project-1".into(),
+            device_id: "sim-1".into(),
+            lease_session_id: "session-1".into(),
+            fencing_token: "token".into(),
+            fencing_token_sha256: token_sha256("token"),
+        };
+        let scope = CaptureScope {
+            identity,
+            output: output.clone(),
+            attempt: 1,
+            orientation: Some("portrait".into()),
+            foreground_app: Some("com.example.app".into()),
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
+        png.extend_from_slice(&2_u32.to_be_bytes());
+        png.extend_from_slice(&3_u32.to_be_bytes());
+        png.extend_from_slice(&[0; 5]);
+        fs::write(&output, png).unwrap();
+        let artifact = CaptureArtifact::from_png(&scope, "simctl", true).unwrap();
+        artifact.verify().unwrap();
+
+        fs::write(&output, b"replaced").unwrap();
+        let error = artifact.verify().unwrap_err();
+        assert!(error.to_string().contains("capture byte count changed"));
     }
 }

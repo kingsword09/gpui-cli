@@ -528,6 +528,9 @@ impl MobileCapture {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("mobile capture lease has been released"))?;
         let artifact = self.runner.capture(&scope, lease)?;
+        artifact
+            .verify()
+            .context("verifying mobile screenshot artifact")?;
         self.captures.push(artifact.clone());
         Ok(screenshot_from_mobile_artifact(&artifact))
     }
