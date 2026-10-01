@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-01（Asia/Shanghai）。核查代码：`119f6ec`（PR #237 squash merge）。
+更新日期：2026-10-02（Asia/Shanghai）。核查代码：`61beb9c`（PR #239 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -36,7 +36,9 @@ capture-only matrix 与 control-driven scenario 两条移动路径现在也把 `
 install/launch/capture/process/channel/native-log/stop 的事件序列；每个 run 最多保留 128 条事件，
 单条 `details` 的序列化结果最多 16 KiB，超限时保留摘要/hash，并通过 `truncated` 与
 `dropped_events` 暴露诊断；事件淘汰保留最近记录，JSON 反序列化也重新执行同一边界。事件证据
-已接线；capture-only matrix context 现在同时传播 capture provider、artifact hash、逻辑 viewport、
+已接线；每条 `EvidenceEvent` 也重复写入 `project_id`、`lease_session_id` 和
+`fencing_token_sha256`，因此单条事件脱离外层聚合仍可核对 run/project/device/lease/fencing 摘要；
+capture-only matrix context 现在同时传播 capture provider、artifact hash、逻辑 viewport、
 scale、方向、系统 UI 和保守前台包名等环境字段，并保留 prepare 阶段生成的
 `run_identity`（run/project/device、lease session 和 fencing token 摘要）；原始 fencing token
 不进入 JSON，未建立身份时显式写入 `run_id_bound=false`。真实设备 fault matrix、重连和连续验收
@@ -112,6 +114,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `0073cf4`（#233） | capture-only mobile matrix context 保留 prepare 阶段的 `run_identity`，包括 run/project/device、lease session 和 fencing token 摘要；原始 fencing token 不进入 JSON，身份缺失时以 `run_id_bound=false` 表示 | 只补同一 run/lease 的可核对证据，不等于真实设备 lease 竞争、重连、token 轮换或完整移动 scenario 验收已通过 |
 | `0e11688`（#235） | control-driven mobile scenario evidence 补齐 `project_id`，并在 `run_id_bound=true` 时发布嵌套 `run_identity`；scenario_ready 前保持 null，原始 fencing token 仍不进入 JSON | 只统一 scenario 路径的身份证据形状，不等于 preview run 绑定之外的真实设备连续验收、重连或 token 轮换已通过 |
 | `119f6ec`（#237） | iOS/Android capture event detail 记录已取得的 artifact/hash、像素/逻辑尺寸、scale、方向、系统 UI、前台 marker 和 run id；不记录 host path 或 lease secret | 只增强有界事件序列的诊断可见性，不增加缺失的设备探针、真实前台切换或连续设备验收 |
+| `6bd62f0`（#239） | 每条 `EvidenceEvent` 记录 `project_id`、`lease_session_id` 和 `fencing_token_sha256`，从同一 `RunIdentity` 写入事件级 run/project/device/lease/fencing 摘要；原始 fencing token 不进入 JSON，并补充反序列化与敏感信息回归测试 | 只让单条事件自带可核对的身份摘要，不增加真实 lease 竞争、重连、token 轮换或设备矩阵验收 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -285,6 +288,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | 本地运行时验证（PR #237） | 388 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check、package list 均通过 |
 | PR #237 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
 | PR #237 合并 | squash merge `119f6ec`；无发布/tag |
+| 本地运行时验证（PR #239） | 388 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check、package list 均通过 |
+| PR #239 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
+| PR #239 合并 | squash merge `61beb9c`；无发布/tag |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 

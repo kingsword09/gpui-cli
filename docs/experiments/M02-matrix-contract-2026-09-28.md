@@ -5,6 +5,8 @@ required/optional 汇总和 artifact 保留接口；当前已加入配置展开�
 并行 executor、mobile lifecycle adapter、matrix CLI 和移动 scenario driver 的 control/native
 capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 
+本轮核查主分支：`61beb9c`（PR #239 squash merge，2026-10-02）。
+
 ## 已交付
 
 - `MatrixPlan` 校验非空 plan/cell、唯一 cell id、max_parallel 上限和 global/per-cell timeout。
@@ -61,6 +63,10 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
   时写入摘要/hash；`truncated` 与 `dropped_events` 说明是否发生边界收缩，JSON 反序列化也会
   重新执行相同边界。事件序列用于诊断归属，不把纯 Rust 测试当作真实 simulator/emulator
   fault matrix。
+- 每条 `EvidenceEvent` 都从同一 `RunIdentity` 写入 `run_id`、`project_id`、`device_id`、
+  `lease_session_id` 和 `fencing_token_sha256`，使单条事件脱离外层聚合后仍能核对
+  run/project/device/lease/fencing 摘要；`fencing_token_sha256` 只是摘要，原始 fencing token
+  不进入 JSON。
 - capture-only matrix context 还会保留每个 `CaptureArtifact` 的 provider、相对路径、字节数、
   hash、像素尺寸、逻辑 viewport、scale、方向、系统 UI 标记和保守的前台包名；缺失的 probe
   字段继续保持 `null/unknown`，不会从 PNG 尺寸反推设备环境。
