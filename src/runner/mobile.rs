@@ -5,7 +5,7 @@
 //! [`DeviceLeaseSession`] passed to the trait methods below.
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -17,6 +17,10 @@ use super::lease::DeviceLeaseSession;
 
 pub const RUNNER_CONTRACT_VERSION: u32 = 1;
 pub const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum number of lifecycle events retained for one mobile run.
+pub const MAX_EVIDENCE_EVENTS: usize = 128;
+/// Maximum serialized size of one event's `details` value.
+pub const MAX_EVIDENCE_DETAIL_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RunnerInfo {
@@ -304,10 +308,51 @@ pub enum EvidenceOutcome {
     Unknown,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EvidenceLog {
     pub contract_version: u32,
     pub events: Vec<EvidenceEvent>,
+    /// Set when an event or its details had to be discarded or summarized.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Number of oldest events evicted after reaching `MAX_EVIDENCE_EVENTS`.
+    #[serde(default)]
+    pub dropped_events: u64,
+}
+
+#[derive(Deserialize)]
+struct EvidenceLogWire {
+    contract_version: u32,
+    events: Vec<EvidenceEvent>,
+    #[serde(default)]
+    truncated: bool,
+    #[serde(default)]
+    dropped_events: u64,
+}
+
+impl<'de> Deserialize<'de> for EvidenceLog {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = EvidenceLogWire::deserialize(deserializer)?;
+        let mut log = Self {
+            contract_version: wire.contract_version,
+            events: Vec::new(),
+            truncated: wire.truncated,
+            dropped_events: wire.dropped_events,
+        };
+        for event in wire.events {
+            log.push_bounded_event(event);
+        }
+        Ok(log)
+    }
+}
+
+impl Default for EvidenceLog {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EvidenceLog {
@@ -315,6 +360,8 @@ impl EvidenceLog {
         Self {
             contract_version: RUNNER_CONTRACT_VERSION,
             events: Vec::new(),
+            truncated: false,
+            dropped_events: 0,
         }
     }
 
@@ -326,8 +373,15 @@ impl EvidenceLog {
         at_ms: u64,
         details: Value,
     ) {
-        self.events.push(EvidenceEvent {
-            seq: self.events.len() as u64 + 1,
+        let seq = self
+            .events
+            .iter()
+            .map(|event| event.seq)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.push_bounded_event(EvidenceEvent {
+            seq,
             at_ms,
             run_id: identity.run_id.clone(),
             device_id: identity.device_id.clone(),
@@ -335,6 +389,25 @@ impl EvidenceLog {
             outcome,
             details,
         });
+    }
+
+    fn push_bounded_event(&mut self, mut event: EvidenceEvent) {
+        let (details, details_truncated) = bounded_event_details(event.details);
+        event.details = details;
+        if details_truncated {
+            self.truncated = true;
+        }
+        if self.events.len() >= MAX_EVIDENCE_EVENTS {
+            if MAX_EVIDENCE_EVENTS == 0 {
+                self.dropped_events = self.dropped_events.saturating_add(1);
+                self.truncated = true;
+                return;
+            }
+            self.events.remove(0);
+            self.dropped_events = self.dropped_events.saturating_add(1);
+            self.truncated = true;
+        }
+        self.events.push(event);
     }
 
     /// Records a process observation without treating a missing PID as an
@@ -407,6 +480,29 @@ impl EvidenceLog {
     ) {
         self.record_process_observation(identity, &launch.process, at_ms);
         self.record_channel_observation(identity, launch.channel, None, at_ms);
+    }
+}
+
+fn bounded_event_details(details: Value) -> (Value, bool) {
+    match serde_json::to_vec(&details) {
+        Ok(encoded) if encoded.len() <= MAX_EVIDENCE_DETAIL_BYTES => (details, false),
+        Ok(encoded) => (
+            serde_json::json!({
+                "details_truncated": true,
+                "original_bytes": encoded.len(),
+                "max_bytes": MAX_EVIDENCE_DETAIL_BYTES,
+                "original_sha256": sha256(&encoded),
+            }),
+            true,
+        ),
+        Err(_) => (
+            serde_json::json!({
+                "details_truncated": true,
+                "reason": "details_serialization_failed",
+                "max_bytes": MAX_EVIDENCE_DETAIL_BYTES,
+            }),
+            true,
+        ),
     }
 }
 
@@ -569,6 +665,155 @@ mod tests {
         assert_eq!(log.events[0].seq, 1);
         assert_eq!(log.events[1].seq, 2);
         assert_eq!(log.events[1].outcome, EvidenceOutcome::Unknown);
+    }
+
+    #[test]
+    fn evidence_log_retains_recent_events_and_final_stop_event() {
+        let identity = RunIdentity {
+            run_id: "run-1".into(),
+            project_id: "project-1".into(),
+            device_id: "sim-1".into(),
+            lease_session_id: "session-1".into(),
+            fencing_token: "secret-token".into(),
+            fencing_token_sha256: token_sha256("secret-token"),
+        };
+        let mut log = EvidenceLog::new();
+        for index in 0..(MAX_EVIDENCE_EVENTS + 3) {
+            log.record(
+                &identity,
+                EvidenceStage::Capture,
+                EvidenceOutcome::Succeeded,
+                index as u64,
+                serde_json::json!({"index": index}),
+            );
+        }
+        log.record(
+            &identity,
+            EvidenceStage::Stop,
+            EvidenceOutcome::Succeeded,
+            1000,
+            serde_json::json!({"owned": true}),
+        );
+
+        assert_eq!(log.events.len(), MAX_EVIDENCE_EVENTS);
+        assert!(log.truncated);
+        assert_eq!(log.dropped_events, 4);
+        assert_eq!(log.events.first().unwrap().seq, 5);
+        assert_eq!(
+            log.events.last().unwrap().seq,
+            (MAX_EVIDENCE_EVENTS + 4) as u64
+        );
+        assert_eq!(log.events.last().unwrap().stage, EvidenceStage::Stop);
+    }
+
+    #[test]
+    fn evidence_log_summarizes_oversized_details_without_dropping_event() {
+        let identity = RunIdentity {
+            run_id: "run-1".into(),
+            project_id: "project-1".into(),
+            device_id: "sim-1".into(),
+            lease_session_id: "session-1".into(),
+            fencing_token: "secret-token".into(),
+            fencing_token_sha256: token_sha256("secret-token"),
+        };
+        let mut log = EvidenceLog::new();
+        log.record(
+            &identity,
+            EvidenceStage::NativeLogs,
+            EvidenceOutcome::Succeeded,
+            10,
+            serde_json::json!({"output": "x".repeat(MAX_EVIDENCE_DETAIL_BYTES)}),
+        );
+
+        assert_eq!(log.events.len(), 1);
+        assert!(log.truncated);
+        assert_eq!(log.dropped_events, 0);
+        assert_eq!(log.events[0].details["details_truncated"], true);
+        assert_eq!(
+            log.events[0].details["max_bytes"],
+            MAX_EVIDENCE_DETAIL_BYTES
+        );
+        assert!(
+            serde_json::to_vec(&log.events[0].details).unwrap().len() <= MAX_EVIDENCE_DETAIL_BYTES
+        );
+    }
+
+    #[test]
+    fn evidence_log_round_trip_preserves_bounds_and_continues_sequence() {
+        let identity = RunIdentity {
+            run_id: "run-1".into(),
+            project_id: "project-1".into(),
+            device_id: "sim-1".into(),
+            lease_session_id: "session-1".into(),
+            fencing_token: "secret-token".into(),
+            fencing_token_sha256: token_sha256("secret-token"),
+        };
+        let mut log = EvidenceLog::new();
+        for index in 0..(MAX_EVIDENCE_EVENTS + 1) {
+            log.record(
+                &identity,
+                EvidenceStage::Launch,
+                EvidenceOutcome::Succeeded,
+                index as u64,
+                serde_json::json!({"index": index}),
+            );
+        }
+
+        let encoded = serde_json::to_vec(&log).unwrap();
+        let mut decoded: EvidenceLog = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, log);
+        decoded.record(
+            &identity,
+            EvidenceStage::Stop,
+            EvidenceOutcome::Succeeded,
+            100,
+            serde_json::json!({"owned": true}),
+        );
+        assert_eq!(
+            decoded.events.last().unwrap().seq,
+            (MAX_EVIDENCE_EVENTS + 2) as u64
+        );
+        assert_eq!(decoded.dropped_events, 2);
+        assert_eq!(decoded.events.last().unwrap().stage, EvidenceStage::Stop);
+    }
+
+    #[test]
+    fn evidence_log_deserialization_enforces_event_and_detail_bounds() {
+        let events = (0..(MAX_EVIDENCE_EVENTS + 2))
+            .map(|index| {
+                serde_json::json!({
+                    "seq": index + 1,
+                    "at_ms": index,
+                    "run_id": "run-1",
+                    "device_id": "sim-1",
+                    "stage": "launch",
+                    "outcome": "succeeded",
+                    "details": if index == 0 {
+                        serde_json::json!({"output": "x".repeat(MAX_EVIDENCE_DETAIL_BYTES)})
+                    } else {
+                        serde_json::json!({"index": index})
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        let wire = serde_json::json!({
+            "contract_version": RUNNER_CONTRACT_VERSION,
+            "events": events,
+        });
+
+        let log: EvidenceLog = serde_json::from_value(wire).unwrap();
+
+        assert_eq!(log.events.len(), MAX_EVIDENCE_EVENTS);
+        assert!(log.truncated);
+        assert_eq!(log.dropped_events, 2);
+        assert_eq!(log.events.first().unwrap().seq, 3);
+        assert_eq!(
+            log.events.last().unwrap().seq,
+            (MAX_EVIDENCE_EVENTS + 2) as u64
+        );
+        assert!(
+            serde_json::to_vec(&log.events[0].details).unwrap().len() <= MAX_EVIDENCE_DETAIL_BYTES
+        );
     }
 
     #[test]
