@@ -212,7 +212,12 @@ impl MobileRunner for IosSimulatorRunner {
             &scope.identity,
             EvidenceStage::Capture,
             &result,
-            json!({"provider": "simctl", "system_ui": true, "udid": self.udid}),
+            json!({
+                "provider": "simctl",
+                "system_ui": true,
+                "udid": self.udid,
+                "artifact": result.as_ref().ok().map(CaptureArtifact::evidence_details),
+            }),
         );
         result
     }

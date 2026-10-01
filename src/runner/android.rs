@@ -215,7 +215,12 @@ impl MobileRunner for AndroidRunner {
             &scope.identity,
             EvidenceStage::Capture,
             &result,
-            json!({"provider": "adb.exec_out.screencap", "system_ui": true, "serial": self.serial}),
+            json!({
+                "provider": "adb.exec_out.screencap",
+                "system_ui": true,
+                "serial": self.serial,
+                "artifact": result.as_ref().ok().map(CaptureArtifact::evidence_details),
+            }),
         );
         result
     }
