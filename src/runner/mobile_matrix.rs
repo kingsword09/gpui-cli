@@ -243,6 +243,12 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
                     "sha256": capture.sha256,
                     "width": capture.width,
                     "height": capture.height,
+                    "logical_width": capture.logical_width,
+                    "logical_height": capture.logical_height,
+                    "scale_milli": capture.scale_milli,
+                    "orientation": capture.orientation,
+                    "system_ui": capture.system_ui,
+                    "foreground_app": capture.foreground_app,
                     "run_id": capture.run_id,
                 })).collect::<Vec<_>>(),
                 "native_logs": self.native_logs.as_ref().map(|logs| json!({
@@ -400,12 +406,12 @@ mod tests {
                 sha256: "fake".into(),
                 width: 1,
                 height: 1,
-                logical_width: None,
-                logical_height: None,
-                scale_milli: None,
-                orientation: None,
+                logical_width: Some(360),
+                logical_height: Some(800),
+                scale_milli: Some(3000),
+                orientation: Some("portrait".into()),
                 system_ui: true,
-                foreground_app: None,
+                foreground_app: Some("com.example.app".into()),
                 run_id: scope.identity.run_id.clone(),
             })
         }
@@ -501,6 +507,12 @@ mod tests {
         assert_eq!(evidence["event_log"]["contract_version"], 1);
         assert_eq!(evidence["native_logs"]["assigned_to_run"], true);
         assert_eq!(evidence["stop"]["run_id"], "run-1");
+        assert_eq!(evidence["captures"][0]["logical_width"], 360);
+        assert_eq!(evidence["captures"][0]["logical_height"], 800);
+        assert_eq!(evidence["captures"][0]["scale_milli"], 3000);
+        assert_eq!(evidence["captures"][0]["orientation"], "portrait");
+        assert_eq!(evidence["captures"][0]["system_ui"], true);
+        assert_eq!(evidence["captures"][0]["foreground_app"], "com.example.app");
         assert_eq!(evidence["cleanup_errors"].as_array().unwrap().len(), 0);
         assert!(!root.path().join("captures/android__smoke.png").exists());
     }
