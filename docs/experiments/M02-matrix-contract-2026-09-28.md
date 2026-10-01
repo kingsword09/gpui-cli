@@ -47,6 +47,11 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 - mobile cleanup 会独立记录 `stop_owned` 与 lease release 的错误到
   `mobile_evidence.cleanup_errors`，即使 stop 失败也继续释放 lease；因此 cleanup failure 不会
   丢失 run/device 归属证据，也不会把未执行的 stop 伪造成成功。
+- matrix executor 在串行和并行路径中都会在 cleanup 完成后重新读取 runner context；mobile
+  adapter 因而能把 launch、capture、native logs、stop、lease release 和 cleanup errors 等
+  lifecycle evidence 保留到 `MatrixReport.context.mobile_evidence`。capture-only cell 仍不生成
+  没有 steps 的伪造 scenario `CheckReport`，但其可取得的生命周期证据不会因 cleanup 后才完成
+  而丢失。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
@@ -87,6 +92,9 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   未绑定实际 run 的日志保持 unassigned。
 - cleanup failure 现在同时保留在 scenario cleanup error 和 mobile evidence 的有界错误列表中；
   stop 与 lease release 分别尝试，lease release 不因 stop failure 被跳过。
+- cleanup 完成后，matrix report 仍会读取 runner context；因此 capture-only mobile lifecycle
+  cell 可以展示 launch/capture/native-log/stop/release/cleanup evidence，同时继续保持没有
+  scenario steps 就不生成 scenario `CheckReport` 的边界。
 - 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；
   unknown 结果仍为 inconclusive，不能重放或降格成普通失败/通过。
 - 没有完成 frozen snapshot build、真实 macOS+iOS simulator+Android emulator 矩阵报告、
@@ -108,9 +116,10 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   `unavailable: semantic capture is unavailable for the selected window`；这被保留为真实
   capability 结果，没有用设备截图或 heartbeat 降级成 semantics 通过。
 - #147 的内部 `CheckReport` 保留 runner 提供的 `context`：ready/reset generation、
-  runtime 自报环境和 `uncontrolled_inputs`。2026-09-29 状态复核发现，matrix CLI 仍将其
-  投影为 status/error/capture artifact IDs，未把 context 或完整步骤写入 `MatrixReport`；
-  因此不能声称 Android matrix JSON 已提供 generation 1→2，仍需事件或额外报告证据。
+  runtime 自报环境和 `uncontrolled_inputs`。2026-09-29 的历史复核曾发现 matrix CLI 只投影
+  status/error/capture artifact IDs；后续 matrix cell report 已保留完整 context/steps，#223
+  又补上 cleanup 后读取 runner context 的路径。因此当前 JSON 可以看到 cleanup-finalized mobile
+  lifecycle evidence，但这仍不能声称 Android matrix 已提供完整 generation 1→2 或真实三端验收。
 
 ## 尚未覆盖
 
