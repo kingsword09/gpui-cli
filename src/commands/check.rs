@@ -593,6 +593,8 @@ impl MobileCapture {
             "device_id": self.identity.device_id,
             "lease_session_id": self.identity.lease_session_id,
             "fencing_token_sha256": self.identity.fencing_token_sha256,
+            "runner": self.runner.describe(),
+            "capabilities": self.runner.capabilities(),
             "captures": self.captures.iter().map(|capture| json!({
                 "artifact_id": capture.artifact_id,
                 "provider": capture.provider,
@@ -2469,6 +2471,8 @@ mod tests {
         assert!(errors[0].contains("finalizing mobile evidence"));
         let evidence = capture.evidence();
         assert_eq!(evidence["run_id_bound"], false);
+        assert_eq!(evidence["runner"]["runner_id"], "evidence-test");
+        assert_eq!(evidence["capabilities"]["native_logs"], true);
         assert_eq!(evidence["native_logs"]["assigned_to_run"], false);
         assert_eq!(
             evidence["native_logs"]["unassigned_reason"],
