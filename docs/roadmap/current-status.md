@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-01（Asia/Shanghai）。核查代码：`5e30dae`（PR #223 squash merge）。
+更新日期：2026-10-01（Asia/Shanghai）。核查代码：`1f98372`（PR #229 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -33,8 +33,10 @@ capture-only matrix 与 control-driven scenario 两条移动路径现在也把 `
 `RunnerCapabilities` 写入 `mobile_evidence`，将报告绑定到选定 runner/device 的声明性环境；这
 不是实际设备探针、前台身份或完整语义/输入验收。
 平台 adapter 维护的有界 `EvidenceLog` 现在也随两条移动路径进入 `mobile_evidence`，保留
-install/launch/capture/process/channel/native-log/stop 的事件序列；事件证据已接线，但真实
-设备 fault matrix、重连和连续验收仍未完成。
+install/launch/capture/process/channel/native-log/stop 的事件序列；每个 run 最多保留 128 条事件，
+单条 `details` 的序列化结果最多 16 KiB，超限时保留摘要/hash，并通过 `truncated` 与
+`dropped_events` 暴露诊断；事件淘汰保留最近记录，JSON 反序列化也重新执行同一边界。事件证据
+已接线，但真实设备 fault matrix、重连和连续验收仍未完成。
 现阶段仍未完成
 preview/移动 capture-only 路径的完整 scenario 语义/输入验收、MCP、
 复现包或性能验证闭环。
@@ -48,8 +50,8 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup-finalized matrix context/capture-only lifecycle evidence、mobile runner identity/capability/event-log evidence、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing preview 的 BuildKey coordinator、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、pre-ready mobile launch failure evidence、mobile cleanup error evidence、action 失败 operation ID evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening、early mobile scenario failure finalization | partial artifact 的消费/恢复契约、Android release-only/复杂/远端 signing 输入、真实环境适配、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续验收及 MCP |
-| G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture、同一 delegated lease 下的 run/capture/log/cleanup evidence、cleanup-finalized matrix evidence、capture-only cell 的非伪造报告边界、runner identity/capability/event-log evidence、pre-ready launch failure evidence、cleanup error evidence、action failure operation ID evidence、Android capture 的 best-effort viewport/scale/orientation/foreground metadata | 完整三端同快照矩阵、真实设备环境元数据与故障/重连、完整语义与输入证据、repro 和 L2/L3 CI |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup-finalized matrix context/capture-only lifecycle evidence、mobile runner identity/capability/bounded-event-log evidence、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing preview 的 BuildKey coordinator、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、pre-ready mobile launch failure evidence、mobile cleanup error evidence、action 失败 operation ID evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening、early mobile scenario failure finalization | partial artifact 的消费/恢复契约、Android release-only/复杂/远端 signing 输入、真实环境适配、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续验收及 MCP |
+| G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture、同一 delegated lease 下的 run/capture/log/cleanup evidence、cleanup-finalized matrix evidence、capture-only cell 的非伪造报告边界、runner identity/capability/bounded-event-log evidence、pre-ready launch failure evidence、cleanup error evidence、action failure operation ID evidence、Android capture 的 best-effort viewport/scale/orientation/foreground metadata | 完整三端同快照矩阵、真实设备环境元数据与故障/重连、完整语义与输入证据、repro 和 L2/L3 CI |
 | G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing live preview verified cache hit 和显式清理 | 缓存输入遗漏、iOS physical live preview、Android release-only/复杂或远端 signing cache hit、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
 ## 2. 相对上次审计的新合并
@@ -98,6 +100,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `5e30dae`（#223） | matrix executor 在串行/并行 cleanup 后优先读取 runner context；mobile matrix adapter 将 launch、capture、native logs、stop、lease release 和 cleanup errors 写入 `MatrixReport.context.mobile_evidence`，capture-only cell 保留 evidence 但不生成伪造 scenario report | 只补 cleanup-finalized report wiring 和 capture-only 证据可见性，不等于完整 scenario 语义/输入或真实三端矩阵验收 |
 | `cbc0bc1`（#225） | capture-only matrix 与 control-driven scenario 两条移动路径将 `RunnerInfo`/`RunnerCapabilities` 写入 `mobile_evidence`，绑定 runner、host、平台、架构、设备类型、工具声明和能力 | 这是声明性 runner metadata，不等于设备状态、前台身份、旋转/DPI 实探针或真实矩阵验收 |
 | `d7f383a`（#227） | 移动 runner 的 `EvidenceLog` 通过统一 trait 暴露，并在 capture-only matrix 与 control-driven scenario evidence 中保留 install/launch/capture/process/channel/log/stop 事件序列 | 只接通已有事件日志的报告传播，不等于真实设备 fault matrix、重连或连续验收 |
+| `1f98372`（#229） | `EvidenceLog` 增加 128 条事件与 16 KiB detail 上限，淘汰最旧事件并保留最新 stop/log 证据；超限时保留摘要/hash，暴露 `truncated`/`dropped_events`，反序列化也执行边界并保持序号继续递增 | 只完成事件日志的内存/JSON 有界性，不增加 crash、ANR、重连、前台 probe 或真实设备 fault matrix 证据 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -256,6 +259,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | 本地运行时验证（PR #227） | 383 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check 均通过 |
 | PR #227 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；失败/取消的既有 macOS/Windows 任务重跑后通过；无发布/tag |
 | PR #227 合并 | squash merge `d7f383a`；无发布/tag |
+| 本地运行时验证（PR #229） | 387 个单元测试及全部集成/协议测试目标通过；首轮唯一既有 build-coordinator 时序失败单独重跑通过；workspace clippy、fmt、design docs、diff check、package list 均通过 |
+| PR #229 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
+| PR #229 合并 | squash merge `1f98372`；无发布/tag |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
@@ -269,7 +275,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | matrix frozen inputs | #157 创建 shared snapshot，#159 写入 per-cell context，#161 写入 target-specific BuildKey，#163 绑定 source-project output layout 并串行同 key cell，#165 在 preview builder 取得该 output root 的跨进程锁，#167 保留 control scenario cell 的完整 CheckReport；仍未声称跨命令共享构建或真实三端 evidence | [S04 frozen matrix snapshot](../experiments/S04-frozen-matrix-snapshot-2026-09-29.md)、[S04 matrix context](../experiments/S04-matrix-context-2026-09-29.md)、[S04 matrix target BuildKey](../experiments/S04-matrix-target-build-key-2026-09-29.md)、[S04 matrix build output layout](../experiments/S04-matrix-build-output-layout-2026-09-29.md)、[S04 preview build output lock](../experiments/S04-preview-build-output-lock-2026-09-29.md)、[S04 matrix cell reports](../experiments/S04-matrix-cell-reports-2026-09-29.md) |
 | preview output lock | preview desktop/iOS/Android build 在 source-project target-specific root 上通过持久 lock file 做跨进程排他；锁 guard 覆盖 preview build 过程并在进程退出/崩溃时由 OS 释放；只验证 lock 阻塞和 guard drop 释放，不声称命中或合并构建 | [S04 preview build output lock](../experiments/S04-preview-build-output-lock-2026-09-29.md) |
 | matrix cell report | control scenario cell 的 `MatrixCellResult.check_report` 保留完整 steps、证据、primary error、cleanup 和 context，并通过 JSON round-trip 验证；executor 在 cleanup 后仍保留 runner context；unavailable/capture-only cell 不生成伪报告，但 capture-only lifecycle、runner metadata 与 event log 可见 | [S04 matrix cell reports](../experiments/S04-matrix-cell-reports-2026-09-29.md) |
-| mobile scenario lease/evidence | #211 由 matrix supervisor 持有唯一设备 OS lease，preview 子进程只使用 owner path/session/token digest delegation；capture/native logs/stop evidence 绑定 preview 实际 run 并进入 `CheckContext.mobile_evidence`；#217 让 action operation 错误保留 operation ID 与 action status；#219 覆盖 pre-`scenario_ready` launch/registration failure；#221 记录 cleanup stop/release 错误并保证 stop failure 后仍释放 lease；#223 让 cleanup 后完成的 context/evidence 进入 `MatrixReport`；#225 写入 RunnerInfo/RunnerCapabilities；#227 又保留已有 EvidenceLog 的生命周期事件序列；unknown 仍为 inconclusive 且不重放；未声称真实设备矩阵已通过 | [M02 matrix contract](../experiments/M02-matrix-contract-2026-09-28.md) |
+| mobile scenario lease/evidence | #211 由 matrix supervisor 持有唯一设备 OS lease，preview 子进程只使用 owner path/session/token digest delegation；capture/native logs/stop evidence 绑定 preview 实际 run 并进入 `CheckContext.mobile_evidence`；#217 让 action operation 错误保留 operation ID 与 action status；#219 覆盖 pre-`scenario_ready` launch/registration failure；#221 记录 cleanup stop/release 错误并保证 stop failure 后仍释放 lease；#223 让 cleanup 后完成的 context/evidence 进入 `MatrixReport`；#225 写入 RunnerInfo/RunnerCapabilities；#227 保留已有 EvidenceLog 的生命周期事件序列；#229 将事件数量、detail 大小、淘汰诊断和 JSON 反序列化统一设为有界；unknown 仍为 inconclusive 且不重放；未声称真实设备矩阵已通过 | [M02 matrix contract](../experiments/M02-matrix-contract-2026-09-28.md) |
 | Android capture environment | #213 将 Android display probe 的逻辑 viewport、scale、方向和保守前台包名写入 capture/check evidence；adb 或厂商输出缺失时保持 unknown；未声称真实设备环境验收已通过 | [M01 Android runner](../experiments/M01-android-runner-2026-09-28.md) |
 | desktop preview cache hit | preview 专用 manifest 绑定 desktop platform/BuildKey hash，逐文件验证内容并要求唯一 Cargo 可执行文件；命中跳过 Cargo，任何验证失败都 miss 并回退正常构建 | [T06 desktop preview cache hit](../experiments/T06-desktop-preview-cache-hit-2026-09-29.md) |
 | iOS simulator live preview cache hit | preview 专用 manifest 绑定 iOS platform/BuildKey hash，逐文件验证 `.app` 内容并要求根正是当前 simulator bundle；命中跳过 rustup/Cargo/XcodeGen/`xcodebuild`，physical device 不命中 | [T06 iOS preview cache hit](../experiments/T06-ios-preview-cache-hit-2026-09-29.md) |

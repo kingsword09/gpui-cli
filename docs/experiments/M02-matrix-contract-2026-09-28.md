@@ -56,8 +56,11 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
   `RunnerCapabilities` 写入 `mobile_evidence`，使报告能够追踪选定 runner、host、平台、架构、
   设备类型、工具声明和能力边界；这些是声明性绑定，不冒充实时设备/前台/viewport 探针。
 - 同一 evidence 还会保留 adapter 已收集的有界 `EvidenceLog`，覆盖 install/launch/capture、
-  process/channel、native logs 和 stop 事件；事件序列用于诊断归属，不把纯 Rust 测试当作真实
-  simulator/emulator fault matrix。
+  process/channel、native logs 和 stop 事件；每个 run 最多保留 128 条事件，单条 `details` 的
+  序列化结果最多 16 KiB。超过事件上限时淘汰最旧事件并保留最近生命周期记录，超过 detail 上限
+  时写入摘要/hash；`truncated` 与 `dropped_events` 说明是否发生边界收缩，JSON 反序列化也会
+  重新执行相同边界。事件序列用于诊断归属，不把纯 Rust 测试当作真实 simulator/emulator
+  fault matrix。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
@@ -103,6 +106,8 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   scenario steps 就不生成 scenario `CheckReport` 的边界。
 - mobile evidence 还会保留 runner identity/capability metadata；缺失或不可信的实时设备状态
   仍必须由平台 probe/真实运行验收报告，不能从 `RunnerInfo` 推断。
+- `EvidenceLog` 的 boundedness 只限制事件数量和 detail 序列化大小，保留最近事件并报告收缩诊断；
+  它不自动增加 crash、ANR、重连、前台确认或完整 stop/log 语义，仍需真实平台运行记录。
 - event log 只传播已有 adapter 事件，不自动增加 crash、ANR、重连或前台确认；这些仍需真实
   平台运行记录。
 - 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；

@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-01，主分支 `d7f383a`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-01，主分支 `1f98372`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -576,7 +576,9 @@ native logs、stop、lease release 和 cleanup errors 等 cleanup-finalized evid
 `MatrixReport.context.mobile_evidence`；capture-only cell 保留这些证据但不生成伪造的 scenario
 `CheckReport`。两条移动路径也将 `RunnerInfo`/`RunnerCapabilities` 写入该 evidence，绑定
 runner、host、平台、架构、设备类型和声明能力；这些 metadata 不等于实际设备探针。已有
-`EvidenceLog` 也会作为有界事件序列一并保留。记录见
+`EvidenceLog` 也会作为有界事件序列一并保留：每个 run 最多保留 128 条事件，单条
+`details` 序列化结果最多 16 KiB；淘汰最旧事件、保留最新生命周期记录，超限 detail 改为摘要/hash，
+并以 `truncated`/`dropped_events` 记录诊断，反序列化同样执行边界。记录见
 [S04 check core](../experiments/S04-check-core-2026-09-28.md)。
 
 当前 desktop 接线已交付：`gpui check --scenario <id> --target desktop` 启动隔离的
@@ -689,8 +691,8 @@ artifact 接线和报告证据见
    foreground marker；命令或厂商输出缺失时报告 unknown，不从 PNG 猜测环境。
 
 PR 拆分：runner trait/契约（已交付）→ iOS simulator adapter（已交付基础路径）→ Android adapter
-（已交付基础路径）→ Android process identity（已交付）→ iOS simulator process probe（当前切片）
-→ mobile fault evidence boundary（当前切片）→ delegated lease/same-run evidence（已交付切片）
+（已交付基础路径）→ Android process identity（已交付）→ iOS simulator process probe（已交付）
+→ mobile fault evidence boundary（已交付）→ bounded mobile EvidenceLog（已交付）→ delegated lease/same-run evidence（已交付切片）
 → Android display evidence（已交付）→ 真模拟器故障矩阵。验收
 M-01/M-02/O-08/O-10。回退：单个平台 capability 禁用，不影响 desktop；不以宿主 APK 打包
 测试宣称运行通过。契约记录见
@@ -714,9 +716,10 @@ inconclusive；#219 又覆盖 pre-`scenario_ready` launch/registration failure�
 又把 cleanup stop/release 错误写入 mobile evidence 并保证 lease release 不被 stop failure
 跳过；#223 又让 matrix executor 在 cleanup 后读取 runner context，把 cleanup 才完成的
 stop/release/error evidence 传播到 `MatrixReport`，并为 capture-only cell 保留 lifecycle evidence
-而不生成 scenario report；#225 又写入 RunnerInfo/RunnerCapabilities 作为声明性环境绑定；跨命令
-共享构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入；已有 EvidenceLog 的报告传播
-已接通，但真实 fault matrix 仍未接入。
+而不生成 scenario report；#225 又写入 RunnerInfo/RunnerCapabilities 作为声明性环境绑定；#227
+接通已有 EvidenceLog 报告传播，#229 为其补齐事件数量、detail 大小、淘汰诊断和 JSON 反序列化
+边界；跨命令共享构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入，真实 fault matrix
+仍未接入。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。
