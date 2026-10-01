@@ -68,6 +68,9 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
   `device_id`、`lease_session_id` 和 `fencing_token_sha256`。原始 fencing token 不进入 JSON；
   如果 prepare 无法建立身份，报告显式写入 `run_id_bound: false`，不把请求级 run id 冒充为
   已绑定的 lease/run 身份。
+- control-driven mobile scenario evidence 也会保留 `project_id`，并在 `scenario_ready` 已绑定
+  实际 preview run 后发布同样字段的嵌套 `run_identity`；在绑定前 `run_identity` 保持 `null`，
+  使请求级身份不会冒充已运行身份。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
@@ -119,6 +122,8 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   steps，也不把保守 foreground marker 变成真实前台切换验收。
 - run identity 字段只补充同一 run 与 delegated lease 的可核对归属；token 摘要不证明设备仍由
   当前进程持有，原始 token 不可从 JSON 恢复，仍需真实 lease 竞争、重连和 fencing 验收。
+- control-driven 路径的嵌套 identity 只在实际 preview run 绑定后出现；这统一 evidence 形状，
+  不增加真实 scenario steps、设备状态探针或连续运行保证。
 - event log 只传播已有 adapter 事件，不自动增加 crash、ANR、重连或前台确认；这些仍需真实
   平台运行记录。
 - 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；
