@@ -226,6 +226,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
                 "device_id": self.request.device_id,
                 "runner": self.runner.describe(),
                 "capabilities": self.runner.capabilities(),
+                "event_log": self.runner.evidence_log(),
                 "lease_released": self.lease_released,
                 "launch": self.launch.as_ref().map(|launch| json!({
                     "run_id": launch.run_id,
@@ -290,8 +291,8 @@ mod tests {
     use crate::runner::lease::DeviceLeaseSession;
     use crate::runner::matrix::MatrixCellState;
     use crate::runner::mobile::{
-        CaptureArtifact, ChannelState, LaunchEvidence, LogEvidence, ProcessEvidence, RunIdentity,
-        RunnerCapabilities, RunnerInfo, StopEvidence,
+        CaptureArtifact, ChannelState, EvidenceLog, LaunchEvidence, LogEvidence, ProcessEvidence,
+        RunIdentity, RunnerCapabilities, RunnerInfo, StopEvidence,
     };
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -312,6 +313,7 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         fail_launch: bool,
         unverified_process: bool,
+        evidence: EvidenceLog,
     }
 
     impl FakeMobileRunner {
@@ -346,6 +348,10 @@ mod tests {
                 rotate: false,
                 foreground_probe: false,
             }
+        }
+
+        fn evidence_log(&self) -> Option<&EvidenceLog> {
+            Some(&self.evidence)
         }
 
         fn prepare(
@@ -469,6 +475,7 @@ mod tests {
             events: events.clone(),
             fail_launch: false,
             unverified_process: false,
+            evidence: EvidenceLog::new(),
         };
         let lease = DeviceLeaseSession::acquire(root.path(), "fake-device").unwrap();
         let mut adapter =
@@ -491,6 +498,7 @@ mod tests {
         assert_eq!(evidence["runner"]["runner_id"], "fake-mobile");
         assert_eq!(evidence["runner"]["stable_device_id"], "fake-device");
         assert_eq!(evidence["capabilities"]["foreground_probe"], false);
+        assert_eq!(evidence["event_log"]["contract_version"], 1);
         assert_eq!(evidence["native_logs"]["assigned_to_run"], true);
         assert_eq!(evidence["stop"]["run_id"], "run-1");
         assert_eq!(evidence["cleanup_errors"].as_array().unwrap().len(), 0);
@@ -505,6 +513,7 @@ mod tests {
             events: events.clone(),
             fail_launch: true,
             unverified_process: false,
+            evidence: EvidenceLog::new(),
         };
         let lease = DeviceLeaseSession::acquire(root.path(), "fake-device-failure").unwrap();
         let mut request = request(root.path());
@@ -529,6 +538,7 @@ mod tests {
             events,
             fail_launch: false,
             unverified_process: true,
+            evidence: EvidenceLog::new(),
         };
         let lease = DeviceLeaseSession::acquire(root.path(), "fake-device-unknown").unwrap();
         let mut request = request(root.path());
