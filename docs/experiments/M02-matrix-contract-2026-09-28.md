@@ -5,7 +5,7 @@ required/optional 汇总和 artifact 保留接口；当前已加入配置展开�
 并行 executor、mobile lifecycle adapter、matrix CLI 和移动 scenario driver 的 control/native
 capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 
-本轮核查主分支：`61beb9c`（PR #239 squash merge，2026-10-02）。
+本轮核查主分支：`67d1160`（PR #241 squash merge，2026-10-02）。
 
 ## 已交付
 
@@ -80,6 +80,9 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 - iOS/Android runner 的 capture event detail 还会嵌入已取得的 `CaptureArtifact` 元数据：artifact
   id、provider、bytes/hash、像素与逻辑尺寸、scale、方向、系统 UI、前台 marker 和 run id；host
   path 与 lease secret 不进入 detail，缺失探针字段继续为 `null/unknown`。
+- capture-only matrix 与 control-driven check 在发布移动截图证据前都会重新验证 capture 文件类型、
+  大小、字节数、SHA-256、PNG 尺寸和 `png-<sha256>` artifact ID；输出被替换或损坏时拒绝证据。
+  这只是发布前完整性边界，不等于完整截图 manifest、真实设备 fault matrix 或连续验收。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
