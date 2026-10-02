@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-02（Asia/Shanghai）。核查代码：`2a5782d`（PR #257 squash merge）。
+更新日期：2026-10-03（Asia/Shanghai）。核查代码：`35b0afc`（PR #259 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -77,9 +77,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup-finalized matrix context/capture-only lifecycle evidence、mobile runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、移动 semantics 默认 admission 收紧、Android plugin/included-build signing cache bypass hardening、Android wrapper distribution checksum 与 cache gate、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing/Android release-only signing debug preview 的 BuildKey coordinator、Windows coordinator state publish transient permission-denied bounded retry、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、pre-ready mobile launch failure evidence、mobile cleanup error evidence、action 失败 operation ID evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening、early mobile scenario failure finalization | partial artifact 的消费/恢复契约、Android 复杂/远端 signing cache hit 与完整输入闭包、真实环境适配、移动 semantics provider 与完整 scenario steps/cleanup、真实连续验收及 MCP |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup-finalized matrix context/capture-only lifecycle evidence、mobile runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、移动 semantics 默认 admission 收紧、Android plugin/included-build signing cache bypass hardening、Android wrapper checksum 与动态依赖 cache gate、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing/Android release-only signing debug preview 的 BuildKey coordinator、Windows coordinator state publish transient permission-denied bounded retry、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、pre-ready mobile launch failure evidence、mobile cleanup error evidence、action 失败 operation ID evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening、early mobile scenario failure finalization | partial artifact 的消费/恢复契约、Android 复杂/远端 signing cache hit 与完整输入闭包、真实环境适配、移动 semantics provider 与完整 scenario steps/cleanup、真实连续验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture、同一 delegated lease 下的 run/capture/log/cleanup evidence、cleanup-finalized matrix evidence、capture-only cell 的非伪造报告边界、runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、pre-ready launch failure evidence、cleanup error evidence、action failure operation ID evidence、Android capture 的 best-effort viewport/scale/orientation/foreground metadata、移动 semantics 默认 admission 不再误报支持 | 完整三端同快照矩阵、真实设备环境元数据与故障/重连、移动 semantics provider/完整语义与输入证据、repro 和 L2/L3 CI |
-| G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug live preview verified cache hit、Android template 固定 Gradle wrapper distribution checksum 并在 checksum 缺失/畸形时 bypass cache、显式清理 | 缓存输入遗漏、iOS physical live preview、Android release APK/复杂或远端 signing cache hit、Gradle/AGP/NDK 其他隐藏输入、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
+| G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug live preview verified cache hit、Android 固定 Gradle wrapper checksum 与动态/changing dependency cache bypass、显式清理 | 缓存输入遗漏、iOS physical live preview、Android release APK/复杂或远端 signing cache hit、Gradle/AGP/NDK 其他隐藏输入、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
 ## 2. 相对上次审计的新合并
 
@@ -142,6 +142,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `cbd55b8`（#253） | 本地 matrix admission 不再为 iOS/Android 默认静态声明 `semantics`、`semantics.read`、`semantics.bounds`；无 capability override 时语义依赖 cell 在派发前 unavailable，显式 capability override 路径有回归覆盖 | 只修正 admission 的静态默认声明；override 是调用方声明而非自动证据验证；不实现 GPUI mobile semantics provider、不改变 runtime hello，也不证明 accessibility 树在真实设备可用；移动语义 scenario 与真实设备验收仍未完成 |
 | `a5ab033`（#255） | Android signing marker 检查覆盖 Gradle root 内 Kotlin/Groovy/Java 插件源码；`settings.gradle(.kts)` 使用 `includeBuild` 时，即便外部插件实现不可见也禁用 cache reuse，并增加两项回归测试 | 只扩大保守 cache bypass，不改变正常 frozen build；没有实现复杂/远端 signing cache hit，也没有闭合 Gradle wrapper、AGP/plugin、NDK/build-script 的所有隐藏输入 |
 | `2a5782d`（#257） | Android 模板为 Gradle 9.4.1 配置并经官方 endpoint 核验 distribution SHA-256；Android artifact cache reuse 要求 frozen `gradle-wrapper.properties` 中恰有一个有效 64 位 checksum，checksum 本身随 wrapper properties 进入 BuildKey；matrix preview 的 cache policy 改从相同 frozen snapshot 读取 | checksum 缺失、重复或格式错误只禁用缓存，不阻止正常构建；只验证 Gradle wrapper 下载包完整性，不覆盖 AGP/plugin/NDK/build-script 的其他隐藏输入，也不表示 Android 全链路环境已冻结 |
+| `35b0afc`（#259） | Android cache reuse 检查 Gradle 脚本、版本目录及 `buildSrc`/`build-logic` Kotlin/Groovy/Java 插件源码；动态版本、版本范围、SNAPSHOT、latest 与 changing-module 配置会绕过 artifact cache；固定版本仍可命中 | 只禁用不稳定依赖输入下的 cache reuse，不阻止正常构建；源码检查是保守静态扫描，不闭合 AGP/plugin 仓库制品、NDK 或任意 build-script I/O 输入 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -184,7 +185,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | G01 | planned | supervisor 计时已有；无应用 layout/paint/frame/CPU/GPU 指标与开销验收 |
 | G02 | planned | 无 perf 执行器、统计/可比性和性能预算判定 |
 | T05 | planned | watcher/全量内容扫描已有；无增量输入索引及大项目对照 |
-| T06 | in_progress | desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug preview 缓存与 cache clean，普通 build/run 及受支持的 live preview 已接入同 key coordinator、verified manifest、caller-cancel、显式 Cancelled/Partial 状态和 owner heartbeat/fencing；physical iOS build/run 与受控 Android local custom/release build/run 已按签名输入决定 manifest 复用；Android wrapper checksum 纳入 BuildKey 且缺失/无效时 cache bypass，官方 Gradle 9.4.1 checksum 在模板 smoke 中通过真实 wrapper 验证；Android release APK/复杂/远端 signing 仍 bypass，BuildKey output ownership record 已落地；Partial 仅为不可复用的诊断终态；AGP/NDK 隐藏输入和预热未实现 |
+| T06 | in_progress | desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug preview 缓存与 cache clean，普通 build/run 及受支持的 live preview 已接入同 key coordinator、verified manifest、caller-cancel、显式 Cancelled/Partial 状态和 owner heartbeat/fencing；physical iOS build/run 与受控 Android local custom/release build/run 已按签名输入决定 manifest 复用；Android wrapper checksum 纳入 BuildKey 且缺失/无效时 cache bypass，动态/changing Gradle dependency 也只绕过 cache reuse、不阻止构建；Android release APK/复杂/远端 signing 仍 bypass，BuildKey output ownership record 已落地；Partial 仅为不可复用的诊断终态；AGP/NDK 其他隐藏输入和预热未实现 |
 | Q02 | planned | 仅有 12 项任务设计；无可执行评分器和固定预算对照实验 |
 | G03 | planned | 无 GPU capture/analysis provider 闭环；可选 |
 | M06 | planned | 无远程 runner、传输和断线恢复；可选 |
@@ -331,6 +332,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | 本地运行时验证（PR #247） | 391 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check、package list 均通过 |
 | PR #247 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
 | PR #247 合并 | squash merge `68ea03b`；无发布/tag |
+| 本地运行时验证（PR #259） | 动态 Gradle dependency 定向回归、workspace clippy、fmt、design docs 和 diff check 通过；此前全量 workspace 测试 400 项中唯一既有 coordinator 并发测试瞬态失败，单独重跑通过；无发布/tag |
+| PR #259 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；Android smoke 验证固定依赖仍命中 BuildKey cache；无发布/tag |
+| PR #259 合并 | squash merge `35b0afc`；无发布/tag |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
