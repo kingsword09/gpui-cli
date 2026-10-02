@@ -1122,11 +1122,66 @@ fn contains_android_dynamic_dependency(source: &str) -> bool {
         .iter()
         .any(|marker| lower.contains(marker));
         let version_value = line.contains('=') || dependency_declaration;
-        let dynamic_range = (line.contains('[') || line.contains('('))
-            && line.contains(',')
-            && (line.contains(']') || line.contains(')'));
-        version_value && (line.contains('+') || dynamic_range)
+        version_value
+            && (quoted_value_contains(line, '+') || quoted_value_contains_dynamic_range(line))
     })
+}
+
+fn quoted_value_contains(source: &str, wanted: char) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+    for character in source.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        match quote {
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) if character == wanted => return true,
+            None if matches!(character, '\'' | '"') => quote = Some(character),
+            _ => {}
+        }
+    }
+    false
+}
+
+fn quoted_value_contains_dynamic_range(source: &str) -> bool {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut value = String::new();
+    for character in source.chars() {
+        if escaped {
+            if quote.is_some() {
+                value.push(character);
+            }
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        match quote {
+            Some(delimiter) if character == delimiter => {
+                if (value.contains('[') || value.contains('('))
+                    && value.contains(',')
+                    && (value.contains(']') || value.contains(')'))
+                {
+                    return true;
+                }
+                value.clear();
+                quote = None;
+            }
+            Some(_) => value.push(character),
+            None if matches!(character, '\'' | '"') => quote = Some(character),
+            _ => {}
+        }
+    }
+    false
 }
 
 fn android_toolchain_fingerprint() -> Option<String> {
@@ -2473,6 +2528,18 @@ mod tests {
         fs::write(
             &script,
             "dependencies { implementation(\"com.example:fixed:1.2.3\") }\n",
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_dynamic_dependency_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
+
+        fs::write(
+            &script,
+            "android { defaultConfig { ndk { abiFilters += gpuiAbis } } }\n",
         )
         .unwrap();
         let native = NativeInputs::scan(root.path()).unwrap();
