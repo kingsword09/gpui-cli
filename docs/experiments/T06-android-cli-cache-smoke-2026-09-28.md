@@ -1,6 +1,7 @@
 # T06：Android CLI 构建与 cache-hit smoke（2026-09-28）
 
-状态：in_progress。该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次
+状态：PR #257 将 Gradle 9.4.1 官方 distribution SHA-256 纳入生成模板，并要求有效 wrapper checksum
+才允许复用 artifact cache。该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次
 构建和同 BuildKey 第二次命中；Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
 ## 流程
@@ -13,6 +14,9 @@
 - 检查缓存 APK 中恰好包含两个目标 ABI；设备安装与 NativeActivity 启动不在该脚本范围；
 - 测试通过临时 `HOME` 和 `ANDROID_USER_HOME` 放置默认 debug keystore，Cargo/Rustup/Gradle
   工具缓存仍复用已配置目录，避免读写用户已有 signing key。
+- 生成的 `gradle-wrapper.properties` 固定 Gradle 9.4.1 官方 checksum
+  `2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb`；BuildKey 已哈希该 properties
+  文件，缺少、重复或畸形 checksum 时 CLI 仍正常构建但不消费/发布可复用 artifact manifest。
 
 ## 证据
 
@@ -22,6 +26,11 @@
 - Android-template CI 安装对应 Linux Rust targets、SDK 34/build-tools 34、NDK 27.2.12479018
   和 cargo-ndk 4.1.2 后运行同一脚本；这将是 PR 门槛，不等同于完整 GPUI crate 的 Android
   编译或 emulator/device 运行。
+- PR #257 本地重跑该脚本通过：Gradle wrapper 校验 pinned distribution，debug 与 release APK
+  packaging 成功，最小 cdylib 的 Android CLI 第二次构建仍命中 verified BuildKey cache；399 个
+  workspace 单测及集成/协议测试、clippy、fmt、build 和设计文档检查通过。PR 与 push 两套
+  macOS/Windows/Ubuntu、Android/desktop template、baseline-driver CI 全绿；#257 squash 为
+  `2a5782d`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -30,3 +39,5 @@
   Gradle APK 打包、manifest 校验和第二次 cache hit；
 - Android emulator/device 安装启动、release/custom signing、cache 并发订阅/取消引用和容量
   清理仍未覆盖。
+- wrapper checksum 只校验 Gradle distribution ZIP；它不 fingerprint Gradle runtime 的所有解压文件、
+  AGP/plugins、远端仓库状态、NDK/build-script I/O，也不替代完整 Android 构建输入闭包或设备验收。
