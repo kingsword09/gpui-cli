@@ -5,7 +5,7 @@ required/optional 汇总和 artifact 保留接口；当前已加入配置展开�
 并行 executor、mobile lifecycle adapter、matrix CLI 和移动 scenario driver 的 control/native
 capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 
-本轮核查主分支：`67d1160`（PR #241 squash merge，2026-10-02）。
+本轮核查主分支：`b781339`（PR #243 squash merge，2026-10-02）。
 
 ## 已交付
 
@@ -82,7 +82,13 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
   path 与 lease secret 不进入 detail，缺失探针字段继续为 `null/unknown`。
 - capture-only matrix 与 control-driven check 在发布移动截图证据前都会重新验证 capture 文件类型、
   大小、字节数、SHA-256、PNG 尺寸和 `png-<sha256>` artifact ID；输出被替换或损坏时拒绝证据。
-  这只是发布前完整性边界，不等于完整截图 manifest、真实设备 fault matrix 或连续验收。
+  这只是发布前完整性边界，不等于真实设备 fault matrix、重连或连续验收。
+- 每张移动截图会在同目录原子发布 schema 1 的 `<capture>.manifest.json`，记录
+  artifact/hash/bytes/PNG 尺寸、逻辑 viewport/scale/方向、系统 UI、前台 marker 以及
+  run/project/device/lease/fencing digest；Android display metadata 补齐后重新发布 manifest。
+  check 与 matrix 发布前会核对 manifest 与当前 `RunIdentity`，报告只输出相对 `manifest_path`；
+  原始 fencing token 和绝对宿主路径不进入 manifest/report。该 sidecar 归属边界仍不等于真实设备
+  fault matrix、重连或连续验收。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
@@ -138,6 +144,8 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
   不增加真实 scenario steps、设备状态探针或连续运行保证。
 - capture event detail 只是已有 artifact 的 bounded projection，不会凭 PNG 尺寸推导缺失环境，
   也不增加 crash、ANR、重连、前台切换或真实设备连续验收。
+- sidecar manifest 只为已生成的移动 PNG 提供原子发布、artifact 元数据和 run identity 归属校验；
+  它不是远程 artifact store、repro 包或真实设备运行证明。
 - event log 只传播已有 adapter 事件，不自动增加 crash、ANR、重连或前台确认；这些仍需真实
   平台运行记录。
 - 已投递 action 的错误若附带 operation ID，报告会保留该 ID 以便把结果关联到原 operation；
