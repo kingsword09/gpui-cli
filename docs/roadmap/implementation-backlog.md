@@ -601,7 +601,8 @@ project/lease/fencing digest，原始 fencing token 不进入 JSON；#241 又在
 发布前核验文件类型、大小、字节数、SHA-256、PNG 尺寸和 artifact ID；#243 又为每张移动截图
 原子发布并核验 schema 1 sidecar manifest 与当前 `RunIdentity`，报告只输出相对
 `manifest_path`；#245 又将该字段暴露到 `ScreenshotEvidence` 与 screenshot assertion evidence，
-并拒绝绝对路径和 artifact root 外路径。记录见
+并拒绝绝对路径和 artifact root 外路径；#247 又将 scenario contract metadata 绑定到同一
+mobile evidence。记录见
 [S04 check core](../experiments/S04-check-core-2026-09-28.md)。
 
 当前 desktop 接线已交付：`gpui check --scenario <id> --target desktop` 启动隔离的
@@ -753,7 +754,9 @@ control-driven scenario evidence 在实际 run 绑定后发布同一嵌套 ident
 JSON；#241 又让移动截图在进入 matrix report 前通过文件类型、大小、字节数、SHA-256、PNG 尺寸
 和 artifact ID 复核；#243 又让每张移动截图原子发布 schema 1 sidecar manifest，并在进入 matrix
 report 前核对 manifest 与当前 `RunIdentity`；#245 又将相对于 artifact root 的 `manifest_path`
-传播到 `ScreenshotEvidence` 与 screenshot assertion evidence，并拒绝绝对路径和越界路径；跨命令共享
+传播到 `ScreenshotEvidence` 与 screenshot assertion evidence，并拒绝绝对路径和越界路径；#247 又将
+cell/target/scenario、requirements 和 frozen fixture hash 传播到 mobile lifecycle evidence，使
+pre-ready、cleanup failure 和 capture-only 路径在无完整 `CheckReport` 时仍可追溯；跨命令共享
 构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入，真实 fault matrix 仍未接入；capture
 event detail 的 metadata 传播也不替代这些验收。
 
