@@ -438,10 +438,13 @@ live preview builder 已接入 source-project target-specific output root，并�
 `BuildOutputLock`；#169 又让 desktop preview 通过独立 verified artifact manifest 在验证成功时
 跳过 Cargo；#171 又让 iOS simulator live preview 在同一语义下验证完整 `.app` bundle 并跳过
 rustup/Cargo/XcodeGen/`xcodebuild`；#173 又让 Android default-debug live preview 在同一语义下
-验证 JNI/APK 输出并跳过 rustup/cargo-ndk/Gradle；这仍不等于 iOS physical、Android release-only/
+验证 JNI/APK 输出并跳过 rustup/cargo-ndk/Gradle；这仍不等于 iOS physical、Android release APK/
 复杂/远端 signing live-preview 命中、跨命令 ownership 或 coalescing。#205 已覆盖受控 Android
 local custom/release signing 的非 live build/run 命中，#209 又覆盖显式 debug custom-signing live
-preview 的 manifest/coordinator 复用，记录见
+preview 的 manifest/coordinator 复用，#249 又允许静态可证明的 local release-only signing 配置复用
+debug preview：BuildKey 同时绑定 release signing fingerprint 与默认 debug keystore hash，复用仍需
+通过 verified JNI/APK manifest 和 coordinator 校验。release APK、默认 debug keystore 缺失或输入变化、
+复杂 DSL/插件/远端 signing 继续 bypass。记录见
 [T06 Android signing BuildKey](../experiments/T06-android-signing-build-key-2026-09-30.md)。
 这只串行进入该锁路径的输出变更，不等于构建已完成或可复用。snapshot build
 orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
@@ -490,7 +493,9 @@ terminal result 并只让取消的 leader 返回 cancellation，无 follower 时
 cache bypass/拒绝发布，签名可用时允许 physical manifest 命中。#205 又为受控 Android local
 custom/release signing 纳入 properties/keystore 摘要并接入非 live build/run；#209 又让显式
 `buildTypes.debug.signingConfig` 的 custom-debug live preview 复用 signing fingerprint、verified
-manifest 和 preview coordinator；release-only、复杂/远端 signing 与隐藏输入仍未建模。
+manifest 和 preview coordinator；#249 又让受控 release-only signing 配置的 debug preview 同时绑定
+release signing fingerprint 和默认 debug keystore hash。Android release APK、复杂/远端 signing 与
+Gradle/AGP/NDK 隐藏输入仍未建模。
 M04 仍未完成：preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
@@ -529,7 +534,9 @@ Rust 编译；记录见
 Android default-debug 切片在 BuildKey 纳入 debug keystore 指纹并完整验证 JNI/APK 输出后
 允许命中；#205 又为受控 local custom/release signing 的非 live build/run 纳入签名输入摘要并
 允许命中；#209 又让显式 debug custom-signing live preview 纳入 signing fingerprint，并在
-verified manifest/coordinator 校验通过时命中；release-only、复杂/远端 signing 仍 bypass；记录见
+verified manifest/coordinator 校验通过时命中；#249 又让受控 local release-only signing 配置的
+debug preview 同时绑定 release signing fingerprint 与默认 debug keystore hash；Android release APK、
+复杂/远端 signing 仍 bypass；记录见
 [T06 Android debug manifest cache hit](../experiments/T06-android-debug-cache-hit-2026-09-28.md) 和
 [T06 Android signing BuildKey](../experiments/T06-android-signing-build-key-2026-09-30.md)。
 Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次，验证 Android CLI
