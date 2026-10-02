@@ -1069,13 +1069,11 @@ fn android_dynamic_dependency_cache_disabled_reason(
     root: &Path,
     native: &NativeInputs,
 ) -> Result<Option<String>> {
-    for relative in native.files.keys().filter(|path| {
-        path.starts_with("mobile/android/gradle/")
-            && matches!(
-                Path::new(path.as_str()).extension().and_then(OsStr::to_str),
-                Some("gradle" | "kts" | "toml" | "kt" | "groovy" | "java")
-            )
-    }) {
+    for relative in native
+        .files
+        .keys()
+        .filter(|path| is_android_gradle_dependency_input(path))
+    {
         let source = fs::read_to_string(root.join(relative))
             .with_context(|| format!("reading Android Gradle dependency input {relative}"))?;
         if contains_android_dynamic_dependency(&source) {
@@ -1085,6 +1083,21 @@ fn android_dynamic_dependency_cache_disabled_reason(
         }
     }
     Ok(None)
+}
+
+fn is_android_gradle_dependency_input(path: &str) -> bool {
+    let path = Path::new(path);
+    if !path.starts_with("mobile/android/gradle") {
+        return false;
+    }
+    match path.extension().and_then(OsStr::to_str) {
+        Some("gradle" | "kts" | "toml") => true,
+        Some("kt" | "groovy" | "java") => path.components().any(|component| {
+            let name = component.as_os_str();
+            name == OsStr::new("buildSrc") || name == OsStr::new("build-logic")
+        }),
+        _ => false,
+    }
 }
 
 fn contains_android_dynamic_dependency(source: &str) -> bool {
@@ -2638,6 +2651,22 @@ mod tests {
             assert!(reason.contains(relative));
             fs::remove_file(plugin_source).unwrap();
         }
+
+        let app_source = root
+            .path()
+            .join("mobile/android/gradle/app/src/main/java/GpuiAudio.java");
+        fs::create_dir_all(app_source.parent().unwrap()).unwrap();
+        fs::write(
+            &app_source,
+            "String message = \"API 23+\" + Build.VERSION.SDK_INT;\n",
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_dynamic_dependency_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
