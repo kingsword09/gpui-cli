@@ -5,9 +5,11 @@ use super::output_layout::{BuildOutputLayout, BuildPlatform};
 use crate::devserver::inputs::{Inputs, NativeInputs};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
@@ -1207,12 +1209,127 @@ fn android_toolchain_fingerprint() -> Option<String> {
     }
     let sdk_packages = android_sdk_package_fingerprint(&sdk_root)?;
     let ndk_revision = android_package_revision(&ndk_home.join("source.properties"))?;
+    let ndk_compiler_tools = android_ndk_compiler_tool_fingerprint(&ndk_home)?;
     let cargo_ndk = command_version("cargo", &["ndk", "--version"], false)?;
     let java = java_version()?;
     let identity = format!(
-        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\ncargo-ndk={cargo_ndk}\njava={java}"
+        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\ncargo-ndk={cargo_ndk}\njava={java}"
     );
     Some(format!("{:x}", Sha256::digest(identity.as_bytes())))
+}
+
+fn android_ndk_host_tag_candidates() -> &'static [&'static str] {
+    match (env::consts::OS, env::consts::ARCH) {
+        ("macos", "aarch64") => &["darwin-arm64", "darwin-x86_64"],
+        ("macos", _) => &["darwin-x86_64", "darwin-arm64"],
+        ("linux", "aarch64") => &["linux-aarch64", "linux-x86_64"],
+        ("linux", _) => &["linux-x86_64", "linux-aarch64"],
+        ("windows", _) => &["windows-x86_64"],
+        _ => &[],
+    }
+}
+
+fn android_ndk_compiler_tool_fingerprint(ndk_home: &Path) -> Option<String> {
+    let prebuilt = ndk_home.join("toolchains/llvm/prebuilt");
+    let host_root = android_ndk_host_tag_candidates()
+        .iter()
+        .map(|tag| prebuilt.join(tag))
+        .find(|path| path.is_dir())?;
+    let bin = host_root.join("bin");
+    let required_tools = [
+        "clang",
+        "clang++",
+        "lld",
+        "ld.lld",
+        "llvm-ar",
+        "llvm-ranlib",
+        "llvm-strip",
+        "llvm-objcopy",
+        "llvm-nm",
+        "llvm-readelf",
+    ];
+    let mut entries = Vec::new();
+    let mut content_hashes = BTreeMap::new();
+    for name in required_tools {
+        let path = android_ndk_tool_path(&bin, name)?;
+        entries.push(android_ndk_tool_entry(&bin, &path, &mut content_hashes)?);
+    }
+
+    let directory = fs::read_dir(&bin).ok()?;
+    for entry in directory {
+        let entry = entry.ok()?;
+        let name = entry.file_name().into_string().ok()?;
+        let normalized = name.strip_suffix(".exe").unwrap_or(&name);
+        if !(normalized.ends_with("-clang") || normalized.ends_with("-clang++"))
+            || !(normalized.contains("-linux-android") || normalized.contains("-linux-androideabi"))
+        {
+            continue;
+        }
+        entries.push(android_ndk_tool_entry(
+            &bin,
+            &entry.path(),
+            &mut content_hashes,
+        )?);
+    }
+    entries.sort();
+    Some(format!(
+        "host={};{}",
+        host_root.file_name()?.to_string_lossy(),
+        entries.join("\n")
+    ))
+}
+
+fn android_ndk_tool_path(bin: &Path, name: &str) -> Option<PathBuf> {
+    let path = bin.join(name);
+    if path.exists() {
+        return Some(path);
+    }
+    cfg!(windows)
+        .then(|| bin.join(format!("{name}.exe")))
+        .filter(|path| path.exists())
+}
+
+fn android_ndk_tool_entry(
+    bin: &Path,
+    path: &Path,
+    content_hashes: &mut BTreeMap<PathBuf, String>,
+) -> Option<String> {
+    let name = path
+        .strip_prefix(bin)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let link_target = fs::read_link(path)
+        .ok()
+        .map(|target| target.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let resolved = fs::canonicalize(path).ok()?;
+    let metadata = fs::symlink_metadata(&resolved).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let digest = if let Some(digest) = content_hashes.get(&resolved) {
+        digest.clone()
+    } else {
+        let digest = hash_file_contents(&resolved).ok()?;
+        content_hashes.insert(resolved, digest.clone());
+        digest
+    };
+    Some(format!("{name}|link={link_target}|sha256={digest}"))
+}
+
+fn hash_file_contents(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn consistent_environment_directory(names: &[&str]) -> Option<PathBuf> {
@@ -2271,6 +2388,42 @@ mod tests {
                 .map(String::as_str),
             Some("unavailable")
         );
+    }
+
+    #[test]
+    fn android_ndk_compiler_tool_fingerprint_tracks_active_tool_contents() {
+        let ndk = tempfile::tempdir().unwrap();
+        let host = android_ndk_host_tag_candidates().first().unwrap();
+        let bin = ndk
+            .path()
+            .join("toolchains/llvm/prebuilt")
+            .join(host)
+            .join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for name in [
+            "clang",
+            "clang++",
+            "lld",
+            "ld.lld",
+            "llvm-ar",
+            "llvm-ranlib",
+            "llvm-strip",
+            "llvm-objcopy",
+            "llvm-nm",
+            "llvm-readelf",
+            "aarch64-linux-android-clang",
+            "x86_64-linux-android-clang++",
+        ] {
+            fs::write(bin.join(name), name.as_bytes()).unwrap();
+        }
+
+        let first = android_ndk_compiler_tool_fingerprint(ndk.path()).unwrap();
+        assert!(first.contains("aarch64-linux-android-clang"));
+        assert!(first.contains("x86_64-linux-android-clang++"));
+
+        fs::write(bin.join("clang"), b"replacement compiler").unwrap();
+        let second = android_ndk_compiler_tool_fingerprint(ndk.path()).unwrap();
+        assert_ne!(first, second);
     }
 
     #[test]
