@@ -17,6 +17,7 @@ use super::lease::DeviceLeaseSession;
 
 pub const RUNNER_CONTRACT_VERSION: u32 = 1;
 pub const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+pub const CAPTURE_ARTIFACT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// Maximum number of lifecycle events retained for one mobile run.
 pub const MAX_EVIDENCE_EVENTS: usize = 128;
 /// Maximum serialized size of one event's `details` value.
@@ -144,6 +145,9 @@ pub struct CaptureScope {
 pub struct CaptureArtifact {
     pub artifact_id: String,
     pub path: PathBuf,
+    /// Sidecar manifest path; skipped from wire evidence because it is host-local.
+    #[serde(skip)]
+    pub manifest_path: PathBuf,
     pub provider: String,
     pub bytes: u64,
     pub sha256: String,
@@ -159,6 +163,169 @@ pub struct CaptureArtifact {
     pub system_ui: bool,
     pub foreground_app: Option<String>,
     pub run_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureArtifactManifest {
+    pub schema_version: u32,
+    pub artifact_id: String,
+    pub artifact_file: String,
+    pub provider: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub width: u32,
+    pub height: u32,
+    pub logical_width: Option<u32>,
+    pub logical_height: Option<u32>,
+    pub scale_milli: Option<u32>,
+    pub orientation: Option<String>,
+    pub system_ui: bool,
+    pub foreground_app: Option<String>,
+    pub run_id: String,
+    pub project_id: String,
+    pub device_id: String,
+    pub lease_session_id: String,
+    pub fencing_token_sha256: String,
+}
+
+impl CaptureArtifactManifest {
+    fn from_capture(artifact: &CaptureArtifact, identity: &RunIdentity) -> Result<Self> {
+        let artifact_file = artifact
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("capture output filename is not valid UTF-8")?;
+        Ok(Self {
+            schema_version: CAPTURE_ARTIFACT_MANIFEST_SCHEMA_VERSION,
+            artifact_id: artifact.artifact_id.clone(),
+            artifact_file: artifact_file.to_owned(),
+            provider: artifact.provider.clone(),
+            bytes: artifact.bytes,
+            sha256: artifact.sha256.clone(),
+            width: artifact.width,
+            height: artifact.height,
+            logical_width: artifact.logical_width,
+            logical_height: artifact.logical_height,
+            scale_milli: artifact.scale_milli,
+            orientation: artifact.orientation.clone(),
+            system_ui: artifact.system_ui,
+            foreground_app: artifact.foreground_app.clone(),
+            run_id: identity.run_id.clone(),
+            project_id: identity.project_id.clone(),
+            device_id: identity.device_id.clone(),
+            lease_session_id: identity.lease_session_id.clone(),
+            fencing_token_sha256: identity.fencing_token_sha256.clone(),
+        })
+    }
+
+    pub fn read(path: &Path) -> Result<Self> {
+        let bytes = fs::read(path)
+            .with_context(|| format!("reading capture artifact manifest {}", path.display()))?;
+        let manifest: Self = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing capture artifact manifest {}", path.display()))?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.schema_version != CAPTURE_ARTIFACT_MANIFEST_SCHEMA_VERSION {
+            bail!(
+                "unsupported capture artifact manifest schema {}; expected {}",
+                self.schema_version,
+                CAPTURE_ARTIFACT_MANIFEST_SCHEMA_VERSION
+            );
+        }
+        if self.artifact_file.is_empty()
+            || self.artifact_file.contains('/')
+            || self.artifact_file.contains('\\')
+        {
+            bail!("capture artifact manifest contains an unsafe artifact filename");
+        }
+        if self.provider.is_empty()
+            || self.run_id.is_empty()
+            || self.project_id.is_empty()
+            || self.device_id.is_empty()
+            || self.lease_session_id.is_empty()
+        {
+            bail!("capture artifact manifest identity fields must not be empty");
+        }
+        if self.bytes == 0 || self.width == 0 || self.height == 0 {
+            bail!("capture artifact manifest contains zero-sized output metadata");
+        }
+        validate_sha256_value(&self.sha256, "capture hash")?;
+        validate_sha256_value(&self.fencing_token_sha256, "fencing token digest")?;
+        let expected_id = format!("png-{}", self.sha256);
+        if self.artifact_id != expected_id {
+            bail!("capture artifact manifest ID does not match its SHA-256");
+        }
+        Ok(())
+    }
+
+    fn verify_capture(&self, artifact: &CaptureArtifact) -> Result<()> {
+        self.validate()?;
+        let artifact_file = artifact
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("capture output filename is not valid UTF-8")?;
+        if self.artifact_file != artifact_file
+            || self.artifact_id != artifact.artifact_id
+            || self.provider != artifact.provider
+            || self.bytes != artifact.bytes
+            || self.sha256 != artifact.sha256
+            || self.width != artifact.width
+            || self.height != artifact.height
+            || self.logical_width != artifact.logical_width
+            || self.logical_height != artifact.logical_height
+            || self.scale_milli != artifact.scale_milli
+            || self.orientation != artifact.orientation
+            || self.system_ui != artifact.system_ui
+            || self.foreground_app != artifact.foreground_app
+            || self.run_id != artifact.run_id
+        {
+            bail!("capture artifact does not match its manifest");
+        }
+        Ok(())
+    }
+
+    fn verify_identity(&self, identity: &RunIdentity) -> Result<()> {
+        if self.run_id != identity.run_id
+            || self.project_id != identity.project_id
+            || self.device_id != identity.device_id
+            || self.lease_session_id != identity.lease_session_id
+            || self.fencing_token_sha256 != identity.fencing_token_sha256
+        {
+            bail!("capture artifact manifest is not bound to the active run identity");
+        }
+        Ok(())
+    }
+
+    fn write_atomic(&self, path: &Path) -> Result<()> {
+        self.validate()?;
+        verify_capture_path(path)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("capture artifact manifest has no parent"))?;
+        fs::create_dir_all(parent)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+            format!("creating capture artifact manifest in {}", parent.display())
+        })?;
+        serde_json::to_writer_pretty(temporary.as_file_mut(), self)
+            .context("serializing capture artifact manifest")?;
+        use std::io::Write;
+        temporary.write_all(b"\n")?;
+        temporary.as_file().sync_all()?;
+        if fs::symlink_metadata(path).is_ok() {
+            fs::remove_file(path).with_context(|| {
+                format!("replacing capture artifact manifest {}", path.display())
+            })?;
+        }
+        temporary.persist(path).map_err(|error| {
+            anyhow::anyhow!("publishing capture artifact manifest: {}", error.error)
+        })?;
+        Ok(())
+    }
 }
 
 impl CaptureArtifact {
@@ -187,9 +354,10 @@ impl CaptureArtifact {
             .with_context(|| format!("reading capture output {}", scope.output.display()))?;
         let (width, height) = png_dimensions(&bytes)?;
         let sha256 = sha256(&bytes);
-        Ok(Self {
+        let artifact = Self {
             artifact_id: format!("png-{sha256}"),
             path: scope.output.clone(),
+            manifest_path: capture_manifest_path(&scope.output)?,
             provider: provider.into(),
             bytes: bytes.len() as u64,
             sha256,
@@ -202,7 +370,15 @@ impl CaptureArtifact {
             system_ui,
             foreground_app: scope.foreground_app.clone(),
             run_id: scope.identity.run_id.clone(),
-        })
+        };
+        artifact.publish_manifest(&scope.identity)?;
+        artifact.verify_for_identity(&scope.identity)?;
+        Ok(artifact)
+    }
+
+    pub fn publish_manifest(&self, identity: &RunIdentity) -> Result<()> {
+        let manifest = CaptureArtifactManifest::from_capture(self, identity)?;
+        manifest.write_atomic(&self.manifest_path)
     }
 
     /// Revalidates the on-disk capture before it is published as matrix or
@@ -254,7 +430,15 @@ impl CaptureArtifact {
                 "capture artifact id does not match its SHA-256: expected {expected_artifact_id}"
             );
         }
+        let manifest = CaptureArtifactManifest::read(&self.manifest_path)?;
+        manifest.verify_capture(self)?;
         Ok(())
+    }
+
+    pub fn verify_for_identity(&self, identity: &RunIdentity) -> Result<()> {
+        self.verify()?;
+        let manifest = CaptureArtifactManifest::read(&self.manifest_path)?;
+        manifest.verify_identity(identity)
     }
 
     /// Projects capture metadata into a bounded event detail value without
@@ -262,6 +446,7 @@ impl CaptureArtifact {
     pub fn evidence_details(&self) -> Value {
         serde_json::json!({
             "artifact_id": self.artifact_id,
+            "manifest_schema_version": CAPTURE_ARTIFACT_MANIFEST_SCHEMA_VERSION,
             "provider": self.provider,
             "bytes": self.bytes,
             "sha256": self.sha256,
@@ -282,6 +467,24 @@ impl RunIdentity {
     fn verify_output_path(&self, path: &Path) -> Result<()> {
         verify_capture_path(path)
     }
+}
+
+fn capture_manifest_path(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("capture output has no parent"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("capture output filename is not valid UTF-8")?;
+    Ok(parent.join(format!("{file_name}.manifest.json")))
+}
+
+fn validate_sha256_value(value: &str, field: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{field} must be a 64-character hexadecimal digest");
+    }
+    Ok(())
 }
 
 fn verify_capture_path(path: &Path) -> Result<()> {
@@ -705,6 +908,7 @@ mod tests {
         let artifact = CaptureArtifact {
             artifact_id: "png-hash".into(),
             path: PathBuf::from("/private/host/capture.png"),
+            manifest_path: PathBuf::new(),
             provider: "adb.exec_out.screencap".into(),
             bytes: 42,
             sha256: "hash".into(),
@@ -1032,6 +1236,17 @@ mod tests {
         assert_eq!((artifact.width, artifact.height), (2, 3));
         assert!(artifact.system_ui);
         assert_eq!(artifact.run_id, identity.run_id);
+        assert!(artifact.manifest_path.is_file());
+        let manifest = CaptureArtifactManifest::read(&artifact.manifest_path).unwrap();
+        assert_eq!(manifest.project_id, "project-1");
+        assert_eq!(manifest.device_id, "sim-1");
+        assert_eq!(manifest.fencing_token_sha256.len(), 64);
+        assert!(
+            !serde_json::to_string(&manifest)
+                .unwrap()
+                .contains("fencing_token\":\"token")
+        );
+        artifact.verify_for_identity(&scope.identity).unwrap();
     }
 
     #[test]
@@ -1065,5 +1280,41 @@ mod tests {
         fs::write(&output, b"replaced").unwrap();
         let error = artifact.verify().unwrap_err();
         assert!(error.to_string().contains("capture byte count changed"));
+    }
+
+    #[test]
+    fn capture_artifact_verification_rejects_tampered_manifest() {
+        let root = lease_root();
+        let output = root.path().join("capture.png");
+        let identity = RunIdentity {
+            run_id: "run-1".into(),
+            project_id: "project-1".into(),
+            device_id: "sim-1".into(),
+            lease_session_id: "session-1".into(),
+            fencing_token: "token".into(),
+            fencing_token_sha256: token_sha256("token"),
+        };
+        let scope = CaptureScope {
+            identity,
+            output: output.clone(),
+            attempt: 1,
+            orientation: Some("portrait".into()),
+            foreground_app: Some("com.example.app".into()),
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
+        png.extend_from_slice(&2_u32.to_be_bytes());
+        png.extend_from_slice(&3_u32.to_be_bytes());
+        png.extend_from_slice(&[0; 5]);
+        fs::write(&output, png).unwrap();
+        let artifact = CaptureArtifact::from_png(&scope, "simctl", true).unwrap();
+        let mut manifest = CaptureArtifactManifest::read(&artifact.manifest_path).unwrap();
+        manifest.bytes += 1;
+        fs::write(
+            &artifact.manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(artifact.verify_for_identity(&scope.identity).is_err());
     }
 }

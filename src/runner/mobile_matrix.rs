@@ -146,7 +146,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
             .capture(&scope, lease)
             .context("capturing mobile screenshot")?;
         capture
-            .verify()
+            .verify_for_identity(&prepared.identity)
             .context("verifying mobile screenshot artifact")?;
         self.captures.push(capture.clone());
 
@@ -257,6 +257,7 @@ impl<R: MobileRunner + Send> MatrixCellRunner for MobileMatrixCellRunner<R> {
                     "artifact_id": capture.artifact_id,
                     "provider": capture.provider,
                     "path": relative_path(&capture.path),
+                    "manifest_path": relative_path(&capture.manifest_path),
                     "bytes": capture.bytes,
                     "sha256": capture.sha256,
                     "width": capture.width,
@@ -428,6 +429,7 @@ mod tests {
             artifact.scale_milli = Some(3000);
             artifact.orientation = Some("portrait".into());
             artifact.foreground_app = Some("com.example.app".into());
+            artifact.publish_manifest(&scope.identity)?;
             Ok(artifact)
         }
 
