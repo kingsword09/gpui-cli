@@ -368,7 +368,7 @@ fn matrix_target_build(
         ),
         MatrixPlatform::Android => {
             let abi = abi.context("Android matrix target has no ABI for BuildKey")?;
-            let policy = android_preview_cache_policy(&source_root, false)?;
+            let policy = android_preview_cache_policy(snapshot_root, false)?;
             (
                 android_build_key(snapshot_root, false, &[abi.to_owned()])?,
                 BuildPlatform::Android,

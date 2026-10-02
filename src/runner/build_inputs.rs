@@ -40,6 +40,8 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
 ];
 
 const ANDROID_KEYSTORE_PROPERTIES_RELATIVE: &str = "mobile/android/gradle/keystore.properties";
+const ANDROID_GRADLE_WRAPPER_PROPERTIES_RELATIVE: &str =
+    "mobile/android/gradle/gradle/wrapper/gradle-wrapper.properties";
 const ANDROID_SIGNING_EXTERNAL_HASH: &str = "android.custom-signing";
 const ANDROID_SIGNING_MARKERS: &[&str] = &[
     "signingConfig",
@@ -874,6 +876,7 @@ pub fn android_preview_cache_policy(
         .with_context(|| format!("resolving Android preview root: {}", root.display()))?;
     let mut native = NativeInputs::scan(&root)?;
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&root)?;
+    let wrapper_disabled_reason = android_gradle_wrapper_cache_disabled_reason(&root, &native)?;
     let signing_policy = android_cache_signing_policy(&root, release, &mut native)?;
     let (_, rustc_fingerprint) = rustc_identity()?;
     let (_, toolchain_disabled_reason) = bind_android_toolchain_identity(
@@ -889,6 +892,7 @@ pub fn android_preview_cache_policy(
     Ok(AndroidPreviewCachePolicy {
         disabled_reason: combine_cache_hit_disabled_reasons([
             toolchain_disabled_reason,
+            wrapper_disabled_reason,
             signing_disabled_reason,
             build_script_disabled_reason,
         ]),
@@ -928,6 +932,8 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     let (_, rustc_fingerprint) = rustc_identity()?;
     let mut native = NativeInputs::scan(&snapshot.root)?;
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&snapshot.root)?;
+    let wrapper_disabled_reason =
+        android_gradle_wrapper_cache_disabled_reason(&snapshot.root, &native)?;
     native
         .excluded_sensitive_files
         .extend(snapshot.manifest.excluded_sensitive_files.iter().cloned());
@@ -944,6 +950,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     );
     let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
         toolchain_disabled_reason,
+        wrapper_disabled_reason,
         signing_policy.disabled_reason,
         build_script_disabled_reason,
     ]);
@@ -982,6 +989,74 @@ fn local_build_script_cache_disabled_reason(root: &Path) -> Result<Option<String
     } else {
         Ok(None)
     }
+}
+
+fn android_gradle_wrapper_distribution_checksum(
+    root: &Path,
+    native: &NativeInputs,
+) -> Result<Option<String>> {
+    if !native
+        .files
+        .contains_key(ANDROID_GRADLE_WRAPPER_PROPERTIES_RELATIVE)
+    {
+        return Ok(None);
+    }
+    let path = root.join(ANDROID_GRADLE_WRAPPER_PROPERTIES_RELATIVE);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "checking Android Gradle wrapper properties {}",
+                    path.display()
+                )
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "reading Android Gradle wrapper properties {}",
+            path.display()
+        )
+    })?;
+    let mut checksum = None;
+    for line in contents.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "distributionSha256Sum" {
+            continue;
+        }
+        if checksum.is_some() {
+            return Ok(None);
+        }
+        let value = value.trim();
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+        checksum = Some(value.to_ascii_lowercase());
+    }
+    Ok(checksum)
+}
+
+fn android_gradle_wrapper_cache_disabled_reason(
+    root: &Path,
+    native: &NativeInputs,
+) -> Result<Option<String>> {
+    Ok(android_gradle_wrapper_distribution_checksum(root, native)?
+        .is_none()
+        .then(|| {
+            "Android Gradle wrapper distribution checksum is missing or invalid; cache reuse is disabled"
+                .into()
+        }))
 }
 
 fn android_toolchain_fingerprint() -> Option<String> {
@@ -2231,6 +2306,92 @@ mod tests {
                 .is_some_and(|path| path.ends_with("gradle-build"))
         );
         assert_eq!(first.key_hash.len(), 64);
+    }
+
+    #[test]
+    fn android_wrapper_distribution_checksum_is_required_for_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let gradle = root.path().join("mobile/android/gradle");
+        fs::create_dir_all(gradle.join("gradle/wrapper")).unwrap();
+        let properties = gradle.join("gradle/wrapper/gradle-wrapper.properties");
+
+        fs::write(
+            &properties,
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.4.1-bin.zip\n",
+        )
+        .unwrap();
+        let mut native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_wrapper_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some()
+        );
+
+        let checksum = "2AB2958F2A1E51120C326CAD6F385153BB11EE93B3C216C5FCCEbfdfbb7ec6cb";
+        let expected_checksum = checksum.to_ascii_lowercase();
+        fs::write(
+            &properties,
+            format!(
+                "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.4.1-bin.zip\ndistributionSha256Sum={checksum}\n"
+            ),
+        )
+        .unwrap();
+        native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_wrapper_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            android_gradle_wrapper_distribution_checksum(root.path(), &native)
+                .unwrap()
+                .as_deref(),
+            Some(expected_checksum.as_str())
+        );
+
+        fs::write(
+            &properties,
+            format!("distributionSha256Sum={checksum}\ndistributionSha256Sum={checksum}\n"),
+        )
+        .unwrap();
+        native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_wrapper_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some()
+        );
+
+        fs::write(&properties, "distributionSha256Sum=not-a-sha256\n").unwrap();
+        native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_wrapper_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn android_wrapper_properties_are_bound_to_build_key() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(root.path().join("Cargo.lock"), "# lock\n").unwrap();
+        let properties = root.path().join(ANDROID_GRADLE_WRAPPER_PROPERTIES_RELATIVE);
+        fs::create_dir_all(properties.parent().unwrap()).unwrap();
+        fs::write(
+            &properties,
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.4.1-bin.zip\ndistributionSha256Sum=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        )
+        .unwrap();
+        let first = android_build_key(root.path(), false, &["arm64-v8a".into()]).unwrap();
+
+        fs::write(
+            &properties,
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.4.1-bin.zip\ndistributionSha256Sum=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        )
+        .unwrap();
+        let second = android_build_key(root.path(), false, &["arm64-v8a".into()]).unwrap();
+
+        assert_ne!(first.key_hash(), second.key_hash());
     }
 
     #[test]
