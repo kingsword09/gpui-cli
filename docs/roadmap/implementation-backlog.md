@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-02，主分支 `b781339`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-02，主分支 `a5ab033`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -444,7 +444,10 @@ local custom/release signing 的非 live build/run 命中，#209 又覆盖显式
 preview 的 manifest/coordinator 复用，#249 又允许静态可证明的 local release-only signing 配置复用
 debug preview：BuildKey 同时绑定 release signing fingerprint 与默认 debug keystore hash，复用仍需
 通过 verified JNI/APK manifest 和 coordinator 校验。release APK、默认 debug keystore 缺失或输入变化、
-复杂 DSL/插件/远端 signing 继续 bypass。记录见
+复杂 DSL/插件/远端 signing 继续 bypass。#255 又让 Android Gradle root 内 Kotlin/Groovy/Java
+signing marker 命中 cache bypass，并在 `settings.gradle(.kts)` 声明 `includeBuild` 时保守禁用复用，
+避免 convention plugin 或外部 included build 改写 variant signing 却被静态识别为 default-debug；这
+只扩大 cache miss 范围，不阻止普通冻结构建，也不提供复杂/远端 signing cache。记录见
 [T06 Android signing BuildKey](../experiments/T06-android-signing-build-key-2026-09-30.md)。
 这只串行进入该锁路径的输出变更，不等于构建已完成或可复用。snapshot build
 orchestration、同 key 在途任务合并和 `build.rs` 隐藏输入
@@ -495,7 +498,9 @@ custom/release signing 纳入 properties/keystore 摘要并接入非 live build/
 `buildTypes.debug.signingConfig` 的 custom-debug live preview 复用 signing fingerprint、verified
 manifest 和 preview coordinator；#249 又让受控 release-only signing 配置的 debug preview 同时绑定
 release signing fingerprint 和默认 debug keystore hash。Android release APK、复杂/远端 signing 与
-Gradle/AGP/NDK 隐藏输入仍未建模。#251 修复一项 Windows coordinator 状态文件发布的瞬态竞态：
+Gradle/AGP/NDK 隐藏输入仍未建模。#255 仅扩大 Android cache bypass：Gradle root 内 Kotlin/Groovy/Java
+插件源码出现 signing marker，或 `settings.gradle(.kts)` 使用 `includeBuild` 时，不再允许 cache reuse；
+它不闭合 included-build 外部输入，也不实现远端签名复用。#251 修复一项 Windows coordinator 状态文件发布的瞬态竞态：
 原子替换遇到 `PermissionDenied`/`Access is denied` 时，最多做 5 次短指数退避重试，保留原子写入、
 state lock 和 owner fencing；重试耗尽或其他错误仍显式失败。
 M04 仍未完成：preview/check orchestration 的其余部分，以及
