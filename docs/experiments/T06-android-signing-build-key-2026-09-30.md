@@ -1,7 +1,7 @@
 # T06：Android local custom/release signing BuildKey（2026-09-30）
 
 状态：PR #205 已 squash 合并为 `142f58b`，PR #207 已 squash 合并为 `d90f66b`，PR #209 已 squash
-合并为 `a8a484f`，PR #249 已 squash 合并为 `90585ef`。受控 release-only signing 配置现在可用于
+合并为 `a8a484f`，PR #249 已 squash 合并为 `90585ef`，PR #255 已 squash 合并为 `a5ab033`。受控 release-only signing 配置现在可用于
 debug live preview 的签名感知缓存；Android release APK 和复杂/远端 signing 仍不复用 preview cache。
 本切片为 Android `build`/`run` 和 matrix/live frozen build 补齐一段可证明的本地 custom/release
 signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive 输出标为可复用。
@@ -32,12 +32,17 @@ signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive �
   debug keystore hash，且重验两组输入。此复用只适用于 debug preview，不表示 release APK 可缓存；
   缺失默认 debug keystore、debug signing 状态无法静态判定、复杂 DSL、多脚本/插件或远端 signing
   仍保持 cache bypass。
+- PR #255 将 signing marker 扫描扩展到 Gradle root 内 Kotlin/Groovy/Java 源码，避免 buildSrc 或
+  convention plugin 在 app build script 之外设置 variant signing 时被误判为 default-debug；同时，
+  `settings.gradle(.kts)` 使用 `includeBuild` 时不论自定义签名是否直接可见都禁用 cache reuse，因为
+  included build 的 plugin 实现可能在 workspace 外。两条路径都只降级为正常构建/cache miss，不阻止
+  冻结构建或签名输入快照。
 
 ## 验证
 
 - 单元测试覆盖签名 identity 摘要与变化重验、项目内 snapshot 注入和 `0600` 权限、secret 不进入
-  manifest、项目外路径、软链接、复杂多脚本 signing bypass，以及 keystore 变化导致 native digest
-  变化。
+  manifest、项目外路径、软链接、复杂多脚本 signing bypass、Gradle plugin signing source 与
+  `includeBuild` cache bypass，以及 keystore 变化导致 native digest 变化。
 - 本地通过 `cargo test --workspace --locked`（375 个单元测试及全部集成/协议测试）、
   `cargo clippy --workspace --all-targets --locked -- -D warnings`、workspace fmt、
   `cargo x check-design-docs` 和 `git diff --check`。
@@ -49,6 +54,11 @@ signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive �
   workspace fmt、`cargo x check-design-docs` 和 `git diff --check`。PR 与 push 两套 CI 的
   Linux/macOS/Windows check、desktop-template、android-template、baseline-driver 全部通过。
   PR #249 squash 为 `90585ef`；没有发布版本或创建 tag。
+- PR #255 的 Gradle plugin/included-build bypass 回归在本地通过，完整 workspace 有 397 个单元测试
+  和全部集成/协议测试通过；`cargo clippy --workspace --all-targets --locked -- -D warnings`、
+  `cargo fmt --check`、`cargo build --locked` 与 `git diff --check` 通过。PR 与 push 两套 CI 的
+  macOS/Windows/Ubuntu check、Android/desktop template 和 baseline-driver 全绿；PR squash 为
+  `a5ab033`，没有发布版本或创建 tag。
 
 ## 未覆盖
 
@@ -57,6 +67,9 @@ signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive �
 - Android live preview 的 default-debug signing、显式 debug custom signing 与受控 release-only
   signing 配置下的 debug variant 已进入 verified manifest/coordinator；release APK、复杂/远端 signing
   仍不发布可复用 preview manifest，也不进入 preview coordinator。
+- #255 的 Kotlin/Groovy/Java marker 扫描是保守字符串检查；Gradle wrapper distribution、AGP/plugin
+  内部 I/O、NDK/build-script 隐藏输入和任意远端签名输入闭包仍未完整建模。`includeBuild` 只触发 bypass，
+  没有复制/哈希外部 build logic 或建立其远端依赖身份。
 - 本切片没有新增 emulator/device 安装、启动、capture 或完整 scenario 连续验收证据。
 
 ## 关联的移动 scenario evidence
