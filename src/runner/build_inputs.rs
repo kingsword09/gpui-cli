@@ -1210,10 +1210,12 @@ fn android_toolchain_fingerprint() -> Option<String> {
     let sdk_packages = android_sdk_package_fingerprint(&sdk_root)?;
     let ndk_revision = android_package_revision(&ndk_home.join("source.properties"))?;
     let ndk_compiler_tools = android_ndk_compiler_tool_fingerprint(&ndk_home)?;
+    let ndk_compiler_resources =
+        android_ndk_compiler_resource_fingerprint(&android_ndk_host_root(&ndk_home)?)?;
     let cargo_ndk = command_version("cargo", &["ndk", "--version"], false)?;
     let java = java_version()?;
     let identity = format!(
-        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\ncargo-ndk={cargo_ndk}\njava={java}"
+        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\nndk-compiler-resources={ndk_compiler_resources}\ncargo-ndk={cargo_ndk}\njava={java}"
     );
     Some(format!("{:x}", Sha256::digest(identity.as_bytes())))
 }
@@ -1229,12 +1231,17 @@ fn android_ndk_host_tag_candidates() -> &'static [&'static str] {
     }
 }
 
-fn android_ndk_compiler_tool_fingerprint(ndk_home: &Path) -> Option<String> {
+fn android_ndk_host_root(ndk_home: &Path) -> Option<PathBuf> {
     let prebuilt = ndk_home.join("toolchains/llvm/prebuilt");
     let host_root = android_ndk_host_tag_candidates()
         .iter()
         .map(|tag| prebuilt.join(tag))
         .find(|path| path.is_dir())?;
+    Some(host_root)
+}
+
+fn android_ndk_compiler_tool_fingerprint(ndk_home: &Path) -> Option<String> {
+    let host_root = android_ndk_host_root(ndk_home)?;
     let bin = host_root.join("bin");
     let required_tools = [
         "clang",
@@ -1277,6 +1284,104 @@ fn android_ndk_compiler_tool_fingerprint(ndk_home: &Path) -> Option<String> {
         host_root.file_name()?.to_string_lossy(),
         entries.join("\n")
     ))
+}
+
+fn android_ndk_compiler_resource_fingerprint(host_root: &Path) -> Option<String> {
+    let sysroot = host_root.join("sysroot");
+    let sysroot_fingerprint = android_ndk_directory_fingerprint(&sysroot)?;
+    let clang_root = host_root.join("lib/clang");
+    let metadata = fs::symlink_metadata(&clang_root).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    let mut clang_versions = Vec::new();
+    for entry in fs::read_dir(&clang_root).ok()? {
+        let entry = entry.ok()?;
+        let version = entry.file_name().into_string().ok()?;
+        let version_metadata = fs::symlink_metadata(entry.path()).ok()?;
+        if version_metadata.file_type().is_symlink() || !version_metadata.is_dir() {
+            return None;
+        }
+        let include = entry.path().join("include");
+        clang_versions.push(format!(
+            "{version}={}",
+            android_ndk_directory_fingerprint(&include)?
+        ));
+    }
+    if clang_versions.is_empty() {
+        return None;
+    }
+    clang_versions.sort();
+    Some(format!(
+        "sysroot={sysroot_fingerprint}\nclang-includes={}",
+        clang_versions.join("\n")
+    ))
+}
+
+fn android_ndk_directory_fingerprint(root: &Path) -> Option<String> {
+    const MAX_FILES: usize = 100_000;
+    const MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+    let metadata = fs::symlink_metadata(root).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let mut pending = vec![canonical_root.clone()];
+    let mut entries = Vec::new();
+    let mut total_bytes = 0_u64;
+    while let Some(directory) = pending.pop() {
+        let mut children = fs::read_dir(&directory)
+            .ok()?
+            .map(|entry| entry.ok())
+            .collect::<Option<Vec<_>>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for entry in children {
+            let path = entry.path();
+            let relative = path.strip_prefix(&canonical_root).ok()?;
+            let relative = relative.to_str()?.replace('\\', "/");
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                return None;
+            }
+            if metadata.is_dir() {
+                entries.push((relative, path.clone(), b'd'));
+                if entries.len() > MAX_FILES {
+                    return None;
+                }
+                pending.push(path);
+            } else if metadata.is_file() {
+                total_bytes = total_bytes.checked_add(metadata.len())?;
+                if total_bytes > MAX_BYTES {
+                    return None;
+                }
+                entries.push((relative, path, b'f'));
+                if entries.len() > MAX_FILES {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+    }
+    if entries.len() > MAX_FILES {
+        return None;
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut digest = Sha256::new();
+    digest.update(b"gpui-android-ndk-directory-v1\0");
+    for (relative, path, kind) in entries {
+        digest.update([kind]);
+        digest.update((relative.len() as u64).to_be_bytes());
+        digest.update(relative.as_bytes());
+        if kind == b'f' {
+            let content_hash = hash_file_contents(&path).ok()?;
+            digest.update(content_hash.as_bytes());
+        }
+    }
+    Some(format!("{:x}", digest.finalize()))
 }
 
 fn android_ndk_tool_path(bin: &Path, name: &str) -> Option<PathBuf> {
@@ -2424,6 +2529,64 @@ mod tests {
         fs::write(bin.join("clang"), b"replacement compiler").unwrap();
         let second = android_ndk_compiler_tool_fingerprint(ndk.path()).unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn android_ndk_compiler_resource_fingerprint_tracks_sysroot_and_headers() {
+        let ndk = tempfile::tempdir().unwrap();
+        let host = android_ndk_host_tag_candidates().first().unwrap();
+        let host_root = ndk.path().join("toolchains/llvm/prebuilt").join(host);
+        let sysroot_header = host_root.join("sysroot/usr/include/android/api.h");
+        let clang_header = host_root.join("lib/clang/18/include/stdint.h");
+        fs::create_dir_all(sysroot_header.parent().unwrap()).unwrap();
+        fs::create_dir_all(clang_header.parent().unwrap()).unwrap();
+        fs::write(&sysroot_header, b"Android API header v1").unwrap();
+        fs::write(&clang_header, b"Clang builtin header v1").unwrap();
+
+        let first = android_ndk_compiler_resource_fingerprint(&host_root).unwrap();
+        let other_root = tempfile::tempdir().unwrap();
+        let copied_host = other_root.path().join("host");
+        fs::create_dir_all(copied_host.join("sysroot/usr/include/android")).unwrap();
+        fs::create_dir_all(copied_host.join("lib/clang/18/include")).unwrap();
+        fs::write(
+            copied_host.join("sysroot/usr/include/android/api.h"),
+            b"Android API header v1",
+        )
+        .unwrap();
+        fs::write(
+            copied_host.join("lib/clang/18/include/stdint.h"),
+            b"Clang builtin header v1",
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            android_ndk_compiler_resource_fingerprint(&copied_host).unwrap()
+        );
+
+        fs::write(&sysroot_header, b"Android API header v2").unwrap();
+        let second = android_ndk_compiler_resource_fingerprint(&host_root).unwrap();
+        assert_ne!(first, second);
+
+        fs::write(&sysroot_header, b"Android API header v1").unwrap();
+        fs::write(&clang_header, b"Clang builtin header v2").unwrap();
+        let third = android_ndk_compiler_resource_fingerprint(&host_root).unwrap();
+        assert_ne!(first, third);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_ndk_compiler_resource_fingerprint_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let ndk = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let host_root = ndk.path().join("host");
+        fs::create_dir_all(&host_root).unwrap();
+        fs::create_dir_all(outside.path().join("usr/include")).unwrap();
+        fs::write(outside.path().join("usr/include/stdio.h"), b"header").unwrap();
+        fs::create_dir_all(host_root.join("sysroot")).unwrap();
+        symlink(outside.path().join("usr"), host_root.join("sysroot/usr")).unwrap();
+        assert!(android_ndk_compiler_resource_fingerprint(&host_root).is_none());
     }
 
     #[test]
