@@ -284,6 +284,13 @@ struct AndroidCacheSigningPolicy {
     signing_identity: Option<AndroidSigningIdentity>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AndroidDebugSigningMode {
+    Default,
+    Custom,
+    Unknown,
+}
+
 fn android_custom_signing_identity(root: &Path) -> Result<Option<AndroidSigningIdentity>> {
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving Android signing project root {}", root.display()))?;
@@ -847,8 +854,10 @@ pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<
 
 /// Returns the cache-safety inputs needed by a live Android preview. The
 /// preview receives its BuildKey from the check planner; default-debug carries
-/// its keystore identity for reusable output, while supported custom signing
-/// carries a fingerprint but deliberately remains cache-disabled.
+/// its keystore identity for reusable output. A statically proven release-only
+/// signing block carries both its release fingerprint and the effective
+/// default-debug keystore identity; custom-debug signing carries only its
+/// custom identity. Ambiguous or non-local signing remains cache-disabled.
 pub fn android_preview_cache_policy(
     root: &Path,
     release: bool,
@@ -858,17 +867,14 @@ pub fn android_preview_cache_policy(
     let mut native = NativeInputs::scan(&root)?;
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&root)?;
     let signing_policy = android_cache_signing_policy(&root, release, &mut native)?;
-    let debug_custom_signing = android_debug_variant_uses_custom_signing(&root, &native)?;
     let (_, rustc_fingerprint) = rustc_identity()?;
     let (_, toolchain_disabled_reason) = bind_android_toolchain_identity(
         &mut native,
         &rustc_fingerprint,
         android_toolchain_fingerprint(),
     );
-    let signing_disabled_reason = if signing_policy.signing_identity.is_some()
-        && (!debug_custom_signing.unwrap_or(false) || release)
-    {
-        Some("Android custom/release signing cache reuse is limited to non-live builds".into())
+    let signing_disabled_reason = if release && signing_policy.signing_identity.is_some() {
+        Some("Android release signing is not a live preview cache target".into())
     } else {
         signing_policy.disabled_reason
     };
@@ -1123,6 +1129,20 @@ fn android_cache_signing_policy(
     release: bool,
     native: &mut NativeInputs,
 ) -> Result<AndroidCacheSigningPolicy> {
+    let default_debug_keystore = if release {
+        None
+    } else {
+        default_android_debug_keystore_identity()?
+    };
+    android_cache_signing_policy_with_debug_identity(root, release, native, default_debug_keystore)
+}
+
+fn android_cache_signing_policy_with_debug_identity(
+    root: &Path,
+    release: bool,
+    native: &mut NativeInputs,
+    default_debug_keystore: Option<AndroidDebugKeystoreIdentity>,
+) -> Result<AndroidCacheSigningPolicy> {
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving Android signing project root {}", root.display()))?;
     let has_custom_signing = has_custom_android_signing_config(&root, native)?;
@@ -1153,9 +1173,40 @@ fn android_cache_signing_policy(
                 ANDROID_SIGNING_EXTERNAL_HASH.into(),
                 identity.fingerprint.clone(),
             );
+
+            let (disabled_reason, debug_keystore_identity) = if release {
+                (None, None)
+            } else {
+                match android_debug_signing_mode(&root, native)? {
+                    AndroidDebugSigningMode::Custom => (None, None),
+                    AndroidDebugSigningMode::Default => match default_debug_keystore {
+                        Some(identity) => {
+                            native.external_hashes.insert(
+                                "android.default-debug-keystore".into(),
+                                identity.sha256.clone(),
+                            );
+                            (None, Some(identity))
+                        }
+                        None => (
+                            Some(
+                                "default Android debug keystore is missing or non-regular; cache reuse is disabled"
+                                    .into(),
+                            ),
+                            None,
+                        ),
+                    },
+                    AndroidDebugSigningMode::Unknown => (
+                        Some(
+                            "Android custom/release signing cache reuse is limited to statically proven build variants"
+                                .into(),
+                        ),
+                        None,
+                    ),
+                }
+            };
             return Ok(AndroidCacheSigningPolicy {
-                disabled_reason: None,
-                debug_keystore_identity: None,
+                disabled_reason,
+                debug_keystore_identity,
                 signing_identity: Some(identity),
             });
         }
@@ -1205,13 +1256,8 @@ fn android_cache_signing_policy(
         });
     }
 
-    let identity = if !release {
-        default_android_debug_keystore_identity()?
-    } else {
-        None
-    };
     let (disabled_reason, debug_keystore_identity) =
-        android_cache_hit_eligibility(native, release, false, identity);
+        android_cache_hit_eligibility(native, release, false, default_debug_keystore);
     Ok(AndroidCacheSigningPolicy {
         disabled_reason,
         debug_keystore_identity,
@@ -1350,29 +1396,37 @@ fn supported_android_signing_config(root: &Path, native: &NativeInputs) -> Resul
     Ok(true)
 }
 
-fn android_debug_variant_uses_custom_signing(
+fn android_debug_signing_mode(
     root: &Path,
     native: &NativeInputs,
-) -> Result<Option<bool>> {
+) -> Result<AndroidDebugSigningMode> {
     if !supported_android_signing_config(root, native)? {
-        return Ok(None);
+        return Ok(AndroidDebugSigningMode::Unknown);
     }
     let scripts = android_signing_marker_scripts(root, native)?;
     let [(relative, script)] = scripts.as_slice() else {
-        return Ok(None);
+        return Ok(AndroidDebugSigningMode::Unknown);
     };
     if relative.as_str() != "mobile/android/gradle/app/build.gradle"
         && relative.as_str() != "mobile/android/gradle/app/build.gradle.kts"
     {
-        return Ok(None);
+        return Ok(AndroidDebugSigningMode::Unknown);
     }
     let Some(build_types) = gradle_named_block(script, "buildTypes") else {
-        return Ok(None);
+        return Ok(AndroidDebugSigningMode::Unknown);
     };
-    let Some(debug) = gradle_named_block(build_types, "debug") else {
-        return Ok(None);
-    };
-    Ok(Some(gradle_contains_identifier(debug, "signingConfig")))
+    if let Some(debug) = gradle_named_block(build_types, "debug")
+        && gradle_contains_identifier(debug, "signingConfig")
+    {
+        return Ok(AndroidDebugSigningMode::Custom);
+    }
+    let release_is_custom = gradle_named_block(build_types, "release")
+        .is_some_and(|release| gradle_contains_identifier(release, "signingConfig"));
+    if release_is_custom {
+        Ok(AndroidDebugSigningMode::Default)
+    } else {
+        Ok(AndroidDebugSigningMode::Unknown)
+    }
 }
 
 fn gradle_named_block<'a>(source: &'a str, wanted: &str) -> Option<&'a str> {
@@ -2356,8 +2410,8 @@ mod tests {
         .unwrap();
         let native = NativeInputs::scan(root.path()).unwrap();
         assert_eq!(
-            android_debug_variant_uses_custom_signing(root.path(), &native).unwrap(),
-            Some(true)
+            android_debug_signing_mode(root.path(), &native).unwrap(),
+            AndroidDebugSigningMode::Custom
         );
 
         fs::write(
@@ -2377,8 +2431,42 @@ mod tests {
         .unwrap();
         let native = NativeInputs::scan(root.path()).unwrap();
         assert_eq!(
-            android_debug_variant_uses_custom_signing(root.path(), &native).unwrap(),
-            Some(false)
+            android_debug_signing_mode(root.path(), &native).unwrap(),
+            AndroidDebugSigningMode::Default
+        );
+    }
+
+    #[test]
+    fn android_debug_signing_mode_proves_release_only_signing() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                val keystoreProperties = java.util.Properties()
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                android {
+                    signingConfigs { create("release") { storeFile = file(keystoreProperties["storeFile"]) } }
+                    buildTypes {
+                        release { signingConfig = signingConfigs.getByName("release") }
+                        debug { isDebuggable = true }
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            "storeFile=release.jks\n",
+        )
+        .unwrap();
+        fs::write(app.join("release.jks"), b"release-keystore").unwrap();
+
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert_eq!(
+            android_debug_signing_mode(root.path(), &native).unwrap(),
+            AndroidDebugSigningMode::Default
         );
     }
 
@@ -2528,13 +2616,82 @@ mod tests {
             policy
                 .disabled_reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains("limited to non-live"))
+                .is_some_and(|reason| reason.contains("statically proven"))
         );
         assert_eq!(
             policy.android_signing_fingerprint,
             android_custom_signing_fingerprint(root.path()).unwrap()
         );
         assert!(policy.debug_keystore_hash.is_none());
+    }
+
+    #[test]
+    fn release_only_signing_binds_the_effective_debug_keystore() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            r#"
+                val keystoreProperties = java.util.Properties()
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                android {
+                    signingConfigs { create("release") { storeFile = file(keystoreProperties["storeFile"]) } }
+                    buildTypes {
+                        release { signingConfig = signingConfigs.getByName("release") }
+                        debug { isDebuggable = true }
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(ANDROID_KEYSTORE_PROPERTIES_RELATIVE),
+            "storeFile=release.jks\nstorePassword=secret-value\n",
+        )
+        .unwrap();
+        fs::write(app.join("release.jks"), b"private-release-keystore").unwrap();
+        let default_debug = AndroidDebugKeystoreIdentity {
+            path: root.path().join(".android/debug.keystore"),
+            sha256: "d".repeat(64),
+        };
+
+        let mut native = NativeInputs::scan(root.path()).unwrap();
+        let policy = android_cache_signing_policy_with_debug_identity(
+            root.path(),
+            false,
+            &mut native,
+            Some(default_debug.clone()),
+        )
+        .unwrap();
+
+        assert!(policy.disabled_reason.is_none());
+        assert_eq!(policy.debug_keystore_identity, Some(default_debug.clone()));
+        let signing = policy.signing_identity.unwrap();
+        assert_eq!(
+            native.external_hashes.get(ANDROID_SIGNING_EXTERNAL_HASH),
+            Some(&signing.fingerprint)
+        );
+        assert_eq!(
+            native.external_hashes.get("android.default-debug-keystore"),
+            Some(&default_debug.sha256)
+        );
+
+        let mut without_debug = NativeInputs::scan(root.path()).unwrap();
+        let policy = android_cache_signing_policy_with_debug_identity(
+            root.path(),
+            false,
+            &mut without_debug,
+            None,
+        )
+        .unwrap();
+        assert!(
+            policy
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("debug keystore"))
+        );
+        assert!(policy.debug_keystore_identity.is_none());
     }
 
     #[test]
