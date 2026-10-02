@@ -877,6 +877,8 @@ pub fn android_preview_cache_policy(
     let mut native = NativeInputs::scan(&root)?;
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&root)?;
     let wrapper_disabled_reason = android_gradle_wrapper_cache_disabled_reason(&root, &native)?;
+    let dynamic_dependency_disabled_reason =
+        android_dynamic_dependency_cache_disabled_reason(&root, &native)?;
     let signing_policy = android_cache_signing_policy(&root, release, &mut native)?;
     let (_, rustc_fingerprint) = rustc_identity()?;
     let (_, toolchain_disabled_reason) = bind_android_toolchain_identity(
@@ -893,6 +895,7 @@ pub fn android_preview_cache_policy(
         disabled_reason: combine_cache_hit_disabled_reasons([
             toolchain_disabled_reason,
             wrapper_disabled_reason,
+            dynamic_dependency_disabled_reason,
             signing_disabled_reason,
             build_script_disabled_reason,
         ]),
@@ -934,6 +937,8 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&snapshot.root)?;
     let wrapper_disabled_reason =
         android_gradle_wrapper_cache_disabled_reason(&snapshot.root, &native)?;
+    let dynamic_dependency_disabled_reason =
+        android_dynamic_dependency_cache_disabled_reason(&snapshot.root, &native)?;
     native
         .excluded_sensitive_files
         .extend(snapshot.manifest.excluded_sensitive_files.iter().cloned());
@@ -951,6 +956,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
         toolchain_disabled_reason,
         wrapper_disabled_reason,
+        dynamic_dependency_disabled_reason,
         signing_policy.disabled_reason,
         build_script_disabled_reason,
     ]);
@@ -1057,6 +1063,70 @@ fn android_gradle_wrapper_cache_disabled_reason(
             "Android Gradle wrapper distribution checksum is missing or invalid; cache reuse is disabled"
                 .into()
         }))
+}
+
+fn android_dynamic_dependency_cache_disabled_reason(
+    root: &Path,
+    native: &NativeInputs,
+) -> Result<Option<String>> {
+    for relative in native.files.keys().filter(|path| {
+        path.starts_with("mobile/android/gradle/")
+            && matches!(
+                Path::new(path.as_str()).extension().and_then(OsStr::to_str),
+                Some("gradle" | "kts" | "toml" | "kt" | "groovy" | "java")
+            )
+    }) {
+        let source = fs::read_to_string(root.join(relative))
+            .with_context(|| format!("reading Android Gradle dependency input {relative}"))?;
+        if contains_android_dynamic_dependency(&source) {
+            return Ok(Some(format!(
+                "Android Gradle dynamic/changing dependency input '{relative}' is not cache-stable; cache reuse is disabled"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn contains_android_dynamic_dependency(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    let compact = lower
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    if lower.contains("snapshot")
+        || lower.contains("latest.release")
+        || lower.contains("latest.integration")
+        || lower.contains("cachedynamicversionsfor")
+        || lower.contains("cachechangingmodulesfor")
+        || compact.contains("changing=true")
+        || compact.contains("changing:true")
+        || compact.contains("ischanging=true")
+        || compact.contains("ischanging:true")
+        || compact.contains("setchanging(true)")
+    {
+        return true;
+    }
+
+    source.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        let dependency_declaration = [
+            "implementation",
+            "api(",
+            "runtimeonly",
+            "classpath",
+            "version",
+            "plugin",
+            "dependency",
+            "constraint",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker));
+        let version_value = line.contains('=') || dependency_declaration;
+        let dynamic_range = (line.contains('[') || line.contains('('))
+            && line.contains(',')
+            && (line.contains(']') || line.contains(')'));
+        version_value && (line.contains('+') || dynamic_range)
+    })
 }
 
 fn android_toolchain_fingerprint() -> Option<String> {
@@ -2392,6 +2462,115 @@ mod tests {
         let second = android_build_key(root.path(), false, &["arm64-v8a".into()]).unwrap();
 
         assert_ne!(first.key_hash(), second.key_hash());
+    }
+
+    #[test]
+    fn android_dynamic_dependency_inputs_disable_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        let script = app.join("build.gradle.kts");
+        fs::write(
+            &script,
+            "dependencies { implementation(\"com.example:fixed:1.2.3\") }\n",
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_dynamic_dependency_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
+
+        fs::write(
+            &script,
+            "dependencies { implementation(\"com.example:dynamic:1.+\") }\n",
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        let reason = android_dynamic_dependency_cache_disabled_reason(root.path(), &native)
+            .unwrap()
+            .unwrap();
+        assert!(reason.contains("mobile/android/gradle/app/build.gradle.kts"));
+
+        fs::write(
+            &script,
+            "configurations.all { resolutionStrategy.cacheChangingModulesFor(0, \"seconds\") }\n",
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_dynamic_dependency_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some()
+        );
+
+        for changing_rule in [
+            "metadataRule { details.changing=true }",
+            "metadataRule { details.isChanging : true }",
+            "metadataRule { details.setChanging(true) }",
+        ] {
+            fs::write(&script, changing_rule).unwrap();
+            let native = NativeInputs::scan(root.path()).unwrap();
+            assert!(
+                android_dynamic_dependency_cache_disabled_reason(root.path(), &native)
+                    .unwrap()
+                    .is_some(),
+                "changing module rule was missed: {changing_rule}"
+            );
+        }
+
+        fs::write(
+            &script,
+            "dependencies { implementation(\"com.example:range:[1.0,2.0)\") }\n",
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_dynamic_dependency_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some()
+        );
+
+        fs::write(&script, "plugins {}\n").unwrap();
+        let catalog = root
+            .path()
+            .join("mobile/android/gradle/gradle/libs.versions.toml");
+        fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        fs::write(&catalog, "[versions]\nagp = \"9.1.+\"\n").unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_dynamic_dependency_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some()
+        );
+        fs::remove_file(&catalog).unwrap();
+
+        let plugin_sources = [
+            (
+                "mobile/android/gradle/buildSrc/src/main/kotlin/DynamicDepsPlugin.kt",
+                "dependencies.add(\"implementation\", \"com.example:dynamic:1.+\")\n",
+            ),
+            (
+                "mobile/android/gradle/build-logic/src/main/groovy/DynamicDepsPlugin.groovy",
+                "dependencies { implementation 'com.example:dynamic:1.+' }\n",
+            ),
+            (
+                "mobile/android/gradle/buildSrc/src/main/java/DynamicDepsPlugin.java",
+                "getProject().getDependencies().add(\"implementation\", \"com.example:dynamic:1.+\");\n",
+            ),
+        ];
+        for (relative, source) in plugin_sources {
+            let plugin_source = root.path().join(relative);
+            fs::create_dir_all(plugin_source.parent().unwrap()).unwrap();
+            fs::write(&plugin_source, source).unwrap();
+            let native = NativeInputs::scan(root.path()).unwrap();
+            let reason = android_dynamic_dependency_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .unwrap_or_else(|| panic!("dynamic plugin dependency was missed in {relative}"));
+            assert!(reason.contains(relative));
+            fs::remove_file(plugin_source).unwrap();
+        }
     }
 
     #[test]
