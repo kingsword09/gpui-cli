@@ -1,7 +1,8 @@
 # T06：Android local custom/release signing BuildKey（2026-09-30）
 
 状态：PR #205 已 squash 合并为 `142f58b`，PR #207 已 squash 合并为 `d90f66b`，PR #209 已 squash
-合并为 `a8a484f`。显式 debug custom-signing 的 live preview manifest/coordinator 接线已完成。
+合并为 `a8a484f`，PR #249 已 squash 合并为 `90585ef`。受控 release-only signing 配置现在可用于
+debug live preview 的签名感知缓存；Android release APK 和复杂/远端 signing 仍不复用 preview cache。
 本切片为 Android `build`/`run` 和 matrix/live frozen build 补齐一段可证明的本地 custom/release
 signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive 输出标为可复用。
 
@@ -25,8 +26,12 @@ signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive �
 - matrix frozen Android preview 会把同一组批准的 properties/keystore 以 `0600` 副本注入 snapshot，
   并把 fingerprint 传入 preview 子进程；cargo-ndk/Gradle 前后复核该 fingerprint。显式
   `buildTypes.debug.signingConfig` 的 custom-debug preview 会把该 fingerprint 纳入 preview BuildKey，
-  通过 verified JNI/APK manifest 发布与消费，并进入 preview coordinator；release-only signing、复杂
-  DSL、插件/远端 signing 仍保持 cache bypass。
+  通过 verified JNI/APK manifest 发布与消费，并进入 preview coordinator。PR #249 扩展了 debug 变体
+  的受控情况：若静态确认 custom `signingConfig` 只绑定 release build type，debug preview 继续采用
+  默认 debug keystore；preview BuildKey 同时纳入 release properties/keystore fingerprint 与默认
+  debug keystore hash，且重验两组输入。此复用只适用于 debug preview，不表示 release APK 可缓存；
+  缺失默认 debug keystore、debug signing 状态无法静态判定、复杂 DSL、多脚本/插件或远端 signing
+  仍保持 cache bypass。
 
 ## 验证
 
@@ -38,14 +43,20 @@ signing 输入边界；不把复杂 Gradle、远端插件或 signing-sensitive �
   `cargo x check-design-docs` 和 `git diff --check`。
 - PR #209 的两套 required CI 中 Linux/macOS/Windows check、desktop-template、android-template、
   baseline-driver 全部通过。没有发布版本或创建 tag。
+- PR #249 新增三态 debug signing 判定与 release-only 双签名输入绑定回归测试；本地通过
+  `cargo test --workspace --locked`（393 个单元测试及全部集成/协议测试）、
+  `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo check --workspace --locked`、
+  workspace fmt、`cargo x check-design-docs` 和 `git diff --check`。PR 与 push 两套 CI 的
+  Linux/macOS/Windows check、desktop-template、android-template、baseline-driver 全部通过。
+  PR #249 squash 为 `90585ef`；没有发布版本或创建 tag。
 
 ## 未覆盖
 
 - Gradle wrapper distribution、AGP/plugin 隐藏读取、NDK/build-script I/O、远端 signing 服务、私钥
   可用性和同 revision 工具包内容变化仍未形成完整输入闭包。
-- Android live preview 的 default-debug signing 与显式 debug custom signing 已进入 verified
-  manifest/coordinator；release-only、复杂/远端 signing 仍只允许受控 frozen snapshot 构建，不发布
-  可复用 manifest，也不进入 preview coordinator。
+- Android live preview 的 default-debug signing、显式 debug custom signing 与受控 release-only
+  signing 配置下的 debug variant 已进入 verified manifest/coordinator；release APK、复杂/远端 signing
+  仍不发布可复用 preview manifest，也不进入 preview coordinator。
 - 本切片没有新增 emulator/device 安装、启动、capture 或完整 scenario 连续验收证据。
 
 ## 关联的移动 scenario evidence
@@ -54,4 +65,5 @@ PR #211（squash `058d2c6`）修正了 Android preview 被 `gpui check --matrix`
 归属：matrix supervisor 持有唯一设备 OS lease，preview 子进程只接收 owner path、session 和
 fencing token 摘要的 delegated view；capture、native logs、stop evidence 绑定 preview 实际 run，
 并进入 `CheckContext.mobile_evidence`。这使显式 debug custom-signing preview 的产物消费与设备证据
-可以分开审计，但不增加 release-only/复杂 signing 支持，也不构成真实设备矩阵或完整语义/输入验收。
+可以分开审计；PR #249 另外允许受控 release-only keystore 配置下复用 debug preview 产物，但不增加
+release APK/复杂或远端 signing cache，也不构成真实设备矩阵或完整语义/输入验收。
