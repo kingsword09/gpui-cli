@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-03，主分支 `35b0afc`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-03，主分支 `51552aa`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -439,6 +439,11 @@ SNAPSHOT、latest 与 changing-module 配置触发 Android artifact cache bypass
 源码以避免把 `abiFilters += ...` 或 `API 23+` 等非依赖表达误判为动态版本。固定版本仍可复用；
 该检查只是不稳定输入下的保守 cache miss，不阻止正常构建。记录见
 [M04 Android toolchain fingerprint](../experiments/M04-android-toolchain-fingerprint-2026-09-28.md)。
+PR #261 又将当前 host NDK 中 clang/clang++、lld、LLVM archive/inspection tools 和 ABI clang launcher
+的符号链接目标及文件内容 hash 纳入 Android toolchain fingerprint；按 canonical binary 去重，并在
+非 Windows 平台使用 SHA-256 汇编加速，Windows MSVC 使用纯 Rust fallback。它覆盖实际 host 编译器/
+链接器工具，不哈希完整 NDK/sysroot、AGP/plugin 制品或 build-script 任意 I/O；记录见
+[T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
 iOS key 另纳入当前 Xcode build 与目标 SDK version/build 指纹；身份不可读时关闭 simulator
 cache hit，记录见
 [M04 iOS Xcode/SDK fingerprint](../experiments/M04-ios-xcode-sdk-fingerprint-2026-09-28.md)。
