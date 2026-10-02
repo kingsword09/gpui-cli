@@ -5,7 +5,7 @@ required/optional 汇总和 artifact 保留接口；当前已加入配置展开�
 并行 executor、mobile lifecycle adapter、matrix CLI 和移动 scenario driver 的 control/native
 capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 
-本轮核查主分支：`b781339`（PR #243 squash merge，2026-10-02）。
+本轮核查主分支：`47e32ba`（PR #245 squash merge，2026-10-02）。
 
 ## 已交付
 
@@ -86,9 +86,13 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 - 每张移动截图会在同目录原子发布 schema 1 的 `<capture>.manifest.json`，记录
   artifact/hash/bytes/PNG 尺寸、逻辑 viewport/scale/方向、系统 UI、前台 marker 以及
   run/project/device/lease/fencing digest；Android display metadata 补齐后重新发布 manifest。
-  check 与 matrix 发布前会核对 manifest 与当前 `RunIdentity`，报告只输出相对 `manifest_path`；
+  check 与 matrix 发布前会核对 manifest 与当前 `RunIdentity`；
   原始 fencing token 和绝对宿主路径不进入 manifest/report。该 sidecar 归属边界仍不等于真实设备
   fault matrix、重连或连续验收。
+- `ScreenshotEvidence` 现在暴露相对于 owning artifact root 的可选 `manifest_path`，screenshot
+  assertion evidence 同步携带该字段；移动 check 将路径分隔符规范化为 `/`，绝对路径和 artifact
+  root 外路径直接拒绝，避免把宿主绝对路径泄露到报告。该切片只增强已验证 sidecar 的可见性，
+  不提供远程 artifact store 或真实设备运行证明。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作

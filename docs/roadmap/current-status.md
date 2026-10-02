@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-02（Asia/Shanghai）。核查代码：`b781339`（PR #243 squash merge）。
+更新日期：2026-10-02（Asia/Shanghai）。核查代码：`47e32ba`（PR #245 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -53,7 +53,8 @@ SHA-256、PNG 尺寸和 `png-<sha256>` artifact ID；输出被替换或损坏时
 前台 marker 及 run/project/device/lease/fencing digest；Android display metadata 补齐后会重新发布
 manifest。check 与 matrix 发布前会同时核对 manifest 和当前 `RunIdentity`，报告只输出相对
 `manifest_path`；原始 fencing token 和绝对宿主路径不进入 manifest/report。该切片仍不等于真实设备
-fault matrix、重连或连续验收。
+fault matrix、重连或连续验收。PR #245 又将该相对路径暴露到 `ScreenshotEvidence` 及 screenshot
+assertion evidence，并拒绝 artifact root 外的绝对路径或越界路径。
 现阶段仍未完成
 preview/移动 capture-only 路径的完整 scenario 语义/输入验收、MCP、
 复现包或性能验证闭环。
@@ -124,7 +125,8 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `119f6ec`（#237） | iOS/Android capture event detail 记录已取得的 artifact/hash、像素/逻辑尺寸、scale、方向、系统 UI、前台 marker 和 run id；不记录 host path 或 lease secret | 只增强有界事件序列的诊断可见性，不增加缺失的设备探针、真实前台切换或连续设备验收 |
 | `6bd62f0`（#239） | 每条 `EvidenceEvent` 记录 `project_id`、`lease_session_id` 和 `fencing_token_sha256`，从同一 `RunIdentity` 写入事件级 run/project/device/lease/fencing 摘要；原始 fencing token 不进入 JSON，并补充反序列化与敏感信息回归测试 | 只让单条事件自带可核对的身份摘要，不增加真实 lease 竞争、重连、token 轮换或设备矩阵验收 |
 | `67d1160`（#241） | 移动 capture-only matrix 与 control-driven check 在发布证据前重新验证 PNG 文件类型、大小、字节数、SHA-256、尺寸和 artifact ID；被替换/损坏的输出不会进入截图证据 | 当时只完成发布前完整性核验；完整截图 manifest、真实设备 fault matrix、重连或连续验收由后续切片推进 |
-| `b781339`（#243） | 每张移动截图原子发布 schema 1 sidecar manifest，绑定 artifact/hash/bytes/PNG 尺寸、逻辑 viewport/scale/方向、系统 UI、前台 marker 与 run/project/device/lease/fencing digest；check/matrix 发布前复核 manifest 与当前 `RunIdentity`，报告只写相对 `manifest_path` | 完成截图 manifest 与同一 run identity 的结构化归属；原始 fencing token/绝对宿主路径不进入 manifest/report，但真实设备 fault matrix、重连和连续验收仍未完成 |
+| `b781339`（#243） | 每张移动截图原子发布 schema 1 sidecar manifest，绑定 artifact/hash/bytes/PNG 尺寸、逻辑 viewport/scale/方向、系统 UI、前台 marker 与 run/project/device/lease/fencing digest；check/matrix 发布前复核 manifest 与当前 `RunIdentity` | 完成截图 manifest 与同一 run identity 的结构化归属；原始 fencing token/绝对宿主路径不进入 manifest/report，但截图 evidence 的 manifest 路径暴露由后续切片补齐，真实设备 fault matrix、重连和连续验收仍未完成 |
+| `47e32ba`（#245） | `ScreenshotEvidence` 暴露相对于 artifact root 的可选 `manifest_path`，screenshot assertion evidence 同步携带该字段；移动 check 规范化分隔符并拒绝绝对路径、artifact root 外路径，补充路径泄漏边界测试 | 只增强已验证 sidecar 的报告可见性和路径安全边界；不提供远程 artifact store、绝对宿主路径或真实设备 fault matrix/重连/连续验收 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -308,6 +310,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | 本地运行时验证（PR #243） | 390 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check、package list 均通过 |
 | PR #243 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
 | PR #243 合并 | squash merge `b781339`；无发布/tag |
+| 本地运行时验证（PR #245） | 391 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check、package list 均通过 |
+| PR #245 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
+| PR #245 合并 | squash merge `47e32ba`；无发布/tag |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
