@@ -422,10 +422,38 @@ fn print_matrix_report(report: &MatrixReport, json_output: bool) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+struct MobileScenarioEvidence {
+    cell_id: String,
+    target_id: String,
+    scenario_id: String,
+    requirements: Vec<String>,
+    fixture_hash: Option<String>,
+}
+
+impl MobileScenarioEvidence {
+    fn new(
+        cell_id: &str,
+        target_id: &str,
+        scenario_id: &str,
+        requirements: &[String],
+        fixture_hash: Option<&str>,
+    ) -> Self {
+        Self {
+            cell_id: cell_id.to_owned(),
+            target_id: target_id.to_owned(),
+            scenario_id: scenario_id.to_owned(),
+            requirements: requirements.to_vec(),
+            fixture_hash: fixture_hash.map(str::to_owned),
+        }
+    }
+}
+
 struct MobileCapture {
     runner: Box<dyn MobileRunner + Send>,
     lease: Option<DeviceLeaseSession>,
     identity: RunIdentity,
+    scenario: MobileScenarioEvidence,
     run_id_bound: bool,
     artifact_root: PathBuf,
     captures: Vec<CaptureArtifact>,
@@ -440,7 +468,7 @@ impl MobileCapture {
         device_id: &str,
         abi: Option<&str>,
         project_root: &Path,
-        cell_id: &str,
+        scenario: MobileScenarioEvidence,
     ) -> Result<Self> {
         let lease = DeviceLeaseSession::acquire(project_root, device_id)
             .context("acquiring mobile matrix scenario lease")?;
@@ -454,8 +482,12 @@ impl MobileCapture {
         let artifact_root = project_root
             .join(".gpui")
             .join("matrix-runs")
-            .join(safe_matrix_component(cell_id));
-        let run_id = format!("matrix-{}-{}", safe_matrix_component(cell_id), epoch_ms());
+            .join(safe_matrix_component(&scenario.cell_id));
+        let run_id = format!(
+            "matrix-{}-{}",
+            safe_matrix_component(&scenario.cell_id),
+            epoch_ms()
+        );
         let request = RunRequest {
             run_id,
             project_id: project_root.to_string_lossy().into_owned(),
@@ -484,6 +516,7 @@ impl MobileCapture {
             runner,
             lease: Some(lease),
             identity,
+            scenario,
             run_id_bound: false,
             artifact_root,
             captures: Vec::new(),
@@ -604,6 +637,13 @@ impl MobileCapture {
                 "lease_session_id": self.identity.lease_session_id,
                 "fencing_token_sha256": self.identity.fencing_token_sha256,
             })),
+            "scenario": {
+                "cell_id": self.scenario.cell_id,
+                "target_id": self.scenario.target_id,
+                "scenario_id": self.scenario.scenario_id,
+                "requirements": self.scenario.requirements,
+                "fixture_hash": self.scenario.fixture_hash,
+            },
             "runner": self.runner.describe(),
             "capabilities": self.runner.capabilities(),
             "event_log": self.runner.evidence_log(),
@@ -798,7 +838,13 @@ impl MatrixCellRunner for MatrixCheckRunner {
                             })?,
                             abi.as_deref(),
                             project_root,
-                            &cell.cell_id,
+                            MobileScenarioEvidence::new(
+                                &cell.cell_id,
+                                target,
+                                &scenario.id,
+                                &scenario.requires,
+                                fixture_hash.as_deref(),
+                            ),
                         )?)
                     } else {
                         None
@@ -2492,6 +2538,13 @@ mod tests {
             runner: Box::new(EvidenceMobileRunner { fail_stop: false }),
             lease: Some(lease),
             identity,
+            scenario: MobileScenarioEvidence::new(
+                "cell-1",
+                "android",
+                "counter",
+                &["capture.device".into(), "input.keyboard".into()],
+                Some("fixture-hash"),
+            ),
             run_id_bound: false,
             artifact_root: root.path().join("artifacts"),
             captures: Vec::new(),
@@ -2506,6 +2559,11 @@ mod tests {
         let evidence = capture.evidence();
         assert_eq!(evidence["run_id_bound"], false);
         assert_eq!(evidence["project_id"], "project");
+        assert_eq!(evidence["scenario"]["cell_id"], "cell-1");
+        assert_eq!(evidence["scenario"]["target_id"], "android");
+        assert_eq!(evidence["scenario"]["scenario_id"], "counter");
+        assert_eq!(evidence["scenario"]["fixture_hash"], "fixture-hash");
+        assert_eq!(evidence["scenario"]["requirements"][0], "capture.device");
         assert_eq!(evidence["run_identity"], Value::Null);
         assert!(evidence.get("fencing_token").is_none());
         assert_eq!(evidence["runner"]["runner_id"], "evidence-test");
@@ -2537,6 +2595,13 @@ mod tests {
             runner: Box::new(EvidenceMobileRunner { fail_stop: true }),
             lease: Some(lease),
             identity,
+            scenario: MobileScenarioEvidence::new(
+                "cell-2",
+                "android",
+                "counter",
+                &["capture.device".into()],
+                None,
+            ),
             run_id_bound: true,
             artifact_root: root.path().join("artifacts"),
             captures: Vec::new(),
