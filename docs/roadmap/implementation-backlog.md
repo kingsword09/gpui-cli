@@ -495,7 +495,9 @@ custom/release signing 纳入 properties/keystore 摘要并接入非 live build/
 `buildTypes.debug.signingConfig` 的 custom-debug live preview 复用 signing fingerprint、verified
 manifest 和 preview coordinator；#249 又让受控 release-only signing 配置的 debug preview 同时绑定
 release signing fingerprint 和默认 debug keystore hash。Android release APK、复杂/远端 signing 与
-Gradle/AGP/NDK 隐藏输入仍未建模。
+Gradle/AGP/NDK 隐藏输入仍未建模。#251 修复一项 Windows coordinator 状态文件发布的瞬态竞态：
+原子替换遇到 `PermissionDenied`/`Access is denied` 时，最多做 5 次短指数退避重试，保留原子写入、
+state lock 和 owner fencing；重试耗尽或其他错误仍显式失败。
 M04 仍未完成：preview/check orchestration 的其余部分，以及
 `build.rs`/Gradle/NDK/Xcode 隐藏输入尚未接入。#155 已让单场景 desktop `check` 调用
 `desktop_build_plan`，#157 又让 matrix 在 admission 前创建一个共享 workspace snapshot，
