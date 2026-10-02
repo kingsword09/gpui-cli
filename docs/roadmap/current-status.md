@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-02（Asia/Shanghai）。核查代码：`47e32ba`（PR #245 squash merge）。
+更新日期：2026-10-02（Asia/Shanghai）。核查代码：`68ea03b`（PR #247 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -55,6 +55,9 @@ manifest。check 与 matrix 发布前会同时核对 manifest 和当前 `RunIden
 `manifest_path`；原始 fencing token 和绝对宿主路径不进入 manifest/report。该切片仍不等于真实设备
 fault matrix、重连或连续验收。PR #245 又将该相对路径暴露到 `ScreenshotEvidence` 及 screenshot
 assertion evidence，并拒绝 artifact root 外的绝对路径或越界路径。
+PR #247 又将 cell/target/scenario、requirements 和 frozen fixture hash 绑定到 mobile lifecycle
+evidence，使 pre-ready、cleanup failure 和 capture-only 路径即使没有完整 `CheckReport` 也能追溯
+到具体 scenario；这仍不宣称移动语义/输入或真实设备矩阵已通过。
 现阶段仍未完成
 preview/移动 capture-only 路径的完整 scenario 语义/输入验收、MCP、
 复现包或性能验证闭环。
@@ -127,6 +130,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `67d1160`（#241） | 移动 capture-only matrix 与 control-driven check 在发布证据前重新验证 PNG 文件类型、大小、字节数、SHA-256、尺寸和 artifact ID；被替换/损坏的输出不会进入截图证据 | 当时只完成发布前完整性核验；完整截图 manifest、真实设备 fault matrix、重连或连续验收由后续切片推进 |
 | `b781339`（#243） | 每张移动截图原子发布 schema 1 sidecar manifest，绑定 artifact/hash/bytes/PNG 尺寸、逻辑 viewport/scale/方向、系统 UI、前台 marker 与 run/project/device/lease/fencing digest；check/matrix 发布前复核 manifest 与当前 `RunIdentity` | 完成截图 manifest 与同一 run identity 的结构化归属；原始 fencing token/绝对宿主路径不进入 manifest/report，但截图 evidence 的 manifest 路径暴露由后续切片补齐，真实设备 fault matrix、重连和连续验收仍未完成 |
 | `47e32ba`（#245） | `ScreenshotEvidence` 暴露相对于 artifact root 的可选 `manifest_path`，screenshot assertion evidence 同步携带该字段；移动 check 规范化分隔符并拒绝绝对路径、artifact root 外路径，补充路径泄漏边界测试 | 只增强已验证 sidecar 的报告可见性和路径安全边界；不提供远程 artifact store、绝对宿主路径或真实设备 fault matrix/重连/连续验收 |
+| `68ea03b`（#247） | mobile lifecycle evidence 绑定 cell/target/scenario、requirements 和 frozen fixture hash；pre-ready、cleanup failure、capture-only evidence 在无完整 `CheckReport` 时仍保留 scenario contract | 只补 scenario 归属证据，不增加移动语义/输入能力、真实设备状态或连续矩阵验收 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -313,6 +317,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | 本地运行时验证（PR #245） | 391 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check、package list 均通过 |
 | PR #245 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
 | PR #245 合并 | squash merge `47e32ba`；无发布/tag |
+| 本地运行时验证（PR #247） | 391 个单元测试及全部集成/协议测试、workspace clippy、fmt、design docs、diff check、package list 均通过 |
+| PR #247 CI | PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
+| PR #247 合并 | squash merge `68ea03b`；无发布/tag |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 

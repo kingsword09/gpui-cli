@@ -5,7 +5,7 @@ required/optional 汇总和 artifact 保留接口；当前已加入配置展开�
 并行 executor、mobile lifecycle adapter、matrix CLI 和移动 scenario driver 的 control/native
 capture 接入。完整 simulator/emulator 运行证据仍未宣称。
 
-本轮核查主分支：`47e32ba`（PR #245 squash merge，2026-10-02）。
+本轮核查主分支：`68ea03b`（PR #247 squash merge，2026-10-02）。
 
 ## 已交付
 
@@ -93,6 +93,10 @@ capture 接入。完整 simulator/emulator 运行证据仍未宣称。
   assertion evidence 同步携带该字段；移动 check 将路径分隔符规范化为 `/`，绝对路径和 artifact
   root 外路径直接拒绝，避免把宿主绝对路径泄露到报告。该切片只增强已验证 sidecar 的可见性，
   不提供远程 artifact store 或真实设备运行证明。
+- mobile lifecycle evidence 现在同时保留 cell/target/scenario、requirements 和 frozen fixture
+  hash；因此 pre-ready launch failure、cleanup failure 和 capture-only 路径在没有完整
+  `CheckReport` 时仍能追溯到具体 scenario contract。该字段传播不增加移动语义/输入能力，
+  也不把设备截图或静态 fixture hash 升级为真实设备连续验收。
 - action operation 返回 failed、unknown、cancelled、unavailable 或 timeout，且错误详情带有
   `operation.operation_id` 时，scenario step 会保留对应 action status 和 operation ID；这只是
   失败/不确定结果的归属证据，不改变 step/check 结果。unknown 仍为 inconclusive，不得重放动作
