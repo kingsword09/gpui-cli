@@ -131,6 +131,9 @@ pub struct SemanticNode {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ScreenshotEvidence {
     pub artifact_id: Option<String>,
+    /// Relative to the owning artifact root; never a host absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
     pub baseline_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_key: Option<BaselineKey>,
@@ -965,6 +968,7 @@ fn compare_bool(assertion: &str, actual: Option<bool>) -> AssertionEvaluation {
 fn screenshot_actual(evidence: &ScreenshotEvidence) -> Value {
     json!({
         "artifact_id": evidence.artifact_id,
+        "manifest_path": evidence.manifest_path,
         "baseline_id": evidence.baseline_id,
         "baseline_key": evidence.baseline_key,
         "diff": evidence.diff,
@@ -1134,6 +1138,7 @@ mod tests {
             let mut resolved = observation.clone();
             resolved.screenshot = Some(ScreenshotEvidence {
                 artifact_id: Some("artifact-1".into()),
+                manifest_path: None,
                 baseline_id: Some("counter".into()),
                 baseline_key: None,
                 diff: None,
@@ -1522,6 +1527,7 @@ mod tests {
         let mut current = observation("o-1", Vec::new());
         current.screenshot = Some(ScreenshotEvidence {
             artifact_id: None,
+            manifest_path: None,
             baseline_id: Some("missing".into()),
             baseline_key: None,
             diff: None,
