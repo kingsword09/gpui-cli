@@ -532,7 +532,7 @@ impl MobileCapture {
             .verify_for_identity(&self.identity)
             .context("verifying mobile screenshot artifact")?;
         self.captures.push(artifact.clone());
-        Ok(screenshot_from_mobile_artifact(&artifact))
+        screenshot_from_mobile_artifact(&artifact, &self.artifact_root)
     }
 
     fn finalize(&mut self) -> Result<()> {
@@ -673,9 +673,24 @@ impl Drop for MobileCapture {
     }
 }
 
-fn screenshot_from_mobile_artifact(artifact: &CaptureArtifact) -> ScreenshotEvidence {
-    ScreenshotEvidence {
+fn screenshot_from_mobile_artifact(
+    artifact: &CaptureArtifact,
+    artifact_root: &Path,
+) -> Result<ScreenshotEvidence> {
+    let manifest_path = artifact
+        .manifest_path
+        .strip_prefix(artifact_root)
+        .with_context(|| {
+            format!(
+                "mobile screenshot manifest escaped artifact root: {}",
+                artifact.manifest_path.display()
+            )
+        })?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(ScreenshotEvidence {
         artifact_id: Some(artifact.artifact_id.clone()),
+        manifest_path: Some(manifest_path),
         baseline_id: None,
         baseline_key: None,
         diff: None,
@@ -692,7 +707,7 @@ fn screenshot_from_mobile_artifact(artifact: &CaptureArtifact) -> ScreenshotEvid
             || artifact.logical_height.is_none()
             || artifact.scale_milli.is_none())
         .then_some("mobile_environment_metadata_unavailable".into()),
-    }
+    })
 }
 
 fn safe_matrix_component(value: &str) -> String {
@@ -2226,6 +2241,7 @@ fn screenshot_evidence(result: &Value) -> Option<ScreenshotEvidence> {
         .find(|artifact| artifact["kind"] == "png")?;
     Some(ScreenshotEvidence {
         artifact_id: artifact["artifact_id"].as_str().map(str::to_owned),
+        manifest_path: artifact["manifest_path"].as_str().map(str::to_owned),
         baseline_id: None,
         baseline_key: None,
         diff: None,
@@ -2593,6 +2609,42 @@ mod tests {
                 "artifacts": [{"kind": "tree", "artifact_id": "tree-1"}]
             }))
             .is_none()
+        );
+    }
+
+    #[test]
+    fn mobile_screenshot_evidence_exposes_only_relative_manifest_path() {
+        let root = tempfile::tempdir().unwrap();
+        let artifact = CaptureArtifact {
+            artifact_id: "png-test".into(),
+            path: root.path().join("captures/observation.png"),
+            manifest_path: root.path().join("captures/observation.png.manifest.json"),
+            provider: "simctl".into(),
+            bytes: 42,
+            sha256: "a".repeat(64),
+            width: 2,
+            height: 3,
+            logical_width: Some(1),
+            logical_height: Some(2),
+            scale_milli: Some(2000),
+            orientation: Some("portrait".into()),
+            system_ui: true,
+            foreground_app: Some("com.example.app".into()),
+            run_id: "run-1".into(),
+        };
+
+        let evidence = screenshot_from_mobile_artifact(&artifact, root.path()).unwrap();
+        assert_eq!(
+            evidence.manifest_path.as_deref(),
+            Some("captures/observation.png.manifest.json")
+        );
+        assert!(!evidence.manifest_path.as_deref().unwrap().starts_with('/'));
+        assert!(
+            !evidence
+                .manifest_path
+                .as_deref()
+                .unwrap()
+                .contains(root.path().to_string_lossy().as_ref())
         );
     }
 
