@@ -767,7 +767,11 @@ report 前核对 manifest 与当前 `RunIdentity`；#245 又将相对于 artifac
 cell/target/scenario、requirements 和 frozen fixture hash 传播到 mobile lifecycle evidence，使
 pre-ready、cleanup failure 和 capture-only 路径在无完整 `CheckReport` 时仍可追溯；跨命令共享
 构建所有权、移动完整语义/输入 scenario 和真实矩阵仍未接入，真实 fault matrix 仍未接入；capture
-event detail 的 metadata 传播也不替代这些验收。
+event detail 的 metadata 传播也不替代这些验收。#253 又移除了本地 iOS/Android admission 中默认的
+`semantics`/`semantics.read`/`semantics.bounds` 声明；尚无显式 capability override 时，相关移动
+cell 会在派发前 unavailable。override 只是调用方声明，不由 admission 自动验证；此改动只修正
+静态声明，不实现 GPUI mobile semantics provider，也不改变移动 runtime 的 capability hello；真实
+设备可用性仍需 provider 和平台验收证据。
 
 1. 解析显式 targets/scenarios/required/timeout/max_parallel，分发前核对 host/ABI/toolchain。
 2. 同一快照构建、每目标独立 run；目标内场景串行，跨目标限并发且遵守资源锁。

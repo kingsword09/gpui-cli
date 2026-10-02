@@ -190,3 +190,21 @@ observation、action、wait、reset 和 assertion。scenario runner 仍是 contr
 DeviceLeaseSession；真实设备竞争仍必须经过 OS lease、fencing 和 runner cleanup。当前还
 没有完整 macOS+iOS simulator+Android emulator 运行证据，也没有把当前纯 Rust/无设备 CI
 结果写成移动 L2 验收。
+
+## 2026-10-02 本地移动 semantics admission 边界
+
+- PR #253（`cbd55b8`）从 `MatrixAdmissionContext::for_local` 的 iOS/Android 静态默认能力中移除
+  `semantics`、`semantics.read` 和 `semantics.bounds`。本地矩阵在没有显式 runner capability
+  override 时，会在派发前将依赖这些能力的 cell 标记为 unavailable。
+- 默认的 `screenshot`、`capture.device`、`scenario.reset`、`input.pointer` 和 `input.keyboard`
+  声明不受该切片影响；`with_scenario_capabilities` 仍可供 runner 显式配置能力。该 override 是
+  调用方声明，代码不自动核验其设备证据；真实 evidence-backed 配置仍是 runner 的责任。回归测试
+  覆盖默认拒绝和显式 override 后 admission ready 两条路径。
+- 这不是 semantics provider 实现：模板 app-channel 仍只声明 `semantics.read` hook，GPUI 查询
+  仍要求 accessibility active 且存在最近帧的 debug tree；本次没有重跑 GUI 或移动设备，也未
+  验证 iOS/Android accessibility tree。此前 Android emulator 返回 unavailable 的真实探针仍是
+  唯一记录的移动 semantics 设备证据，不能由本地单测或 CI 替代。
+- 验证：定向 admission 测试通过；`cargo fmt --check`、`cargo clippy --workspace --all-targets
+  --locked -- -D warnings`、`cargo test --workspace --locked`（395 unit tests、其余集成/协议测试
+  全通过）、`cargo build --locked`、`cargo x check-design-docs`、`git diff --check` 通过；PR 与
+  push 两套 macOS/Windows/Ubuntu、Android/desktop template 和 baseline-driver CI 全绿。
