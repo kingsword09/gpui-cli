@@ -1,7 +1,8 @@
 # T06：Android CLI 构建与 cache-hit smoke（2026-09-28）
 
 状态：PR #257 将 Gradle 9.4.1 官方 distribution SHA-256 纳入生成模板，并要求有效 wrapper checksum
-才允许复用 artifact cache；PR #259 又将动态/changing Gradle dependency 作为 cache bypass 条件。
+才允许复用 artifact cache；PR #259 又将动态/changing Gradle dependency 作为 cache bypass 条件；
+PR #261 将当前 host NDK 编译器和链接器内容纳入 Android toolchain fingerprint。
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -54,3 +55,7 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   AGP/plugins、远端仓库状态、NDK/build-script I/O，也不替代完整 Android 构建输入闭包或设备验收。
 - 动态依赖扫描是保守的静态字符串检查；它能把已知不稳定声明降级为正常 cache miss，但不解析完整
   Gradle DSL，也不证明 AGP/plugin 仓库制品、远端元数据或 build-script I/O 已纳入输入闭包。
+- NDK fingerprint 现在包含当前 host prebuilt 的 clang/clang++、lld/ld.lld、LLVM archiver/inspection
+  tools 和 ABI-specific clang launcher 的 link target/content hash；sha2 汇编优化只用于非 Windows，
+  Windows MSVC 使用纯 Rust fallback。活跃 macOS NDK 环境测试约 5 秒，canonical target hash 去重。
+  这不包含 NDK sysroot、headers/libraries、AGP/plugin resolved artifacts 或任意 build-script I/O。
