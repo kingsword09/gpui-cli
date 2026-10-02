@@ -1,8 +1,9 @@
 # T06：Android CLI 构建与 cache-hit smoke（2026-09-28）
 
 状态：PR #257 将 Gradle 9.4.1 官方 distribution SHA-256 纳入生成模板，并要求有效 wrapper checksum
-才允许复用 artifact cache。该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次
-构建和同 BuildKey 第二次命中；Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
+才允许复用 artifact cache；PR #259 又将动态/changing Gradle dependency 作为 cache bypass 条件。
+该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
+Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
 ## 流程
 
@@ -17,6 +18,11 @@
 - 生成的 `gradle-wrapper.properties` 固定 Gradle 9.4.1 官方 checksum
   `2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb`；BuildKey 已哈希该 properties
   文件，缺少、重复或畸形 checksum 时 CLI 仍正常构建但不消费/发布可复用 artifact manifest。
+- Android cache policy 现在扫描 `mobile/android/gradle/` 下的 Gradle/Kotlin DSL 脚本和 version
+  catalog，以及 `buildSrc`/`build-logic` 中的 Kotlin/Groovy/Java Gradle plugin source；动态版本
+  (`1.+`)、版本范围、SNAPSHOT、latest 和 changing-module resolution 会输出 cache miss reason。
+  普通 app `src/main/java`/`src/main/kotlin` 源码不在该依赖规则扫描中，避免把 ABI 集合或 API 文本
+  中的 `+` 误判为动态版本。
 
 ## 证据
 
@@ -31,6 +37,11 @@
   workspace 单测及集成/协议测试、clippy、fmt、build 和设计文档检查通过。PR 与 push 两套
   macOS/Windows/Ubuntu、Android/desktop template、baseline-driver CI 全绿；#257 squash 为
   `2a5782d`，无版本发布或 tag。
+- PR #259 的 Android smoke 首轮暴露动态依赖扫描把模板 `abiFilters += gpuiAbis` 和普通 app
+  Java 中的 `API 23+` 误判为动态版本；后续修正为只扫描 Gradle DSL、version catalog 与
+  `buildSrc`/`build-logic` 插件源码，并用固定版本、动态版本、版本范围、SNAPSHOT/latest、
+  changing-module 及三种插件语言回归锁定边界。最终 PR 与 push 两套 Linux/macOS/Windows、
+  Android/desktop template、baseline-driver CI 全绿；#259 squash 为 `35b0afc`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -41,3 +52,5 @@
   清理仍未覆盖。
 - wrapper checksum 只校验 Gradle distribution ZIP；它不 fingerprint Gradle runtime 的所有解压文件、
   AGP/plugins、远端仓库状态、NDK/build-script I/O，也不替代完整 Android 构建输入闭包或设备验收。
+- 动态依赖扫描是保守的静态字符串检查；它能把已知不稳定声明降级为正常 cache miss，但不解析完整
+  Gradle DSL，也不证明 AGP/plugin 仓库制品、远端元数据或 build-script I/O 已纳入输入闭包。
