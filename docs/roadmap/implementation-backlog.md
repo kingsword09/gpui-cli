@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-02，主分支 `a5ab033`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-02，主分支 `2a5782d`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -429,7 +429,11 @@ Xcode DerivedData 放入 `.gpui/builds/ios/<key>`；见
 和 Gradle app build 放入 `.gpui/builds/android/<key>`；见
 [M04 Android BuildKey](../experiments/M04-android-build-key-2026-09-27.md)。Android key 另纳入
 SDK platforms/build-tools package revision、NDK revision、cargo-ndk 与 Java 版本摘要；身份
-不可读或 SDK/NDK 环境冲突时关闭 Android cache hit，记录见
+不可读或 SDK/NDK 环境冲突时关闭 Android cache hit；#257 又将模板的 Gradle wrapper distribution
+checksum 固定为官方 Gradle 9.4.1 SHA-256，并要求 frozen wrapper properties 中有唯一有效
+`distributionSha256Sum` 才允许 artifact cache reuse；checksum 缺失/重复/畸形时正常构建仍运行，
+只禁用 cache hit，matrix preview 也从相同 frozen snapshot 读取该策略。该保护只覆盖 wrapper
+distribution，不闭合 AGP/plugin/NDK/build-script 其他隐藏输入。记录见
 [M04 Android toolchain fingerprint](../experiments/M04-android-toolchain-fingerprint-2026-09-28.md)。
 iOS key 另纳入当前 Xcode build 与目标 SDK version/build 指纹；身份不可读时关闭 simulator
 cache hit，记录见
@@ -547,7 +551,8 @@ debug preview 同时绑定 release signing fingerprint 与默认 debug keystore 
 [T06 Android debug manifest cache hit](../experiments/T06-android-debug-cache-hit-2026-09-28.md) 和
 [T06 Android signing BuildKey](../experiments/T06-android-signing-build-key-2026-09-30.md)。
 Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次，验证 Android CLI
-第一次 miss、第二次同 key hit 和 APK ABI；它不包含完整 GPUI app 或设备运行，记录见
+第一次 miss、第二次同 key hit 和 APK ABI；#257 后真实 wrapper checksum、debug/release packaging
+和第二次 cache hit smoke 均通过；它不包含完整 GPUI app 或设备运行，记录见
 [T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。真实在途
 preview/check 任务共享仍未接入；#177 已将普通 build/run 接入共享 coordinator，但取消引用/终止、
 queued 状态和预热仍未实现；coordinator `Partial` 仅作为不可复用的诊断终态；本地 `build.rs` 项目已保守 bypass artifact cache reuse，记录见
