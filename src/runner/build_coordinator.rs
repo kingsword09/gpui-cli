@@ -40,6 +40,8 @@ const BUILD_COORDINATOR_PREVIEW_KIND: &str = "preview";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_SUSPECT_AFTER: Duration = Duration::from_secs(30);
+const COORDINATOR_PUBLISH_RETRIES: usize = 5;
+const COORDINATOR_PUBLISH_RETRY_BASE: Duration = Duration::from_millis(5);
 const LEADER_ABANDONED_ERROR: &str = "build leader exited before publishing a terminal state";
 const LEADER_HEARTBEAT_STALE_ERROR: &str = "build leader heartbeat became stale";
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -1320,14 +1322,42 @@ fn write_record_locked(layout: &BuildOutputLayout, record: &BuildCoordinatorReco
         .context("serializing BuildKey coordinator state")?;
     temporary.as_file_mut().write_all(b"\n")?;
     temporary.as_file().sync_all()?;
-    temporary.persist(&path).map_err(|error| {
-        anyhow::anyhow!(
-            "publishing BuildKey coordinator state {}: {}",
-            path.display(),
-            error.error
-        )
-    })?;
-    Ok(())
+    persist_coordinator_state(
+        temporary.into_temp_path(),
+        &path,
+        |temporary, destination| temporary.persist(destination),
+    )
+}
+
+fn persist_coordinator_state(
+    mut temporary: tempfile::TempPath,
+    destination: &Path,
+    mut persist: impl FnMut(
+        tempfile::TempPath,
+        &Path,
+    ) -> std::result::Result<(), tempfile::PathPersistError>,
+) -> Result<()> {
+    for attempt in 0..=COORDINATOR_PUBLISH_RETRIES {
+        match persist(temporary, destination) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.error.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempt < COORDINATOR_PUBLISH_RETRIES =>
+            {
+                temporary = error.path;
+                let multiplier = 1u32 << attempt;
+                thread::sleep(COORDINATOR_PUBLISH_RETRY_BASE.saturating_mul(multiplier));
+            }
+            Err(error) => {
+                bail!(
+                    "publishing BuildKey coordinator state {}: {}",
+                    destination.display(),
+                    error.error
+                );
+            }
+        }
+    }
+    unreachable!("coordinator publish retry loop always returns")
 }
 
 pub(super) fn lock_coordinator_state(root: &Path, create: bool) -> Result<Option<File>> {
@@ -1665,6 +1695,31 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn coordinator_state_publish_retries_transient_access_denied() {
+        let base = tempfile::tempdir().unwrap();
+        let state = base.path().join(".build-coordinator.json");
+        let temporary = NamedTempFile::new_in(base.path()).unwrap();
+        let temporary_path = temporary.into_temp_path();
+        let attempts = std::cell::Cell::new(0usize);
+
+        persist_coordinator_state(temporary_path, &state, |temporary, destination| {
+            let attempt = attempts.get();
+            attempts.set(attempt + 1);
+            if attempt == 0 {
+                return Err(tempfile::PathPersistError {
+                    error: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    path: temporary,
+                });
+            }
+            temporary.persist(destination)
+        })
+        .unwrap();
+
+        assert_eq!(attempts.get(), 2);
+        assert!(state.is_file());
     }
 
     #[test]
