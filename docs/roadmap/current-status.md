@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-02（Asia/Shanghai）。核查代码：`23a4f08`（PR #251 squash merge）。
+更新日期：2026-10-02（Asia/Shanghai）。核查代码：`cbd55b8`（PR #253 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -32,6 +32,12 @@ scenario `CheckReport`。
 capture-only matrix 与 control-driven scenario 两条移动路径现在也把 `RunnerInfo` 和
 `RunnerCapabilities` 写入 `mobile_evidence`，将报告绑定到选定 runner/device 的声明性环境；这
 不是实际设备探针、前台身份或完整语义/输入验收。
+PR #253 收紧本地 matrix admission：iOS/Android 的静态默认能力不再包含 `semantics`、
+`semantics.read` 或 `semantics.bounds`，因此依赖移动语义的 cell 在没有显式 runner capability
+override 时于派发前标记 unavailable；capture/reset/input 默认能力不变。override 只是调用方声明，
+不由 admission 自动验证设备证据。
+这仅修正 admission 声明，不实现移动 semantics provider，也不修改 runtime 的 hello/capability
+状态或 GPUI accessibility 激活条件；真实语义树及移动设备验收仍未完成。
 平台 adapter 维护的有界 `EvidenceLog` 现在也随两条移动路径进入 `mobile_evidence`，保留
 install/launch/capture/process/channel/native-log/stop 的事件序列；每个 run 最多保留 128 条事件，
 单条 `details` 的序列化结果最多 16 KiB，超限时保留摘要/hash，并通过 `truncated` 与
@@ -71,8 +77,8 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | --- | --- | --- |
 | G0 | headless 基线、target-aware doctor、macOS 观察 PoC | 完整平台基线、版本解析/兼容规则、PoC 未支持的能力 |
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
-| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup-finalized matrix context/capture-only lifecycle evidence、mobile runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing/Android release-only signing debug preview 的 BuildKey coordinator、Windows coordinator state publish transient permission-denied bounded retry、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、pre-ready mobile launch failure evidence、mobile cleanup error evidence、action 失败 operation ID evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening、early mobile scenario failure finalization | partial artifact 的消费/恢复契约、Android 复杂/远端 signing 输入、真实环境适配、移动 capture-only 路径的完整 scenario steps/cleanup、真实连续验收及 MCP |
-| G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture、同一 delegated lease 下的 run/capture/log/cleanup evidence、cleanup-finalized matrix evidence、capture-only cell 的非伪造报告边界、runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、pre-ready launch failure evidence、cleanup error evidence、action failure operation ID evidence、Android capture 的 best-effort viewport/scale/orientation/foreground metadata | 完整三端同快照矩阵、真实设备环境元数据与故障/重连、完整语义与输入证据、repro 和 L2/L3 CI |
+| G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup-finalized matrix context/capture-only lifecycle evidence、mobile runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、移动 semantics 默认 admission 收紧、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing/Android release-only signing debug preview 的 BuildKey coordinator、Windows coordinator state publish transient permission-denied bounded retry、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、pre-ready mobile launch failure evidence、mobile cleanup error evidence、action 失败 operation ID evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening、early mobile scenario failure finalization | partial artifact 的消费/恢复契约、Android 复杂/远端 signing 输入、真实环境适配、移动 semantics provider 与完整 scenario steps/cleanup、真实连续验收及 MCP |
+| G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture、同一 delegated lease 下的 run/capture/log/cleanup evidence、cleanup-finalized matrix evidence、capture-only cell 的非伪造报告边界、runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、pre-ready launch failure evidence、cleanup error evidence、action failure operation ID evidence、Android capture 的 best-effort viewport/scale/orientation/foreground metadata、移动 semantics 默认 admission 不再误报支持 | 完整三端同快照矩阵、真实设备环境元数据与故障/重连、移动 semantics provider/完整语义与输入证据、repro 和 L2/L3 CI |
 | G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug live preview verified cache hit 和显式清理 | 缓存输入遗漏、iOS physical live preview、Android release APK/复杂或远端 signing cache hit、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
 
 ## 2. 相对上次审计的新合并
@@ -133,6 +139,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `68ea03b`（#247） | mobile lifecycle evidence 绑定 cell/target/scenario、requirements 和 frozen fixture hash；pre-ready、cleanup failure、capture-only evidence 在无完整 `CheckReport` 时仍保留 scenario contract | 只补 scenario 归属证据，不增加移动语义/输入能力、真实设备状态或连续矩阵验收 |
 | `90585ef`（#249） | Android debug live preview 对受控本地 release-only `signingConfig` 纳入 release keystore fingerprint 和默认 debug keystore hash；verified JNI/APK manifest 与 preview coordinator 仍只缓存 debug preview | 仅在静态证明 release 变体使用受控 keystore、debug 变体未覆盖默认签名且所需 keystore 可验证时复用；release APK、缺少默认 debug keystore、复杂 DSL、插件/远端 signing 仍 bypass；不补齐 Gradle/AGP/NDK 隐藏输入或真实设备验收 |
 | `23a4f08`（#251） | BuildKey coordinator 原子写入状态文件时，Windows `PermissionDenied`/`Access is denied` 可触发最多 5 次指数退避重试（5–80ms 间隔）；保留原子替换、短状态锁和 fencing 语义 | 只缓解短暂文件访问冲突；超过有界重试或其他错误仍失败。首次 push CI 的同 key 并发用例曾复现失败，定向重跑通过；PR 与 push 两套 CI 最终全绿，不代表所有 Windows 文件系统/杀软竞争已穷尽 |
+| `cbd55b8`（#253） | 本地 matrix admission 不再为 iOS/Android 默认静态声明 `semantics`、`semantics.read`、`semantics.bounds`；无 capability override 时语义依赖 cell 在派发前 unavailable，显式 capability override 路径有回归覆盖 | 只修正 admission 的静态默认声明；override 是调用方声明而非自动证据验证；不实现 GPUI mobile semantics provider、不改变 runtime hello，也不证明 accessibility 树在真实设备可用；移动语义 scenario 与真实设备验收仍未完成 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -169,7 +176,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | A03 | planned | pin/manifest/registry 可复用；无 context 命令、版本知识索引或工作流包 |
 | S05 | planned | 无类型化热参数、overlay revision、撤销/固化及收益实验 |
 | M01 | in_progress | iOS/Android adapter、capture/log snapshot、进程身份与 fault evidence；移动 preview 已通过 delegated lease 复核 owner，并将 capture/log/stop 绑定实际 run；Android capture 已补 best-effort viewport/scale/orientation/foreground metadata；early scenario failure 也先 finalize evidence；缺完整日志/设备故障、真实环境变体和 UI 变体验收 |
-| M02 | in_progress | 配置展开、admission、并行/资源锁、matrix CLI、移动 control/native capture、共享 frozen snapshot/target output lock、control scenario cell 完整报告、移动 delegated lease 与 `CheckContext.mobile_evidence`；普通 build/run 已有跨命令构建所有权，仍缺完整语义/输入 scenario 和三端矩阵 |
+| M02 | in_progress | 配置展开、admission、并行/资源锁、matrix CLI、移动 control/native capture、共享 frozen snapshot/target output lock、control scenario cell 完整报告、移动 delegated lease 与 `CheckContext.mobile_evidence`；本地 iOS/Android admission 不再静态宣称 semantics/read/bounds，但 runtime semantics provider、完整语义/输入 scenario 和三端矩阵仍缺；普通 build/run 已有跨命令构建所有权 |
 | M05 | planned | 无 repro export/inspect/run、脱敏和干净环境重放 |
 | Q01 | planned | 已有三 OS CLI/macOS 模板/Android 宿主 CI；尚无该工作包的完整真实 GUI/设备 L2/L3 门禁 |
 | G01 | planned | supervisor 计时已有；无应用 layout/paint/frame/CPU/GPU 指标与开销验收 |
