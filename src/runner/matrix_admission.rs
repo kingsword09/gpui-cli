@@ -184,12 +184,14 @@ impl MatrixAdmissionContext {
         .into_iter()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
+        // Mobile GPUI currently exposes the semantics protocol hooks, but the
+        // pinned mobile platform does not provide a verified accessibility
+        // provider by default. Keep semantics out of static admission until a
+        // runner performs that runtime probe; an explicit capability override
+        // remains available for an environment with real evidence.
         let mobile_capabilities = [
             "screenshot",
             "capture.device",
-            "semantics",
-            "semantics.read",
-            "semantics.bounds",
             "scenario.reset",
             "input.pointer",
             "input.keyboard",
@@ -988,6 +990,47 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "scenario_capability_unavailable")
         );
+    }
+
+    #[test]
+    fn local_mobile_admission_does_not_claim_unverified_semantics() {
+        let mut context = local_context(MatrixPlatform::Android);
+        context.project_targets = Some(BTreeSet::from(["android".into()]));
+        let matrix = || {
+            toml::from_str(
+                r#"
+                    schema_version = 1
+                    [[targets]]
+                    id = "android-emulator"
+                    runner = "local"
+                    platform = "android"
+                    device = "emulator-1"
+                    abi = "x86_64"
+                    scenarios = ["counter-basic"]
+                "#,
+            )
+            .unwrap()
+        };
+        let requirements = scenarios(vec!["semantics.read", "semantics.bounds"]);
+
+        let admission = admit_matrix(matrix(), requirements.clone(), None, &context).unwrap();
+        assert_eq!(admission.cells[0].state, MatrixAdmissionState::Unavailable);
+        assert!(admission.cells[0].issues.iter().any(|issue| {
+            issue.code == "scenario_capability_unavailable"
+                && issue.message.contains("semantics.read")
+        }));
+        assert!(admission.cells[0].issues.iter().any(|issue| {
+            issue.code == "scenario_capability_unavailable"
+                && issue.message.contains("semantics.bounds")
+        }));
+
+        context = context.with_scenario_capabilities(
+            MatrixPlatform::Android,
+            ["semantics.read", "semantics.bounds"],
+        );
+        let admission = admit_matrix(matrix(), requirements, None, &context).unwrap();
+        assert_eq!(admission.cells[0].state, MatrixAdmissionState::Ready);
+        assert!(admission.cells[0].issues.is_empty());
     }
 
     #[test]
