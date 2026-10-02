@@ -42,3 +42,25 @@ Windows live-feedback 一次既有时序波动重跑通过。没有发布或创�
 当前 coordinator 尚未接入 live preview/check 的构建入口，尚无调用者取消引用计数、无“最后一个
 subscriber 退出才终止”策略、heartbeat/fencing、queued/cancelled/partial 状态或有界预热。下一步
 先复用该 coordinator 接入 preview/check，再补取消引用和失败/取消/partial 证据。
+
+## 后续 Windows 状态发布竞态
+
+PR #251（squash `23a4f08`）处理 2026-10-02 在 Windows CI 观察到的一次 coordinator state publish
+失败：`same_key_builders_share_one_in_flight_attempt` 中 `.build-coordinator.json` 的原子替换返回
+`PermissionDenied` / `Access is denied`。首次 push CI 的该测试失败，376 个单元测试通过；PR workflow
+的 Windows job 和 push workflow 对失败/取消 job 的定向重跑均通过，因此归因于短暂 Windows 文件访问
+冲突，不把它扩大成已证明的稳定产品缺陷。
+
+状态文件仍先写同目录临时文件、flush/sync，再执行原子 persist。仅在 persist 返回
+`PermissionDenied` 时最多重试 5 次，指数延迟 5、10、20、40、80ms；其他错误立即返回，重试耗尽仍
+保留原始错误。所有调用仍在既有 coordinator state lock 下，并且 terminal publish 继续校验当前
+owner/fencing，不删除或改名现有状态文件作 fallback。新增测试注入首次 `PermissionDenied` 后成功，
+并复跑原 same-key in-flight 测试。
+
+PR #251 本地通过 `cargo test --workspace --locked`（394 个单元测试及全部集成/协议测试）、
+workspace clippy/check/fmt、`cargo x check-design-docs` 与 `git diff --check`；PR 与 push 两套 CI 的
+Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过。没有发布或 tag。
+
+边界：这只是有界地吸收一次 Windows 文件 sharing/access race；权限被持续拒绝、杀软/同步客户端
+长期占用、磁盘或其他 I/O 错误仍会显式失败。没有据一次 rerun 宣称 Windows 并发文件系统问题
+已经穷尽。
