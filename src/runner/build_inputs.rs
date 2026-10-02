@@ -41,6 +41,14 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
 
 const ANDROID_KEYSTORE_PROPERTIES_RELATIVE: &str = "mobile/android/gradle/keystore.properties";
 const ANDROID_SIGNING_EXTERNAL_HASH: &str = "android.custom-signing";
+const ANDROID_SIGNING_MARKERS: &[&str] = &[
+    "signingConfig",
+    "signingConfigs",
+    "storeFile",
+    "storePassword",
+    "keyAlias",
+    "keyPassword",
+];
 
 /// A stable Cargo workspace copy whose lifetime is bound to a build command.
 /// The temporary parent is intentionally kept alive so Cargo cannot fall back
@@ -1146,6 +1154,7 @@ fn android_cache_signing_policy_with_debug_identity(
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving Android signing project root {}", root.display()))?;
     let has_custom_signing = has_custom_android_signing_config(&root, native)?;
+    let included_build_logic = android_included_build_logic(&root, native)?;
 
     if has_custom_signing {
         let supported = supported_android_signing_config(&root, native)?;
@@ -1205,7 +1214,12 @@ fn android_cache_signing_policy_with_debug_identity(
                 }
             };
             return Ok(AndroidCacheSigningPolicy {
-                disabled_reason,
+                disabled_reason: combine_cache_hit_disabled_reasons([
+                    disabled_reason,
+                    included_build_logic.then(|| {
+                        "Android Gradle included build logic is outside the signing input closure; cache reuse is disabled".into()
+                    }),
+                ]),
                 debug_keystore_identity,
                 signing_identity: Some(identity),
             });
@@ -1215,14 +1229,19 @@ fn android_cache_signing_policy_with_debug_identity(
             .external_hashes
             .insert(ANDROID_SIGNING_EXTERNAL_HASH.into(), "unavailable".into());
         return Ok(AndroidCacheSigningPolicy {
-            disabled_reason: Some(
-                if supported {
-                    "Android custom signing inputs are unavailable or outside the project root; cache reuse is disabled"
-                } else {
-                    "Android custom signing configuration is not a supported local keystore.properties layout; cache reuse is disabled"
-                }
-                .into(),
-            ),
+            disabled_reason: combine_cache_hit_disabled_reasons([
+                Some(
+                    if supported {
+                        "Android custom signing inputs are unavailable or outside the project root; cache reuse is disabled"
+                    } else {
+                        "Android custom signing configuration is not a supported local keystore.properties layout; cache reuse is disabled"
+                    }
+                    .into(),
+                ),
+                included_build_logic.then(|| {
+                    "Android Gradle included build logic is outside the signing input closure; cache reuse is disabled".into()
+                }),
+            ]),
             debug_keystore_identity: None,
             signing_identity: None,
         });
@@ -1259,7 +1278,12 @@ fn android_cache_signing_policy_with_debug_identity(
     let (disabled_reason, debug_keystore_identity) =
         android_cache_hit_eligibility(native, release, false, default_debug_keystore);
     Ok(AndroidCacheSigningPolicy {
-        disabled_reason,
+        disabled_reason: combine_cache_hit_disabled_reasons([
+            disabled_reason,
+            included_build_logic.then(|| {
+                "Android Gradle included build logic is outside the signing input closure; cache reuse is disabled".into()
+            }),
+        ]),
         debug_keystore_identity,
         signing_identity: None,
     })
@@ -1312,21 +1336,18 @@ fn android_cache_hit_eligibility(
 }
 
 fn has_custom_android_signing_config(root: &Path, native: &NativeInputs) -> Result<bool> {
-    const SIGNING_MARKERS: &[&str] = &[
-        "signingConfig",
-        "signingConfigs",
-        "storeFile",
-        "storePassword",
-        "keyAlias",
-        "keyPassword",
-    ];
-
-    for (_, script) in android_signing_marker_scripts(root, native)? {
-        if SIGNING_MARKERS.iter().any(|marker| script.contains(marker)) {
+    for (_, script) in android_signing_marker_sources(root, native)? {
+        if contains_android_signing_marker(&script) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn contains_android_signing_marker(source: &str) -> bool {
+    ANDROID_SIGNING_MARKERS
+        .iter()
+        .any(|marker| source.contains(marker))
 }
 
 fn android_signing_marker_scripts<'a>(
@@ -1345,24 +1366,47 @@ fn android_signing_marker_scripts<'a>(
     Ok(scripts)
 }
 
+/// Includes local Gradle plugin implementation sources when looking for
+/// signing configuration. A convention plugin can mutate variant signing
+/// without mentioning it in app/build.gradle(.kts), so cache eligibility must
+/// not treat a marker in buildSrc/build-logic code as an ordinary debug build.
+fn android_signing_marker_sources<'a>(
+    root: &Path,
+    native: &'a NativeInputs,
+) -> Result<Vec<(&'a String, String)>> {
+    let mut sources = android_signing_marker_scripts(root, native)?;
+    for relative in native.files.keys().filter(|path| {
+        path.starts_with("mobile/android/gradle/")
+            && matches!(
+                Path::new(path.as_str()).extension().and_then(OsStr::to_str),
+                Some("kt" | "groovy" | "java")
+            )
+    }) {
+        let source = fs::read_to_string(root.join(relative))
+            .with_context(|| format!("reading Android Gradle plugin source {relative}"))?;
+        sources.push((relative, source));
+    }
+    Ok(sources)
+}
+
+fn android_included_build_logic(root: &Path, native: &NativeInputs) -> Result<bool> {
+    for (relative, script) in android_signing_marker_scripts(root, native)? {
+        if (relative.ends_with("settings.gradle") || relative.ends_with("settings.gradle.kts"))
+            && gradle_contains_identifier(&script, "includeBuild")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn supported_android_signing_config(root: &Path, native: &NativeInputs) -> Result<bool> {
-    let scripts = android_signing_marker_scripts(root, native)?;
-    let signing_scripts = scripts
+    let sources = android_signing_marker_sources(root, native)?;
+    let signing_sources = sources
         .iter()
-        .filter(|(_, script)| {
-            [
-                "signingConfig",
-                "signingConfigs",
-                "storeFile",
-                "storePassword",
-                "keyAlias",
-                "keyPassword",
-            ]
-            .iter()
-            .any(|marker| script.contains(marker))
-        })
+        .filter(|(_, source)| contains_android_signing_marker(source))
         .collect::<Vec<_>>();
-    let [(relative, script)] = signing_scripts.as_slice() else {
+    let [(relative, script)] = signing_sources.as_slice() else {
         return Ok(false);
     };
     if relative.as_str() != "mobile/android/gradle/app/build.gradle"
@@ -2824,6 +2868,77 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("not a supported"))
         );
+    }
+
+    #[test]
+    fn gradle_plugin_signing_source_disables_android_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        let plugin = root
+            .path()
+            .join("mobile/android/gradle/buildSrc/src/main/kotlin");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            app.join("build.gradle.kts"),
+            "plugins { id(\"com.android.application\") }\n",
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("RemoteSigningPlugin.kt"),
+            "variant.signingConfig = remoteSigningConfig()\n",
+        )
+        .unwrap();
+
+        let mut native = NativeInputs::scan(root.path()).unwrap();
+        assert!(has_custom_android_signing_config(root.path(), &native).unwrap());
+        let policy = android_cache_signing_policy_with_debug_identity(
+            root.path(),
+            false,
+            &mut native,
+            Some(AndroidDebugKeystoreIdentity {
+                path: root.path().join("debug.keystore"),
+                sha256: "d".repeat(64),
+            }),
+        )
+        .unwrap();
+
+        assert!(policy.debug_keystore_identity.is_none());
+        assert!(policy.signing_identity.is_none());
+        assert!(policy.disabled_reason.as_deref().is_some_and(|reason| {
+            reason.contains("not a supported local keystore.properties layout")
+        }));
+    }
+
+    #[test]
+    fn included_android_gradle_build_logic_disables_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let gradle = root.path().join("mobile/android/gradle");
+        let app = gradle.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("build.gradle.kts"), "plugins {}\n").unwrap();
+        fs::write(
+            gradle.join("settings.gradle.kts"),
+            "pluginManagement { includeBuild(\"../../build-logic\") }\n",
+        )
+        .unwrap();
+
+        let mut native = NativeInputs::scan(root.path()).unwrap();
+        let policy = android_cache_signing_policy_with_debug_identity(
+            root.path(),
+            false,
+            &mut native,
+            Some(AndroidDebugKeystoreIdentity {
+                path: root.path().join("debug.keystore"),
+                sha256: "d".repeat(64),
+            }),
+        )
+        .unwrap();
+
+        assert!(policy.debug_keystore_identity.is_some());
+        assert!(policy.disabled_reason.as_deref().is_some_and(|reason| {
+            reason.contains("included build logic is outside the signing input closure")
+        }));
     }
 
     #[test]
