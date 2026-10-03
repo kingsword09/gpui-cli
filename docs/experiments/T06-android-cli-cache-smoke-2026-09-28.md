@@ -5,7 +5,8 @@
 PR #261 将当前 host NDK 编译器和链接器内容纳入 Android toolchain fingerprint；PR #263 再纳入
 host sysroot 和 Clang builtin headers 内容；PR #265 又纳入项目实际选定的 SDK platform 与
 build-tools package 内容；PR #267 为 Gradle Android plugin/dependency artifacts 加入 SHA-256
-dependency verification metadata，并把严格校验状态作为 cache reuse 前置条件。
+dependency verification metadata，并把严格校验状态作为 cache reuse 前置条件；PR #269 又纳入
+实际 Java runtime 内容。
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -37,6 +38,10 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   `verify-metadata=true`、每个 component 至少一个 artifact 且每个 artifact 恰有一个 64 位 SHA-256、
   没有 `trusted-artifacts` 规则时允许缓存命中；metadata 文件自身也进入 BuildKey 输入摘要。metadata
   缺失、畸形或宽松时不阻止 Gradle 构建，只禁用 artifact cache reuse。
+- Android toolchain identity 通过 `java -XshowSettings:properties -version` 获取实际 `java.home` 与
+  `java.version`，对该 JDK 做有界内容摘要。JDK 内部目录链接按逻辑路径递归，外部目录链接也按
+  逻辑路径递归，外部文件链接只记录类别和文件内容 hash；绝对安装路径不进入 fingerprint。循环、
+  断链、特殊文件、不可读内容或超过 100,000 entries/512 MiB 时 cache reuse bypass，普通构建继续。
 
 ## 证据
 
@@ -70,6 +75,12 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   package list、diff check 通过；本地 Android debug/release APK、ABI 检查和 CLI 二次 cache hit 通过；
   最终 PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver CI 全绿；
   #267 squash 为 `bdfd717`，无版本发布或 tag。
+- PR #269 前两轮 Android probe 暴露 Temurin JDK 的内部/外部 truststore 与目录链接布局；最终按
+  逻辑树递归处理外部目录、仅 hash 外部文件且不泄露绝对路径，保留断链/循环/特殊文件拒绝。411 个
+  workspace 单测及全部集成/协议测试、clippy、fmt、design docs、package list、diff check 通过；
+  本地 Android debug/release、ABI 检查和 CLI 二次 cache hit 通过；最终 PR 与 push 两套
+  Linux/macOS/Windows、Android/desktop template、baseline-driver CI 全绿；#269 squash 为
+  `4aa6ed3`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -100,3 +111,6 @@ special file、读取失败或超过上限会禁用 cache reuse，但普通构�
   仓库可用性、仓库状态、构建脚本任意网络 I/O 或未被任务图触发的可选制品，也不验证 Maven 签名；Gradle
   verification metadata 当前使用 SHA-256 内容校验且 `verify-signatures=false`。用户修改依赖或版本但
   未更新校验元数据时构建会由 Gradle 拒绝，不能靠 cache bypass 静默接收新制品。
+- PR #269 的 Java runtime fingerprint 只描述实际 `java.home` 运行时树的逻辑内容，不锁定安装根路径；
+  外部 truststore 文件变化会改变摘要，外部目录内容也会被递归纳入。它不覆盖 Gradle daemon 外的
+  其他 JVM、远端仓库状态或任意 build-script I/O；JDK 的特殊布局变化可能安全地退化为 cache bypass。
