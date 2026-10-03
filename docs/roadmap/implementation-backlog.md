@@ -889,9 +889,9 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 代码落点：`src/devserver/inputs.rs`、watcher loop、`src/devserver/session.rs`；复用 M04 输入边界。
 
 1. 已合并路径/hash/mtime/大小/file identity 索引；watcher 只记 dirty，rename/delete 两边失效，overflow/incomplete rename 和目录/文件读取竞态回退全量扫描。
-2. live watcher/session 已消费索引；build/observe/显式 sync 仍完整稳定核验，未知或不可读 metadata 不复用旧 hash。
-3. 已有忽略手动基准：Apple M2/macOS release，4096×8192-byte inputs、10 warmup + 30 alternating pairs；wrong_revision_acceptance=0，oracle mismatch=0；索引单文件更新 P95 1.280 ms wall/1.242 ms CPU，稳定全量 oracle 170.913/170.458 ms；单文件更新 hash I/O 16 KiB，oracle 64 MiB。
-4. 未完成：外部 Cargo path dependency/build-script 声明读集、自动网络盘识别/降级、Linux/Windows/网络文件系统对照。上列单机热缓存合成集数据不可外推为产品性能承诺；非构建文件仍不能按扩展名武断忽略。
+2. live watcher/session 已消费索引；Cargo metadata 发现的外部 path-package roots 使用稳定 package identity slot，Cargo.toml 改动刷新 scope 并增删 watcher roots。外部 build.rs package 的变更会触发该 root 的稳定全量扫描；build/observe/显式 sync 仍完整稳定核验。
+3. metadata 复用仅对平台 allow-list 类型开启：macOS/Linux 识别未知、网络/用户态类型后全量扫描；Windows 使用 volume path/drive type，并区分 UNC 与 verbatim disk path。PR #275 的 Linux/macOS/Windows CI 全绿；策略逻辑和单机数据不等于已在实际网络/用户态挂载上完成性能/事件可靠性对照。
+4. 已有忽略手动基准：Apple M2/macOS release，4096×8192-byte inputs、10 warmup + 30 alternating pairs；wrong_revision_acceptance=0，oracle mismatch=0；索引单文件更新 P95 1.280 ms wall/1.242 ms CPU，稳定全量 oracle 170.913/170.458 ms；单文件更新 hash I/O 16 KiB，oracle 64 MiB。未完成：build.rs 声明及实际目录外读集/环境/网络输入闭包、网络/用户态文件系统实挂载对照和 Linux/Windows 性能对照。上列单机热缓存合成集数据不可外推为产品性能承诺；非构建文件仍不能按扩展名武断忽略。
 
 验收 T-08/T-09/P-02。回退：自动恢复全量扫描，优先保证 wrong_revision_acceptance=0。
 
