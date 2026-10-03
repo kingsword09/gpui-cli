@@ -20,8 +20,20 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   4096 个 8192-byte 文件（32 MiB）、10 次 warmup + 30 次交替测量：oracle mismatch=0、
   `wrong_revision_acceptance=0`；索引更新 P95 约 1.280 ms wall/1.242 ms process CPU，全量稳定
   oracle P95 约 170.913/170.458 ms；单文件更新 hash 读取 16 KiB，oracle 稳定双扫描读取 64 MiB。
-- 该数据是热文件系统缓存下的单机合成集，不能外推到 Linux/Windows、网络文件系统、冷缓存或完整
-  Android/Gradle 输入闭包；外部 Cargo path dependency、build-script 声明读集和自动网络盘识别仍是
+- PR #275（`de97a17`）将 Cargo metadata 发现的外部 path-package roots 纳入 live session 输入索引与
+  watcher；外部逻辑 slot 按稳定 package identity 排序，不公开绝对 source root；Cargo.toml 变化刷新
+  scope 并增删 watcher roots。workspace 与 external 同名逻辑路径保持独立；冻结副本 slot 与 workspace
+  路径碰撞时换用受控逻辑目录，input hash 不依赖 checkout 根路径。
+- 包含外部 `build.rs` 的 package 在该 root 内任一 watcher 变化时做稳定全量重扫，避免 metadata 复用
+  漏过声明范围内的文件变化；这不是对 build.rs 声明或实际读集的发现。目录外读取、环境变量、时间、
+  网络等隐藏输入仍不属于该索引闭包。
+- filesystem policy 在 macOS/Linux 对已知本地类型启用 metadata 复用，未知/网络/用户态类型回退全量
+  内容扫描；Windows 按 volume/drive type 区分固定盘、网络盘和未知盘，并将 UNC 与 verbatim disk path
+  分开判定。PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver CI 最终
+  全绿；Windows CI 曾暴露 `\\?\D:\...` verbatim disk 被误识别成 UNC，修复后 workspace 429 passed、
+  1 个手动 benchmark ignored。
+- 原基准数据仍是热文件系统缓存下的 Apple M2/macOS 单机合成集，不能外推到 Linux/Windows 性能、网络/
+  用户态挂载、冷缓存或完整 Android/Gradle 输入闭包；外部 Cargo build-script 读集和实挂载对照仍是
   T05 未收口项。原始 JSON 保留在本机 `/tmp`，不作为仓库发布产物。
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。

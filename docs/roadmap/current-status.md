@@ -1,7 +1,7 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-03（Asia/Shanghai）。核查代码：`c2ddaa3`（PR #273 squash merge）。
-本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
+更新日期：2026-10-03（Asia/Shanghai）。核查代码：`de97a17`（PR #275 squash merge）。
+本轮核查时 `origin/main` 指向该提交；后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -73,10 +73,13 @@ O03 保留已有 `done`；S01/M01/M03/T06 从过时的 `planned` 改为 `in_prog
 F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review` 校正为 `in_progress`。
 这不是完成百分比，也不表示这些任务的已有实现被撤回。
 
-T05 已合并输入索引、live watcher/session 接入和大型输入 CPU/I/O 对照。显式 build/observe
-同步继续全量稳定核验；目前证据为本机 Apple M2/macOS 单环境、一个固定合成输入集。外部 Cargo
-path dependency/build-script 声明输入范围和自动识别不可靠网络文件系统尚未闭合，因此 T05 保持
-`in_progress`，不能把单机基准外推为跨平台性能承诺。
+T05 已合并输入索引、live watcher/session 接入、大型输入本机对照，以及外部 Cargo path package
+watch/index。外部来源按稳定 package identity 映射到逻辑 slot，Cargo.toml 改动会刷新 scope 与 watcher
+roots；含外部 build.rs 的 package 在该 package root 内稳定全量重扫，未声称发现其目录外实际读集。
+已加入 macOS/Linux 文件系统 allow-list、Windows volume/drive 判别和未知类型全量扫描降级。显式
+build/observe 同步继续全量稳定核验；性能对照仍只来自 Apple M2/macOS 单环境、一个固定合成输入集。
+build-script 声明/实际读集和网络/用户态文件系统跨平台对照仍未闭合，因此 T05 保持 `in_progress`，
+不能把单机基准外推为跨平台性能承诺。
 
 | 门槛 | 已有进展 | 未收口部分 |
 | --- | --- | --- |
@@ -84,7 +87,7 @@ path dependency/build-script 声明输入范围和自动识别不可靠网络文
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
 | G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup-finalized matrix context/capture-only lifecycle evidence、mobile runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、移动 semantics 默认 admission 收紧、Android plugin/included-build signing cache bypass hardening、Android wrapper checksum 与依赖 artifact verification、Android 动态依赖 cache gate、Android NDK compiler-tool/sysroot/header 与选定 SDK package、Java runtime content fingerprint、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing/Android release-only signing debug preview 的 BuildKey coordinator、Windows coordinator state publish transient permission-denied bounded retry、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、pre-ready mobile launch failure evidence、mobile cleanup error evidence、action 失败 operation ID evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening、early mobile scenario failure finalization | partial artifact 的消费/恢复契约、Android 复杂/远端 signing cache hit 与完整输入闭包、真实环境适配、移动 semantics provider 与完整 scenario steps/cleanup、真实连续验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture、同一 delegated lease 下的 run/capture/log/cleanup evidence、cleanup-finalized matrix evidence、capture-only cell 的非伪造报告边界、runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、pre-ready launch failure evidence、cleanup error evidence、action failure operation ID evidence、Android capture 的 best-effort viewport/scale/orientation/foreground metadata、移动 semantics 默认 admission 不再误报支持 | 完整三端同快照矩阵、真实设备环境元数据与故障/重连、移动 semantics provider/完整语义与输入证据、repro 和 L2/L3 CI |
-| G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug live preview verified cache hit、Android 固定 Gradle wrapper checksum、Gradle dependency verification SHA-256 metadata、动态/changing dependency cache bypass、NDK compiler-tool/sysroot/header、选定 SDK package 与 Java runtime content fingerprint、显式清理；T05 watcher 索引已接入并完成一个大型输入集本机对照 | 缓存输入遗漏、iOS physical live preview、Android release APK/复杂或远端 signing cache hit、远端仓库状态和任意 build-script I/O、T05 外部依赖/网络盘范围与跨平台性能证据、共享构建/预热、性能指标/预算和 Agent 基准 |
+| G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug live preview verified cache hit、Android 固定 Gradle wrapper checksum、Gradle dependency verification SHA-256 metadata、动态/changing dependency cache bypass、NDK compiler-tool/sysroot/header、选定 SDK package 与 Java runtime content fingerprint、显式清理；T05 已覆盖外部 Cargo path package live watcher/index 并有一个大型输入集本机对照 | 缓存输入遗漏、iOS physical live preview、Android release APK/复杂或远端 signing cache hit、远端仓库状态和任意 build-script I/O、T05 build-script 实际读集/网络及用户态文件系统跨平台证据、跨平台性能对照、共享构建/预热、性能指标/预算和 Agent 基准 |
 
 ## 2. 相对上次审计的新合并
 
@@ -156,6 +159,7 @@ path dependency/build-script 声明输入范围和自动识别不可靠网络文
 | `17b369d`（#271） | 路径/hash/mtime/大小/file identity 输入索引，支持 dirty path、rename/delete 双向失效、有界事件队列、overflow 与读取竞态全量回退 | 首个实现切片；watcher 接入和大项目对照由后续切片完成 |
 | `a995989`（#272） | live watcher 回调只标 dirty 并排队，session 主循环增量刷新；build/observe/sync 继续完整稳定核验；目录变动、incomplete rename、watcher overflow 回退 | 外部 Cargo path dependency/build-script 自声明读集和自动网络盘判别尚未纳入 |
 | `c2ddaa3`（#273） | 增加忽略的手动大型输入 benchmark 和扫描 pass/hash 字节统计；Apple M2 release、4096×8 KiB、10 warmup + 30 paired runs，wrong_revision_acceptance=0 | 单机、热文件系统缓存、单文件变更的合成基准；不等于跨 OS/网络盘性能结论或完整 T-09 输入范围 |
+| `de97a17`（#275） | Cargo path-package roots 纳入 live session 输入索引与 watcher，按稳定 package identity 分配逻辑 slot；Cargo.toml 改动刷新 scope 并增删 watcher roots；外部 build.rs 变化触发该 package root 稳定全量重扫；filesystem metadata policy 在 macOS/Linux/Windows 上对未知/网络类型降级；manifest、冻结 relocation 与诊断不包含外部源绝对路径 | 不解析 build.rs 声明/实际目录外读集；文件系统类型 allow-list 与 fallback 已实现，但网络/用户态文件系统和跨平台性能对照仍需持续证据 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -365,6 +369,7 @@ path dependency/build-script 声明输入范围和自动识别不可靠网络文
 | PR #269 合并 | squash merge `4aa6ed3`；无发布/tag |
 | PR #271–#272 合并 | 输入索引类型、watcher/session 增量接入分别 squash 为 `17b369d`、`a995989`；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；无发布/tag |
 | PR #273 合并 | 大型输入扫描指标/手动基准 squash 为 `c2ddaa3`；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；workspace 419 passed、1 个手动 benchmark ignored；无发布/tag |
+| PR #275 合并 | 外部 Cargo path package watcher/index、build-script package root rescan、稳定 slot/路径脱敏及三平台 filesystem fallback squash 为 `de97a17`；CI 首轮发现 Windows verbatim disk path 被当作 UNC，修复后 PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；workspace 429 passed、1 个手动 benchmark ignored；无发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
