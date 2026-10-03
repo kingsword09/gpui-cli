@@ -4,7 +4,7 @@ use super::actions::{Action, ActionRequest};
 use super::artifacts::{ArtifactInfo, ArtifactLimits, ArtifactStore};
 use super::capture;
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
-use super::inputs::{AssetDelta, IndexedInputs};
+use super::inputs::{AssetDelta, CargoInputScope, IndexedInputs, Inputs};
 use super::operations::{
     MAX_ACTIVE_OPERATIONS, MAX_DEADLINE_MS, OperationError, OperationSnapshot, OperationState,
     OperationStore, SubmitResult, Transition,
@@ -34,6 +34,8 @@ pub struct Session {
     pub store: EventStore,
     pub stopping: AtomicBool,
     inputs: Mutex<IndexedInputs>,
+    cargo_scope_enabled: bool,
+    cargo_scope_dirty: AtomicBool,
     output: Mutex<RollingFile>,
     pub timing: Arc<Timing>,
     pub windows: Arc<WindowRegistry>,
@@ -175,6 +177,28 @@ pub enum BuildCancellationReason {
 impl Session {
     pub fn start(root: &Path, project: &str, target: &str) -> Result<Arc<Self>> {
         let root = root.canonicalize().context("resolving live project root")?;
+        let inputs = IndexedInputs::new(&root);
+        Self::start_with_index(root, project, target, inputs, false)
+    }
+
+    pub fn start_with_cargo_scope(
+        root: &Path,
+        project: &str,
+        target: &str,
+        scope: &CargoInputScope,
+    ) -> Result<Arc<Self>> {
+        let root = root.canonicalize().context("resolving live project root")?;
+        let inputs = IndexedInputs::new_with_cargo_scope(&root, scope)?;
+        Self::start_with_index(root, project, target, inputs, true)
+    }
+
+    fn start_with_index(
+        root: PathBuf,
+        project: &str,
+        target: &str,
+        inputs: IndexedInputs,
+        cargo_scope_enabled: bool,
+    ) -> Result<Arc<Self>> {
         let id = format!("live-{}", random_token()?);
         let dir = root.join(".gpui/live").join(&id);
         fs::create_dir_all(&dir)?;
@@ -242,7 +266,6 @@ impl Session {
         };
         let timing = Arc::new(Timing::new(&dir, &id)?);
         let artifacts = Arc::new(ArtifactStore::new(&root, &id, ArtifactLimits::default())?);
-        let inputs = IndexedInputs::new(&root);
         let session = Arc::new(Self {
             id,
             root,
@@ -266,6 +289,8 @@ impl Session {
             dir,
             stopping: AtomicBool::new(false),
             inputs: Mutex::new(inputs),
+            cargo_scope_enabled,
+            cargo_scope_dirty: AtomicBool::new(false),
             next_build: AtomicU64::new(1),
             next_run: AtomicU64::new(1),
         });
@@ -2038,8 +2063,20 @@ impl Session {
     pub fn mark_inputs_dirty(&self, paths: &[PathBuf]) {
         let mut inputs = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
         for path in paths {
+            if self.cargo_scope_enabled
+                && path.file_name() == Some(std::ffi::OsStr::new("Cargo.toml"))
+            {
+                self.cargo_scope_dirty.store(true, Ordering::SeqCst);
+            }
             inputs.mark_dirty(path);
         }
+    }
+
+    pub fn input_watch_roots(&self) -> Vec<PathBuf> {
+        self.inputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .watch_roots()
     }
 
     /// Marks watcher evidence unreliable, forcing the next sync to perform a
@@ -2059,6 +2096,12 @@ impl Session {
     }
 
     fn sync_inputs_with_mode(&self, incremental: bool) -> Result<(Revision, AssetDelta, String)> {
+        let incremental_disabled_reason = self
+            .inputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .incremental_disabled_reason()
+            .map(str::to_owned);
         let scan_scope = Scope {
             revision: self.store.state().desired,
             ..Scope::default()
@@ -2068,11 +2111,40 @@ impl Session {
             &scan_scope,
             None,
             json!({"max_stability_rescans": MAX_INPUT_STABILITY_RESCANS,
-                "mode": if incremental { "watcher_index" } else { "full_verification" }}),
+                "mode": if incremental { "watcher_index" } else { "full_verification" },
+                "incremental_disabled_reason": incremental_disabled_reason}),
         );
         // Serialize scans without holding the event/state mutex. Queries stay
         // responsive even with a large workspace or a running compiler.
         let mut indexed = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
+        let refresh_scope = self.cargo_scope_enabled
+            && (!incremental || self.cargo_scope_dirty.swap(false, Ordering::SeqCst));
+        if refresh_scope {
+            match Inputs::cargo_input_scope(&self.root)
+                .and_then(|scope| indexed.refresh_cargo_scope(&scope))
+            {
+                Ok(_) => {}
+                Err(_error) => {
+                    self.cargo_scope_dirty.store(true, Ordering::SeqCst);
+                    if !incremental {
+                        let diagnostic = if self.cargo_scope_enabled {
+                            "Cargo input scope refresh failed; absolute paths omitted"
+                        } else {
+                            "Cargo input scope refresh failed"
+                        };
+                        scan.finish("failed", Some(diagnostic));
+                        return Err(anyhow::anyhow!(diagnostic));
+                    }
+                    indexed.mark_overflow();
+                    self.emit(
+                        Kind::WatchError,
+                        &Scope::default(),
+                        json!({"message": "Cargo external input scope refresh failed; absolute paths omitted",
+                            "fallback": "stable scan of last valid indexed roots"}),
+                    );
+                }
+            }
+        }
         let previous = indexed.manifest().clone();
         let _refresh = match if incremental {
             indexed.refresh(MAX_INPUT_STABILITY_RESCANS)
@@ -2080,10 +2152,14 @@ impl Session {
             indexed.verify_full(MAX_INPUT_STABILITY_RESCANS)
         } {
             Ok(refresh) => refresh,
-            Err(error) => {
-                let message = error.to_string();
-                scan.finish("failed", Some(&message));
-                return Err(error);
+            Err(_error) => {
+                let diagnostic = if self.cargo_scope_enabled {
+                    "input scan failed; absolute paths omitted"
+                } else {
+                    "input scan failed"
+                };
+                scan.finish("failed", Some(diagnostic));
+                return Err(anyhow::anyhow!(diagnostic));
             }
         };
         let inputs = indexed.manifest().clone();
@@ -2093,7 +2169,13 @@ impl Session {
         if revision.source_revision == 0 || inputs != previous {
             if revision.source_revision == 0
                 || inputs.sources != previous.sources
+                || inputs.external_sources != previous.external_sources
                 || inputs.untracked_directory_links != previous.untracked_directory_links
+                || inputs.external_untracked_directory_links
+                    != previous.external_untracked_directory_links
+                || inputs.excluded_sensitive_files != previous.excluded_sensitive_files
+                || inputs.external_excluded_sensitive_files
+                    != previous.external_excluded_sensitive_files
             {
                 revision.source_revision += 1;
             }
@@ -2102,7 +2184,9 @@ impl Session {
             }
             self.emit(Kind::SourceChanged, &Scope { revision: revision.clone(), ..Scope::default() },
                 json!({"input_hash": inputs.digest(), "sources": inputs.sources.len(), "assets": inputs.assets.len(),
-                    "untracked_directory_links": inputs.untracked_directory_links}));
+                    "external_sources": inputs.external_sources.len(),
+                    "untracked_directory_links": inputs.untracked_directory_links,
+                    "external_untracked_directory_links": inputs.external_untracked_directory_links}));
         }
         scan.finish("ok", None);
         Ok((revision, asset_delta, input_hash))

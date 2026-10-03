@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::ffi::CString;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,8 @@ const IGNORED: &[&str] = &[
     "Pods",
 ];
 const MAX_INDEXED_DIRTY_PATHS: usize = 4096;
+const EXTERNAL_INPUT_PREFIX: &str = "\0cargo-external";
+const EXTERNAL_INPUT_MANIFEST_PREFIX: &str = "external";
 const SENSITIVE_INPUT_FILE_NAMES: &[&str] = &["local.properties", "keystore.properties"];
 const SENSITIVE_INPUT_FILE_EXTENSIONS: &[&str] = &["jks", "keystore", "p12", "pfx"];
 
@@ -35,10 +39,16 @@ pub fn should_trigger(path: &Path) -> bool {
 pub struct Inputs {
     pub sources: BTreeMap<String, String>,
     pub assets: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_sources: BTreeMap<String, String>,
     // Directory symlinks are not traversed; the manifest advertises this scope.
     pub untracked_directory_links: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_untracked_directory_links: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_sensitive_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_excluded_sensitive_files: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -52,14 +62,12 @@ pub struct FrozenInputs {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FrozenExternalInput {
-    pub source_root: String,
     pub snapshot_root: String,
     pub manifest: Inputs,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PathRelocation {
-    pub source_root: String,
     pub snapshot_root: String,
 }
 
@@ -91,13 +99,13 @@ const NATIVE_ROOTS: &[&str] = &[
 /// path-input boundary. External path packages are kept as separate roots so
 /// a later snapshot step can copy them without accidentally traversing the
 /// developer's parent directory.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CargoInputScope {
     pub workspace_root: String,
     pub external_path_dependencies: Vec<ExternalPathDependency>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalPathDependency {
     pub root: String,
     pub manifest_path: String,
@@ -199,6 +207,7 @@ pub struct InputScanMetrics {
 #[derive(Debug)]
 pub struct IndexedInputs {
     root: PathBuf,
+    roots: Vec<IndexedRoot>,
     entries: BTreeMap<String, IndexedFile>,
     untracked_directory_links: BTreeSet<String>,
     excluded_sensitive_files: BTreeSet<String>,
@@ -208,12 +217,32 @@ pub struct IndexedInputs {
     force_full_scan: bool,
     index_disabled: bool,
     incremental_enabled: bool,
+    incremental_disabled_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IndexedRoot {
+    prefix: String,
+    filesystem_root: PathBuf,
+    full_scan_on_change: bool,
+}
+
+fn workspace_indexed_root(root: &Path) -> IndexedRoot {
+    IndexedRoot {
+        prefix: String::new(),
+        filesystem_root: root.to_owned(),
+        full_scan_on_change: false,
+    }
 }
 
 impl IndexedInputs {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let root = fs::canonicalize(&root).unwrap_or(root);
+        let incremental_disabled_reason = filesystem_incremental_policy(&root);
         Self {
-            root: root.into(),
+            roots: vec![workspace_indexed_root(&root)],
+            root,
             entries: BTreeMap::new(),
             untracked_directory_links: BTreeSet::new(),
             excluded_sensitive_files: BTreeSet::new(),
@@ -222,8 +251,44 @@ impl IndexedInputs {
             initialized: false,
             force_full_scan: false,
             index_disabled: false,
-            incremental_enabled: true,
+            incremental_enabled: incremental_disabled_reason.is_none(),
+            incremental_disabled_reason,
         }
+    }
+
+    pub fn new_with_cargo_scope(root: &Path, scope: &CargoInputScope) -> Result<Self> {
+        let root = fs::canonicalize(root)?;
+        let mut index = Self::new(root.clone());
+        index.roots = indexed_roots_for_cargo_scope(&root, scope)?;
+        index.refresh_filesystem_policy();
+        Ok(index)
+    }
+
+    /// Replaces the Cargo path-package root set while retaining the last
+    /// published manifest so the next full scan can produce an exact revision
+    /// and asset delta.
+    pub fn refresh_cargo_scope(&mut self, scope: &CargoInputScope) -> Result<bool> {
+        let roots = indexed_roots_for_cargo_scope(&self.root, scope)?;
+        if roots == self.roots {
+            return Ok(false);
+        }
+        self.roots = roots;
+        self.entries.clear();
+        self.untracked_directory_links.clear();
+        self.excluded_sensitive_files.clear();
+        self.dirty.clear();
+        self.initialized = false;
+        self.force_full_scan = false;
+        self.index_disabled = false;
+        self.refresh_filesystem_policy();
+        Ok(true)
+    }
+
+    pub fn watch_roots(&self) -> Vec<PathBuf> {
+        self.roots
+            .iter()
+            .map(|root| root.filesystem_root.clone())
+            .collect()
     }
 
     pub fn manifest(&self) -> &Inputs {
@@ -238,20 +303,38 @@ impl IndexedInputs {
         self.index_disabled || !self.incremental_enabled
     }
 
+    pub fn incremental_disabled_reason(&self) -> Option<&str> {
+        self.incremental_disabled_reason.as_deref()
+    }
+
     /// Permanently disables metadata reuse for this index instance. Use this
     /// for filesystems whose timestamps or identities are not trustworthy;
     /// every refresh then uses the stable full content scanner.
     pub fn disable_incremental(&mut self) {
         self.incremental_enabled = false;
+        self.incremental_disabled_reason = Some("filesystem metadata is not trusted".into());
         self.force_full_scan = true;
+    }
+
+    fn refresh_filesystem_policy(&mut self) {
+        self.incremental_disabled_reason = self
+            .roots
+            .iter()
+            .find_map(|root| filesystem_incremental_policy(&root.filesystem_root));
+        self.incremental_enabled = self.incremental_disabled_reason.is_none();
     }
 
     /// Records a watcher path without touching the filesystem.
     pub fn mark_dirty(&mut self, path: impl AsRef<Path>) {
-        let Some(relative) = self.relative_dirty_path(path.as_ref()) else {
+        let Some(mut relative) = self.relative_dirty_path(path.as_ref()) else {
             self.force_full_scan = true;
             return;
         };
+        if let Some((root, _)) = self.root_for_logical_path(&relative)
+            && root.full_scan_on_change
+        {
+            relative = root.prefix.clone();
+        }
         if !should_trigger(Path::new(&relative)) {
             return;
         }
@@ -306,12 +389,12 @@ impl IndexedInputs {
         }
 
         let dirty = self.coalesced_dirty_paths();
-        match self.refresh_dirty(&dirty) {
+        match self.refresh_dirty(&dirty, max_rescans) {
             Ok(refresh) => {
                 self.dirty.clear();
                 Ok(refresh)
             }
-            Err(_) => {
+            Err(_error) => {
                 self.force_full_scan = true;
                 self.refresh_full(max_rescans, IndexedRefreshKind::FallbackFullScan)
             }
@@ -323,27 +406,22 @@ impl IndexedInputs {
         max_rescans: usize,
         kind: IndexedRefreshKind,
     ) -> Result<IndexedRefresh> {
-        let previous_paths = self.entries.keys().cloned().collect::<BTreeSet<_>>();
+        let previous_paths = indexed_manifest_paths(&self.manifest);
         let (manifest, entries, metrics) = if self.incremental_enabled && !self.index_disabled {
-            match scan_indexed_stable(&self.root, max_rescans) {
+            match scan_indexed_roots_stable(&self.roots, max_rescans) {
                 Ok(scanned) => (scanned.manifest, Some(scanned.entries), scanned.metrics),
                 Err(_) => {
-                    let (manifest, metrics) =
-                        Inputs::scan_stable_with_metrics(&self.root, max_rescans)?;
+                    let (manifest, metrics) = scan_input_roots_stable(&self.roots, max_rescans)?;
                     (manifest, None, metrics)
                 }
             }
         } else {
-            let (manifest, metrics) = Inputs::scan_stable_with_metrics(&self.root, max_rescans)?;
+            let (manifest, metrics) = scan_input_roots_stable(&self.roots, max_rescans)?;
             (manifest, None, metrics)
         };
-        let hashed_files = manifest.sources.len() + manifest.assets.len();
-        let current_paths = manifest
-            .sources
-            .keys()
-            .chain(manifest.assets.keys())
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        let hashed_files =
+            manifest.sources.len() + manifest.assets.len() + manifest.external_sources.len();
+        let current_paths = indexed_manifest_paths(&manifest);
         self.manifest = manifest;
         self.entries = entries.unwrap_or_default();
         self.untracked_directory_links = self
@@ -351,12 +429,24 @@ impl IndexedInputs {
             .untracked_directory_links
             .iter()
             .cloned()
+            .chain(
+                self.manifest
+                    .external_untracked_directory_links
+                    .iter()
+                    .map(|path| internal_input_name(path)),
+            )
             .collect();
         self.excluded_sensitive_files = self
             .manifest
             .excluded_sensitive_files
             .iter()
             .cloned()
+            .chain(
+                self.manifest
+                    .external_excluded_sensitive_files
+                    .iter()
+                    .map(|path| internal_input_name(path)),
+            )
             .collect();
         self.index_disabled = self.entries.is_empty() && !current_paths.is_empty();
         self.initialized = true;
@@ -372,16 +462,55 @@ impl IndexedInputs {
         })
     }
 
-    fn refresh_dirty(&mut self, dirty: &[String]) -> Result<IndexedRefresh> {
+    fn refresh_dirty(&mut self, dirty: &[String], max_rescans: usize) -> Result<IndexedRefresh> {
         let mut refresh = IndexedRefresh {
             kind: Some(IndexedRefreshKind::Incremental),
             ..IndexedRefresh::default()
         };
         for relative in dirty {
+            let (root, local_relative) = self
+                .root_for_logical_path(relative)
+                .map(|(root, local_relative)| (root.clone(), local_relative))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("dirty path is outside indexed roots: {relative}")
+                })?;
+            if root.full_scan_on_change && local_relative.is_empty() {
+                let scanned = scan_indexed_roots_stable(std::slice::from_ref(&root), max_rescans)?;
+                let old_entries = self.take_entries_under(&root.prefix);
+                self.take_special_paths_under(&root.prefix);
+                let current_paths = scanned.entries.keys().cloned().collect::<BTreeSet<_>>();
+                refresh.removed_files += old_entries
+                    .keys()
+                    .filter(|path| !current_paths.contains(*path))
+                    .count();
+                refresh.hashed_files += current_paths.len();
+                refresh.hashed_bytes = refresh
+                    .hashed_bytes
+                    .saturating_add(scanned.metrics.hashed_bytes);
+                self.entries.extend(scanned.entries);
+                self.untracked_directory_links
+                    .retain(|path| !path_is_under(path, &root.prefix));
+                self.untracked_directory_links
+                    .extend(scanned.manifest.untracked_directory_links);
+                self.excluded_sensitive_files
+                    .retain(|path| !path_is_under(path, &root.prefix));
+                self.excluded_sensitive_files
+                    .extend(scanned.manifest.excluded_sensitive_files);
+                continue;
+            }
             let old_entries = self.take_entries_under(relative);
             self.take_special_paths_under(relative);
-            let path = self.root.join(relative);
-            self.scan_dirty_path(relative, &path, old_entries, &mut refresh)?;
+            let prefix = root.prefix;
+            let filesystem_root = root.filesystem_root;
+            let path = filesystem_root.join(&local_relative);
+            self.scan_dirty_path(
+                &prefix,
+                &filesystem_root,
+                &local_relative,
+                &path,
+                old_entries,
+                &mut refresh,
+            )?;
         }
         self.rebuild_manifest();
         Ok(refresh)
@@ -389,7 +518,9 @@ impl IndexedInputs {
 
     fn scan_dirty_path(
         &mut self,
-        relative: &str,
+        prefix: &str,
+        filesystem_root: &Path,
+        local_relative: &str,
         path: &Path,
         mut old_entries: BTreeMap<String, IndexedFile>,
         refresh: &mut IndexedRefresh,
@@ -419,11 +550,11 @@ impl IndexedInputs {
                 names_before.sort();
                 for entry in entries {
                     let child = entry.path();
-                    let child_relative = child.strip_prefix(&self.root)?;
+                    let child_relative = child.strip_prefix(filesystem_root)?;
                     if !should_trigger(child_relative) {
                         continue;
                     }
-                    let child_name = input_relative_name(child_relative);
+                    let child_name = logical_input_name(prefix, child_relative);
                     let child_kind = entry.file_type()?;
                     if child_kind.is_dir() {
                         pending.push(child);
@@ -453,9 +584,16 @@ impl IndexedInputs {
                 }
             }
         } else if kind.is_symlink() && path.is_dir() {
-            self.untracked_directory_links.insert(relative.to_owned());
+            self.untracked_directory_links
+                .insert(logical_input_name(prefix, Path::new(local_relative)));
         } else if kind.is_file() || kind.is_symlink() {
-            self.scan_dirty_file(relative, path, &mut old_entries, true, refresh)?;
+            self.scan_dirty_file(
+                &logical_input_name(prefix, Path::new(local_relative)),
+                path,
+                &mut old_entries,
+                true,
+                refresh,
+            )?;
         }
         refresh.removed_files += old_entries.len();
         Ok(())
@@ -542,13 +680,30 @@ impl IndexedInputs {
     }
 
     fn rebuild_manifest(&mut self) {
-        let mut manifest = Inputs {
-            untracked_directory_links: self.untracked_directory_links.iter().cloned().collect(),
-            excluded_sensitive_files: self.excluded_sensitive_files.iter().cloned().collect(),
-            ..Inputs::default()
-        };
+        let mut manifest = Inputs::default();
+        for path in &self.untracked_directory_links {
+            let external = external_manifest_name(path);
+            if let Some(external) = external {
+                manifest.external_untracked_directory_links.push(external);
+            } else {
+                manifest.untracked_directory_links.push(path.clone());
+            }
+        }
+        for path in &self.excluded_sensitive_files {
+            let external = external_manifest_name(path);
+            if let Some(external) = external {
+                manifest.external_excluded_sensitive_files.push(external);
+            } else {
+                manifest.excluded_sensitive_files.push(path.clone());
+            }
+        }
         for (path, entry) in &self.entries {
-            if path.starts_with("assets/") {
+            if let Some(external_path) = path.strip_prefix(&format!("{EXTERNAL_INPUT_PREFIX}/")) {
+                manifest.external_sources.insert(
+                    format!("{EXTERNAL_INPUT_MANIFEST_PREFIX}/{external_path}"),
+                    entry.hash.clone(),
+                );
+            } else if path.starts_with("assets/") {
                 manifest.assets.insert(path.clone(), entry.hash.clone());
             } else {
                 manifest.sources.insert(path.clone(), entry.hash.clone());
@@ -575,16 +730,63 @@ impl IndexedInputs {
         } else {
             self.root.join(path)
         };
-        let relative = candidate.strip_prefix(&self.root).ok()?;
+        let candidate = normalize_watcher_path(&candidate)?;
+        let indexed_root = self.roots.iter().find(|root| {
+            candidate == root.filesystem_root || candidate.starts_with(&root.filesystem_root)
+        })?;
+        let relative = candidate.strip_prefix(&indexed_root.filesystem_root).ok()?;
         if relative
             .components()
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
         {
             return None;
         }
-        let relative = input_relative_name(relative);
-        Some(relative)
+        Some(logical_input_name(&indexed_root.prefix, relative))
     }
+
+    fn root_for_logical_path(&self, logical: &str) -> Option<(&IndexedRoot, String)> {
+        if logical.is_empty() {
+            return self.roots.first().map(|root| (root, String::new()));
+        }
+        for root in &self.roots {
+            if root.prefix.is_empty() {
+                if !logical.starts_with(&format!("{EXTERNAL_INPUT_PREFIX}/")) {
+                    return Some((root, logical.to_owned()));
+                }
+            } else if logical == root.prefix {
+                return Some((root, String::new()));
+            } else if let Some(suffix) = logical.strip_prefix(&(root.prefix.clone() + "/")) {
+                return Some((root, suffix.to_owned()));
+            }
+        }
+        None
+    }
+}
+
+fn normalize_watcher_path(path: &Path) -> Option<PathBuf> {
+    if let Ok(path) = fs::canonicalize(path) {
+        return Some(path);
+    }
+    let parent = path.parent()?;
+    let file_name = path.file_name()?;
+    Some(fs::canonicalize(parent).ok()?.join(file_name))
+}
+
+fn indexed_roots_for_cargo_scope(root: &Path, scope: &CargoInputScope) -> Result<Vec<IndexedRoot>> {
+    let scope_root = fs::canonicalize(Path::new(&scope.workspace_root))
+        .context("resolving Cargo input scope workspace root")?;
+    if scope_root != root {
+        bail!("Cargo input scope workspace root does not match indexed input root");
+    }
+    let mut roots = vec![workspace_indexed_root(root)];
+    for (index, external) in resolve_external_roots(root, scope)?.into_iter().enumerate() {
+        roots.push(IndexedRoot {
+            prefix: format!("{EXTERNAL_INPUT_PREFIX}/{index:04}"),
+            filesystem_root: external.source_root,
+            full_scan_on_change: external.full_scan_on_change,
+        });
+    }
+    Ok(roots)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -619,17 +821,193 @@ fn read_directory_stamp(path: &Path) -> Result<DirectoryStamp> {
     })
 }
 
+/// Metadata reuse is permitted only when the host can positively identify a
+/// local filesystem type with stable file identities and timestamps. Unknown
+/// and network/userspace mounts remain usable, but every watcher refresh falls
+/// back to hashing the complete declared input roots.
+fn filesystem_incremental_policy(path: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let path_string = match CString::new(path.as_os_str().as_encoded_bytes()) {
+            Ok(path) => path,
+            Err(_) => {
+                return Some(
+                    "filesystem path cannot be identified; metadata reuse disabled".into(),
+                );
+            }
+        };
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+        // SAFETY: `statfs` receives a valid C string and writable result.
+        if unsafe { libc::statfs(path_string.as_ptr(), stats.as_mut_ptr()) } != 0 {
+            return Some("could not identify filesystem; metadata reuse disabled".into());
+        }
+        let stats = unsafe { stats.assume_init() };
+        let fs_name = unsafe { std::ffi::CStr::from_ptr(stats.f_fstypename.as_ptr()) }
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        return macos_filesystem_policy(&fs_name);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let path_string = match CString::new(path.as_os_str().as_encoded_bytes()) {
+            Ok(path) => path,
+            Err(_) => {
+                return Some(
+                    "filesystem path cannot be identified; metadata reuse disabled".into(),
+                );
+            }
+        };
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+        // SAFETY: `statfs` receives a valid C string and writable result.
+        if unsafe { libc::statfs(path_string.as_ptr(), stats.as_mut_ptr()) } != 0 {
+            return Some("could not identify filesystem; metadata reuse disabled".into());
+        }
+        let fs_type = unsafe { stats.assume_init() }.f_type as libc::c_long;
+        return linux_filesystem_policy(fs_type as u64);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+
+        if windows_path_is_unc(path) {
+            return Some("UNC/network filesystem; metadata reuse disabled".into());
+        }
+        let mut path_wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        path_wide.push(0);
+        let mut volume_root = vec![0_u16; 32768];
+        // SAFETY: both buffers are NUL-terminated/writable UTF-16 buffers.
+        if unsafe {
+            GetVolumePathNameW(
+                path_wide.as_ptr(),
+                volume_root.as_mut_ptr(),
+                volume_root.len() as u32,
+            )
+        } == 0
+        {
+            let Some(fallback_root) = windows_drive_root(path) else {
+                return Some(
+                    "filesystem volume could not be identified; metadata reuse disabled".into(),
+                );
+            };
+            return windows_drive_policy(unsafe { GetDriveTypeW(fallback_root.as_ptr()) });
+        }
+        let drive_type = unsafe { GetDriveTypeW(volume_root.as_ptr()) };
+        return windows_drive_policy(drive_type);
+    }
+    #[allow(unreachable_code)]
+    Some("filesystem type cannot be reliably detected on this platform".into())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_filesystem_policy(name: &str) -> Option<String> {
+    match name {
+        "apfs" | "hfs" => None,
+        "nfs" | "smbfs" | "afpfs" | "webdav" | "macfuse" | "osxfuse" => Some(format!(
+            "network or userspace filesystem {name}; metadata reuse disabled"
+        )),
+        _ => Some(format!(
+            "unrecognized filesystem {name}; metadata reuse disabled"
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_policy(drive_type: u32) -> Option<String> {
+    use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOTE};
+
+    match drive_type {
+        DRIVE_FIXED => None,
+        DRIVE_REMOTE => Some("network drive; metadata reuse disabled".into()),
+        _ => Some(format!(
+            "non-fixed or unknown drive type {drive_type}; metadata reuse disabled"
+        )),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_root(path: &Path) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+    let drive = match prefix.kind() {
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+        _ => return None,
+    };
+    let root = format!("{}:\\", char::from(drive));
+    Some(
+        std::ffi::OsStr::new(&root)
+            .encode_wide()
+            .chain([0])
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn windows_path_is_unc(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_filesystem_policy(file_system_type: u64) -> Option<String> {
+    match file_system_type as libc::c_long {
+        libc::EXT4_SUPER_MAGIC
+        | libc::XFS_SUPER_MAGIC
+        | libc::BTRFS_SUPER_MAGIC
+        | libc::TMPFS_MAGIC
+        | libc::OVERLAYFS_SUPER_MAGIC
+        | libc::F2FS_SUPER_MAGIC
+        | 0x00004d44 // MSDOS/VFAT
+        | 0x2011_bab0 // exFAT
+        | 0x5346_544e // NTFS
+        | 0x00009660 // ISO 9660
+        | 0x1501_3346 // UDF
+        | 0x2fc1_2fc1 // ZFS
+        | 0x7371_7368 // SquashFS
+        | 0x28cd_3d45 // cramfs
+        | 0x3153_464a // JFS
+        | 0x5265_4973 // ReiserFS
+        | 0x3434 // NILFS2
+        => None,
+        libc::NFS_SUPER_MAGIC
+        | libc::SMB_SUPER_MAGIC
+        | libc::CODA_SUPER_MAGIC
+        | libc::FUSE_SUPER_MAGIC
+        | libc::AFS_SUPER_MAGIC
+        | 0x0102_1997 // 9p
+        | 0x7472_6976 // virtiofs
+        | 0x00c3_6400 // Ceph
+        | 0x0bd0_0bd0 // Lustre
+        | 0xff53_4d42 // CIFS
+        => Some(format!(
+            "network or userspace filesystem type {file_system_type:#x}; metadata reuse disabled"
+        )),
+        _ => Some(format!(
+            "unrecognized filesystem type {file_system_type:#x}; metadata reuse disabled"
+        )),
+    }
+}
+
 struct ScannedIndex {
     manifest: Inputs,
     entries: BTreeMap<String, IndexedFile>,
     metrics: InputScanMetrics,
 }
 
-fn scan_indexed_stable(root: &Path, max_rescans: usize) -> Result<ScannedIndex> {
-    let mut previous = scan_indexed_once(root)?;
+fn scan_indexed_roots_stable(roots: &[IndexedRoot], max_rescans: usize) -> Result<ScannedIndex> {
+    let mut previous = scan_indexed_roots_once(roots)?;
     let mut metrics = previous.metrics;
     for _ in 0..=max_rescans {
-        let current = scan_indexed_once(root)?;
+        let current = scan_indexed_roots_once(roots)?;
         metrics.passes += current.metrics.passes;
         metrics.hashed_files += current.metrics.hashed_files;
         metrics.hashed_bytes = metrics
@@ -646,18 +1024,56 @@ fn scan_indexed_stable(root: &Path, max_rescans: usize) -> Result<ScannedIndex> 
     )
 }
 
-fn scan_indexed_once(root: &Path) -> Result<ScannedIndex> {
+fn scan_indexed_roots_once(roots: &[IndexedRoot]) -> Result<ScannedIndex> {
+    let mut combined = ScannedIndex {
+        manifest: Inputs::default(),
+        entries: BTreeMap::new(),
+        metrics: InputScanMetrics {
+            passes: 1,
+            ..InputScanMetrics::default()
+        },
+    };
+    for root in roots {
+        let scanned = scan_indexed_root_once(root).map_err(|error| {
+            if root.prefix.is_empty() {
+                error
+            } else {
+                anyhow::anyhow!(
+                    "external Cargo path-package input scan failed; absolute paths omitted"
+                )
+            }
+        })?;
+        merge_input_manifests(&mut combined.manifest, scanned.manifest)?;
+        for (path, entry) in scanned.entries {
+            if combined.entries.insert(path.clone(), entry).is_some() {
+                bail!("logical input roots overlap at {path}");
+            }
+        }
+        combined.metrics.hashed_files += scanned.metrics.hashed_files;
+        combined.metrics.hashed_bytes = combined
+            .metrics
+            .hashed_bytes
+            .saturating_add(scanned.metrics.hashed_bytes);
+    }
+    Ok(combined)
+}
+
+fn scan_indexed_root_once(root: &IndexedRoot) -> Result<ScannedIndex> {
     let mut manifest = Inputs::default();
     let mut entries = BTreeMap::new();
     let mut metrics = InputScanMetrics {
         passes: 1,
         ..InputScanMetrics::default()
     };
-    let mut pending = vec![root.to_owned()];
+    let mut pending = vec![root.filesystem_root.clone()];
     while let Some(dir) = pending.pop() {
         let children = match fs::read_dir(&dir) {
             Ok(children) => children,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && root.prefix.is_empty() =>
+            {
+                continue;
+            }
             Err(error) => {
                 return Err(error).with_context(|| format!("reading inputs in {}", dir.display()));
             }
@@ -665,11 +1081,11 @@ fn scan_indexed_once(root: &Path) -> Result<ScannedIndex> {
         for child in children {
             let child = child?;
             let path = child.path();
-            let relative = path.strip_prefix(root)?;
+            let relative = path.strip_prefix(&root.filesystem_root)?;
             if !should_trigger(relative) {
                 continue;
             }
-            let name = input_relative_name(relative);
+            let name = logical_input_name(&root.prefix, relative);
             let kind = child.file_type()?;
             if kind.is_dir() {
                 pending.push(path);
@@ -717,6 +1133,209 @@ fn scan_indexed_once(root: &Path) -> Result<ScannedIndex> {
         entries,
         metrics,
     })
+}
+
+fn merge_input_manifests(target: &mut Inputs, source: Inputs) -> Result<()> {
+    for (path, hash) in source.sources {
+        if let Some(external_path) = path.strip_prefix(&format!("{EXTERNAL_INPUT_PREFIX}/")) {
+            let logical_path = format!("{EXTERNAL_INPUT_MANIFEST_PREFIX}/{external_path}");
+            if target
+                .external_sources
+                .insert(logical_path.clone(), hash)
+                .is_some()
+            {
+                bail!("multiple indexed roots map to the same external input: {logical_path}");
+            }
+        } else if target.sources.insert(path.clone(), hash).is_some()
+            || target.assets.contains_key(&path)
+        {
+            bail!("multiple indexed roots map to the same logical input: {path}");
+        }
+    }
+    for (path, hash) in source.assets {
+        if target.assets.insert(path.clone(), hash).is_some() || target.sources.contains_key(&path)
+        {
+            bail!("multiple indexed roots map to the same logical input: {path}");
+        }
+    }
+    for path in source.untracked_directory_links {
+        if let Some(external) = external_manifest_name(&path) {
+            target.external_untracked_directory_links.push(external);
+        } else {
+            target.untracked_directory_links.push(path);
+        }
+    }
+    for path in source.excluded_sensitive_files {
+        if let Some(external) = external_manifest_name(&path) {
+            target.external_excluded_sensitive_files.push(external);
+        } else {
+            target.excluded_sensitive_files.push(path);
+        }
+    }
+    target.untracked_directory_links.sort();
+    target.external_untracked_directory_links.sort();
+    target.excluded_sensitive_files.sort();
+    target.external_excluded_sensitive_files.sort();
+    Ok(())
+}
+
+fn logical_input_name(prefix: &str, relative: &Path) -> String {
+    let relative = input_relative_name(relative);
+    if prefix.is_empty() {
+        relative
+    } else if relative.is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}/{relative}")
+    }
+}
+
+fn external_manifest_name(path: &str) -> Option<String> {
+    path.strip_prefix(&format!("{EXTERNAL_INPUT_PREFIX}/"))
+        .map(|suffix| format!("{EXTERNAL_INPUT_MANIFEST_PREFIX}/{suffix}"))
+}
+
+fn internal_input_name(path: &str) -> String {
+    path.strip_prefix(&format!("{EXTERNAL_INPUT_MANIFEST_PREFIX}/"))
+        .map(|suffix| format!("{EXTERNAL_INPUT_PREFIX}/{suffix}"))
+        .unwrap_or_else(|| path.to_owned())
+}
+
+fn indexed_manifest_paths(manifest: &Inputs) -> BTreeSet<String> {
+    manifest
+        .sources
+        .keys()
+        .chain(manifest.assets.keys())
+        .cloned()
+        .chain(manifest.external_sources.keys().filter_map(|path| {
+            path.strip_prefix(&format!("{EXTERNAL_INPUT_MANIFEST_PREFIX}/"))
+                .map(|suffix| format!("{EXTERNAL_INPUT_PREFIX}/{suffix}"))
+        }))
+        .collect()
+}
+
+fn scan_input_roots_stable(
+    roots: &[IndexedRoot],
+    max_rescans: usize,
+) -> Result<(Inputs, InputScanMetrics)> {
+    let (mut previous, mut metrics) = scan_input_roots_once(roots)?;
+    for _ in 0..=max_rescans {
+        let (current, pass_metrics) = scan_input_roots_once(roots)?;
+        metrics.passes += pass_metrics.passes;
+        metrics.hashed_files += pass_metrics.hashed_files;
+        metrics.hashed_bytes = metrics
+            .hashed_bytes
+            .saturating_add(pass_metrics.hashed_bytes);
+        if current == previous {
+            return Ok((current, metrics));
+        }
+        previous = current;
+    }
+    bail!(
+        "project inputs changed during the bounded stability scan after {} rescans",
+        max_rescans
+    )
+}
+
+fn scan_input_roots_once(roots: &[IndexedRoot]) -> Result<(Inputs, InputScanMetrics)> {
+    let mut manifest = Inputs::default();
+    let mut metrics = InputScanMetrics {
+        passes: 1,
+        ..InputScanMetrics::default()
+    };
+    for root in roots {
+        let (partial, partial_metrics) = scan_input_root(root).map_err(|error| {
+            if root.prefix.is_empty() {
+                error
+            } else {
+                anyhow::anyhow!(
+                    "external Cargo path-package input scan failed; absolute paths omitted"
+                )
+            }
+        })?;
+        merge_input_manifests(&mut manifest, partial)?;
+        metrics.hashed_files += partial_metrics.hashed_files;
+        metrics.hashed_bytes = metrics
+            .hashed_bytes
+            .saturating_add(partial_metrics.hashed_bytes);
+    }
+    Ok((manifest, metrics))
+}
+
+fn scan_input_root(root: &IndexedRoot) -> Result<(Inputs, InputScanMetrics)> {
+    let mut result = Inputs::default();
+    let mut pending = vec![root.filesystem_root.clone()];
+    let mut buffer = [0u8; 32 * 1024];
+    let mut metrics = InputScanMetrics {
+        passes: 1,
+        ..InputScanMetrics::default()
+    };
+    while let Some(dir) = pending.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && root.prefix.is_empty() =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading inputs in {}", dir.display()));
+            }
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path.strip_prefix(&root.filesystem_root)?;
+            if !should_trigger(relative) {
+                continue;
+            }
+            let name = logical_input_name(&root.prefix, relative);
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if kind.is_symlink() && path.is_dir() {
+                result.untracked_directory_links.push(name);
+                continue;
+            }
+            if !kind.is_file() && !kind.is_symlink() {
+                continue;
+            }
+            if is_sensitive_input_file(&path) {
+                result.excluded_sensitive_files.push(name);
+                continue;
+            }
+            let mut file = match fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("reading input {}", path.display()));
+                }
+            };
+            let mut hash = Sha256::new();
+            let mut file_bytes = 0_u64;
+            loop {
+                let len = file.read(&mut buffer)?;
+                if len == 0 {
+                    break;
+                }
+                hash.update(&buffer[..len]);
+                file_bytes = file_bytes.saturating_add(len as u64);
+            }
+            metrics.hashed_files += 1;
+            metrics.hashed_bytes = metrics.hashed_bytes.saturating_add(file_bytes);
+            let digest = format!("{:x}", hash.finalize());
+            if name.starts_with("assets/") {
+                result.assets.insert(name, digest);
+            } else {
+                result.sources.insert(name, digest);
+            }
+        }
+    }
+    result.untracked_directory_links.sort();
+    result.excluded_sensitive_files.sort();
+    Ok((result, metrics))
 }
 
 fn read_file_stamp(path: &Path) -> Result<FileStamp> {
@@ -914,29 +1533,6 @@ impl Inputs {
         Self::scan_stable_with(max_rescans, || Self::scan(root))
     }
 
-    fn scan_stable_with_metrics(
-        root: &Path,
-        max_rescans: usize,
-    ) -> Result<(Self, InputScanMetrics)> {
-        let (mut previous, mut metrics) = Self::scan_with_metrics(root)?;
-        for _ in 0..=max_rescans {
-            let (current, pass_metrics) = Self::scan_with_metrics(root)?;
-            metrics.passes += pass_metrics.passes;
-            metrics.hashed_files += pass_metrics.hashed_files;
-            metrics.hashed_bytes = metrics
-                .hashed_bytes
-                .saturating_add(pass_metrics.hashed_bytes);
-            if current == previous {
-                return Ok((current, metrics));
-            }
-            previous = current;
-        }
-        bail!(
-            "project inputs changed during the bounded stability scan after {} rescans",
-            max_rescans
-        )
-    }
-
     /// Copies a stable manifest into a new directory and verifies both the
     /// copy and the source once more before returning. The destination must
     /// not exist and must be outside the source root; callers own its
@@ -977,14 +1573,18 @@ impl Inputs {
             );
         }
 
-        let external_roots = resolve_external_roots(&root, scope)?;
-        let destination = prepare_snapshot_destination(&root, &external_roots, destination)?;
+        let mut external_roots = resolve_external_roots(&root, scope)?;
         let manifest = Self::scan_stable(&root, max_rescans)?;
         reject_untracked_links("workspace", &manifest)?;
+        assign_external_snapshot_roots(&mut external_roots, &manifest);
+        let destination = prepare_snapshot_destination(&root, &external_roots, destination)?;
         let external_manifests = external_roots
             .iter()
             .map(|external| {
-                let manifest = Self::scan_stable(&external.source_root, max_rescans)?;
+                let manifest =
+                    Self::scan_stable(&external.source_root, max_rescans).map_err(|_| {
+                        anyhow::anyhow!("external Cargo input scan failed; absolute paths omitted")
+                    })?;
                 reject_untracked_links("external Cargo package", &manifest)?;
                 Ok(manifest)
             })
@@ -1001,13 +1601,14 @@ impl Inputs {
             for (external, manifest) in external_roots.iter().zip(&external_manifests) {
                 let target = destination.join(&external.snapshot_root);
                 fs::create_dir_all(&target)?;
-                copy_manifest_files(&external.source_root, &target, manifest)?;
+                copy_manifest_files(&external.source_root, &target, manifest).map_err(|_| {
+                    anyhow::anyhow!(
+                        "copying external Cargo package inputs failed; absolute paths omitted"
+                    )
+                })?;
                 let copied = Self::scan(&target)?;
                 if !snapshot_copy_matches(manifest, &copied) {
-                    bail!(
-                        "frozen external package copy does not match its manifest: {}",
-                        external.source_root.display()
-                    );
+                    bail!("frozen external package copy does not match its manifest");
                 }
             }
 
@@ -1016,12 +1617,14 @@ impl Inputs {
                 bail!("source inputs changed while freezing the snapshot");
             }
             for (external, expected) in external_roots.iter().zip(&external_manifests) {
-                let current = Self::scan_stable(&external.source_root, max_rescans)?;
+                let current =
+                    Self::scan_stable(&external.source_root, max_rescans).map_err(|_| {
+                        anyhow::anyhow!(
+                            "external Cargo input verification failed; absolute paths omitted"
+                        )
+                    })?;
                 if current != *expected {
-                    bail!(
-                        "external Cargo package changed while freezing the snapshot: {}",
-                        external.source_root.display()
-                    );
+                    bail!("external Cargo package changed while freezing the snapshot");
                 }
             }
 
@@ -1039,7 +1642,12 @@ impl Inputs {
                     &destination.join(&external.snapshot_root),
                     manifest,
                     &relocations,
-                )?;
+                )
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "rewriting external Cargo manifests failed; absolute paths omitted"
+                    )
+                })?;
             }
             Ok(())
         })();
@@ -1052,7 +1660,6 @@ impl Inputs {
             .iter()
             .zip(external_manifests)
             .map(|(external, manifest)| FrozenExternalInput {
-                source_root: external.source_root.to_string_lossy().into_owned(),
                 snapshot_root: external.snapshot_root.to_string_lossy().replace('\\', "/"),
                 manifest,
             })
@@ -1060,7 +1667,6 @@ impl Inputs {
         let path_relocations = external_inputs
             .iter()
             .map(|external| PathRelocation {
-                source_root: external.source_root.clone(),
                 snapshot_root: external.snapshot_root.clone(),
             })
             .collect::<Vec<_>>();
@@ -1097,75 +1703,7 @@ impl Inputs {
     }
 
     fn scan_with_metrics(root: &Path) -> Result<(Self, InputScanMetrics)> {
-        let mut result = Self::default();
-        let mut pending = vec![root.to_owned()];
-        let mut buffer = [0u8; 32 * 1024];
-        let mut metrics = InputScanMetrics {
-            passes: 1,
-            ..InputScanMetrics::default()
-        };
-        while let Some(dir) = pending.pop() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => {
-                    return Err(e).with_context(|| format!("reading inputs in {}", dir.display()));
-                }
-            };
-            for entry in entries {
-                let entry = entry?;
-                let path = entry.path();
-                let rel = path.strip_prefix(root)?;
-                if !should_trigger(rel) {
-                    continue;
-                }
-                let name = rel.to_string_lossy().replace('\\', "/");
-                let kind = entry.file_type()?;
-                if kind.is_dir() {
-                    pending.push(path);
-                    continue;
-                }
-                if kind.is_symlink() && path.is_dir() {
-                    result.untracked_directory_links.push(name);
-                    continue;
-                }
-                if !kind.is_file() && !kind.is_symlink() {
-                    continue;
-                }
-                if is_sensitive_input_file(&path) {
-                    result.excluded_sensitive_files.push(name);
-                    continue;
-                }
-                let mut file = match fs::File::open(&path) {
-                    Ok(file) => file,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(e) => {
-                        return Err(e).with_context(|| format!("reading input {}", path.display()));
-                    }
-                };
-                let mut hash = Sha256::new();
-                let mut file_bytes = 0_u64;
-                loop {
-                    let len = file.read(&mut buffer)?;
-                    if len == 0 {
-                        break;
-                    }
-                    hash.update(&buffer[..len]);
-                    file_bytes = file_bytes.saturating_add(len as u64);
-                }
-                metrics.hashed_files += 1;
-                metrics.hashed_bytes = metrics.hashed_bytes.saturating_add(file_bytes);
-                let digest = format!("{:x}", hash.finalize());
-                if name.starts_with("assets/") {
-                    result.assets.insert(name, digest);
-                } else {
-                    result.sources.insert(name, digest);
-                }
-            }
-        }
-        result.untracked_directory_links.sort();
-        result.excluded_sensitive_files.sort();
-        Ok((result, metrics))
+        scan_input_roots_once(&[workspace_indexed_root(root)])
     }
 
     pub fn digest(&self) -> String {
@@ -1180,6 +1718,7 @@ impl Inputs {
 struct ResolvedExternalRoot {
     source_root: PathBuf,
     snapshot_root: PathBuf,
+    full_scan_on_change: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1192,59 +1731,131 @@ fn resolve_external_roots(
     workspace_root: &Path,
     scope: &CargoInputScope,
 ) -> Result<Vec<ResolvedExternalRoot>> {
-    let mut roots = Vec::with_capacity(scope.external_path_dependencies.len());
-    for (index, dependency) in scope.external_path_dependencies.iter().enumerate() {
+    let mut roots =
+        Vec::<(Vec<String>, PathBuf, bool)>::with_capacity(scope.external_path_dependencies.len());
+    for dependency in &scope.external_path_dependencies {
         let raw_root = Path::new(&dependency.root);
         let raw_root = if raw_root.is_absolute() {
             raw_root.to_owned()
         } else {
             workspace_root.join(raw_root)
         };
-        let metadata = fs::symlink_metadata(&raw_root).with_context(|| {
-            format!(
-                "reading external Cargo package root: {}",
-                raw_root.display()
-            )
-        })?;
+        let metadata =
+            fs::symlink_metadata(&raw_root).context("reading external Cargo package root")?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            bail!(
-                "external Cargo package root must be a non-symlink directory: {}",
-                raw_root.display()
-            );
+            bail!("external Cargo package root must be a non-symlink directory");
         }
-        let source_root = fs::canonicalize(&raw_root).with_context(|| {
-            format!(
-                "resolving external Cargo package root: {}",
-                raw_root.display()
-            )
-        })?;
+        let source_root =
+            fs::canonicalize(&raw_root).context("resolving external Cargo package root")?;
         if source_root == workspace_root || source_root.starts_with(workspace_root) {
-            bail!(
-                "external Cargo package root is inside the workspace: {}",
-                source_root.display()
-            );
+            bail!("external Cargo package root is inside the workspace");
         }
         if workspace_root.starts_with(&source_root) {
-            bail!(
-                "external Cargo package root contains the workspace: {}",
-                source_root.display()
-            );
+            bail!("external Cargo package root contains the workspace");
         }
-        if roots.iter().any(|existing: &ResolvedExternalRoot| {
-            source_root.starts_with(&existing.source_root)
-                || existing.source_root.starts_with(&source_root)
+        let mut package_identity = dependency
+            .package_ids
+            .iter()
+            .map(|id| {
+                id.rsplit_once('#')
+                    .map(|(_, stable)| stable)
+                    .unwrap_or(id)
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        package_identity.sort();
+        package_identity.dedup();
+        if package_identity.is_empty() {
+            bail!("external Cargo path package has no stable package identity");
+        }
+        let build_script = cargo_package_has_build_script(&source_root)?;
+        let mut candidate = (package_identity, source_root, build_script);
+        while let Some(index) = roots.iter().position(|existing| {
+            candidate.1.starts_with(&existing.1) || existing.1.starts_with(&candidate.1)
         }) {
-            bail!(
-                "external Cargo package roots overlap: {}",
-                source_root.display()
-            );
+            let existing = roots.remove(index);
+            if candidate.1.starts_with(&existing.1) {
+                candidate.1 = existing.1;
+            }
+            candidate.0.extend(existing.0);
+            candidate.2 |= existing.2;
         }
-        roots.push(ResolvedExternalRoot {
-            source_root,
-            snapshot_root: PathBuf::from("external").join(format!("{index:04}")),
-        });
+        roots.push(candidate);
     }
-    Ok(roots)
+    let mut roots = roots
+        .into_iter()
+        .map(|(mut identities, source_root, has_build_script)| {
+            identities.sort();
+            identities.dedup();
+            (identities.join("+"), source_root, has_build_script)
+        })
+        .collect::<Vec<_>>();
+    roots.sort_by(|left, right| left.0.cmp(&right.0));
+    if roots.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        bail!("external Cargo path packages have ambiguous stable package identities");
+    }
+    Ok(roots
+        .into_iter()
+        .enumerate()
+        .map(
+            |(index, (_, source_root, full_scan_on_change))| ResolvedExternalRoot {
+                source_root,
+                snapshot_root: PathBuf::from("external").join(format!("{index:04}")),
+                full_scan_on_change,
+            },
+        )
+        .collect())
+}
+
+fn cargo_package_has_build_script(root: &Path) -> Result<bool> {
+    let manifest_path = root.join("Cargo.toml");
+    let manifest = fs::read_to_string(&manifest_path)
+        .with_context(|| "reading external Cargo package manifest")?;
+    let manifest: toml::Value =
+        toml::from_str(&manifest).context("parsing external Cargo package manifest")?;
+    let build = manifest
+        .get("package")
+        .and_then(|package| package.get("build"));
+    Ok(match build {
+        Some(toml::Value::Boolean(enabled)) => *enabled,
+        Some(toml::Value::String(path)) => !path.is_empty(),
+        _ => root.join("build.rs").is_file(),
+    })
+}
+
+fn assign_external_snapshot_roots(roots: &mut [ResolvedExternalRoot], workspace: &Inputs) {
+    let workspace_paths = workspace
+        .sources
+        .keys()
+        .chain(workspace.assets.keys())
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut attempt = 0_u64;
+    loop {
+        let base = if attempt == 0 {
+            "external".to_owned()
+        } else {
+            format!("__gpui_external_{attempt:04}__")
+        };
+        let candidates = (0..roots.len())
+            .map(|index| PathBuf::from(&base).join(format!("{index:04}")))
+            .collect::<Vec<_>>();
+        let collides = candidates.iter().any(|candidate| {
+            let candidate = candidate.to_string_lossy().replace('\\', "/");
+            workspace_paths.iter().any(|path| {
+                *path == candidate
+                    || path.starts_with(&format!("{candidate}/"))
+                    || candidate.starts_with(&format!("{path}/"))
+            })
+        });
+        if !collides {
+            for (root, candidate) in roots.iter_mut().zip(candidates) {
+                root.snapshot_root = candidate;
+            }
+            return;
+        }
+        attempt = attempt.saturating_add(1);
+    }
 }
 
 fn prepare_snapshot_destination(
@@ -1296,12 +1907,20 @@ fn reject_untracked_links(label: &str, manifest: &Inputs) -> Result<()> {
 fn snapshot_copy_matches(expected: &Inputs, copied: &Inputs) -> bool {
     expected.sources == copied.sources
         && expected.assets == copied.assets
+        && expected.external_sources == copied.external_sources
         && expected.untracked_directory_links == copied.untracked_directory_links
+        && expected.external_untracked_directory_links == copied.external_untracked_directory_links
         && copied.excluded_sensitive_files.is_empty()
+        && copied.external_excluded_sensitive_files.is_empty()
 }
 
 fn copy_manifest_files(root: &Path, destination: &Path, manifest: &Inputs) -> Result<()> {
-    for relative in manifest.sources.keys().chain(manifest.assets.keys()) {
+    for relative in manifest
+        .sources
+        .keys()
+        .chain(manifest.assets.keys())
+        .chain(manifest.external_sources.keys())
+    {
         copy_input_file(root, destination, relative)?;
     }
     Ok(())
@@ -1313,7 +1932,12 @@ fn rewrite_cargo_manifests(
     manifest: &Inputs,
     relocations: &[ResolvedPathRelocation],
 ) -> Result<()> {
-    for relative in manifest.sources.keys().chain(manifest.assets.keys()) {
+    for relative in manifest
+        .sources
+        .keys()
+        .chain(manifest.assets.keys())
+        .chain(manifest.external_sources.keys())
+    {
         if Path::new(relative).file_name() != Some(std::ffi::OsStr::new("Cargo.toml")) {
             continue;
         }
@@ -1489,7 +2113,7 @@ fn frozen_input_digest(
     };
     Ok(format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&digest_input).context("serializing frozen inputs")?)
+        Sha256::digest(serde_json::to_vec(&digest_input).context("serializing frozen inputs")?,)
     ))
 }
 
@@ -1497,20 +2121,14 @@ impl CargoInputScope {
     /// Runs full locked Cargo metadata so path dependencies nested below a
     /// workspace member are visible as well as direct path dependencies.
     pub fn discover(root: &Path) -> Result<Self> {
-        let root = fs::canonicalize(root)
-            .with_context(|| format!("resolving Cargo workspace root: {}", root.display()))?;
+        let root = fs::canonicalize(root).context("resolving Cargo workspace root")?;
         let output = Command::new("cargo")
             .current_dir(&root)
             .args(["metadata", "--format-version", "1", "--locked"])
             .output()
             .context("running cargo metadata")?;
         if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr);
-            let detail = detail.trim();
-            if detail.is_empty() {
-                bail!("cargo metadata failed with status {}", output.status);
-            }
-            bail!("cargo metadata failed: {detail}");
+            bail!("cargo metadata failed with status {}", output.status);
         }
         Self::from_metadata_json(&root, &output.stdout)
     }
@@ -1518,23 +2136,14 @@ impl CargoInputScope {
     /// Parses Cargo metadata separately from process execution so the input
     /// boundary can be tested against deterministic fixtures.
     pub fn from_metadata_json(root: &Path, json: &[u8]) -> Result<Self> {
-        let root = fs::canonicalize(root)
-            .with_context(|| format!("resolving Cargo workspace root: {}", root.display()))?;
+        let root = fs::canonicalize(root).context("resolving Cargo workspace root")?;
         let metadata: CargoMetadata =
             serde_json::from_slice(json).context("parsing cargo metadata JSON")?;
         let metadata_root = resolve_metadata_path(&root, &metadata.workspace_root);
-        let metadata_root = fs::canonicalize(&metadata_root).with_context(|| {
-            format!(
-                "resolving cargo metadata workspace root: {}",
-                metadata_root.display()
-            )
-        })?;
+        let metadata_root =
+            fs::canonicalize(&metadata_root).context("resolving cargo metadata workspace root")?;
         if metadata_root != root {
-            bail!(
-                "cargo metadata workspace root {} does not match input root {}",
-                metadata_root.display(),
-                root.display()
-            );
+            bail!("cargo metadata workspace root does not match input root");
         }
 
         let mut external = BTreeMap::<PathBuf, (PathBuf, Vec<String>)>::new();
@@ -1546,28 +2155,17 @@ impl CargoInputScope {
             }
             let raw_manifest = resolve_metadata_path(&root, &package.manifest_path);
             reject_symlinked_path_package(&raw_manifest)?;
-            let manifest = fs::canonicalize(&raw_manifest).with_context(|| {
-                format!(
-                    "resolving local Cargo package manifest: {}",
-                    raw_manifest.display()
-                )
-            })?;
-            let package_root = manifest.parent().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Cargo package manifest has no parent: {}",
-                    manifest.display()
-                )
-            })?;
+            let manifest = fs::canonicalize(&raw_manifest)
+                .context("resolving local Cargo package manifest")?;
+            let package_root = manifest
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Cargo package manifest has no parent"))?;
 
             if package_root == root || package_root.starts_with(&root) {
                 continue;
             }
             if root.starts_with(package_root) {
-                bail!(
-                    "external Cargo path package {} contains the workspace root: {}",
-                    package.id,
-                    package_root.display()
-                );
+                bail!("external Cargo path package contains the workspace root");
             }
 
             let entry = external
@@ -1605,24 +2203,16 @@ fn resolve_metadata_path(root: &Path, path: &Path) -> PathBuf {
 }
 
 fn reject_symlinked_path_package(manifest: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(manifest)
-        .with_context(|| format!("reading Cargo package manifest: {}", manifest.display()))?;
+    let metadata = fs::symlink_metadata(manifest).context("reading Cargo package manifest")?;
     if metadata.file_type().is_symlink() {
-        bail!(
-            "external Cargo path package uses a symlinked manifest: {}",
-            manifest.display()
-        );
+        bail!("external Cargo path package uses a symlinked manifest");
     }
     let parent = manifest
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Cargo package manifest has no parent"))?;
-    let metadata = fs::symlink_metadata(parent)
-        .with_context(|| format!("reading Cargo path package directory: {}", parent.display()))?;
+    let metadata = fs::symlink_metadata(parent).context("reading Cargo path package directory")?;
     if metadata.file_type().is_symlink() {
-        bail!(
-            "external Cargo path package uses a symlinked directory: {}",
-            parent.display()
-        );
+        bail!("external Cargo path package uses a symlinked directory");
     }
     Ok(())
 }
@@ -1825,6 +2415,193 @@ mod tests {
     }
 
     #[test]
+    fn indexed_refresh_tracks_external_cargo_roots_without_serializing_host_paths() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::create_dir_all(workspace.path().join("external/0000/src")).unwrap();
+        fs::create_dir_all(external.path().join("src")).unwrap();
+        fs::write(workspace.path().join("src/lib.rs"), "workspace").unwrap();
+        fs::write(
+            workspace.path().join("external/0000/src/lib.rs"),
+            "workspace path collides textually",
+        )
+        .unwrap();
+        fs::write(
+            external.path().join("Cargo.toml"),
+            "[package]\nname='dep'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+        fs::write(external.path().join("src/lib.rs"), "external one").unwrap();
+        fs::write(external.path().join("private.jks"), "not indexed").unwrap();
+        fs::create_dir_all(external.path().join("real-directory")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            external.path().join("real-directory"),
+            external.path().join("directory-link"),
+        )
+        .unwrap();
+        let scope = CargoInputScope {
+            workspace_root: workspace.path().to_string_lossy().into_owned(),
+            external_path_dependencies: vec![ExternalPathDependency {
+                root: external.path().to_string_lossy().into_owned(),
+                manifest_path: external
+                    .path()
+                    .join("Cargo.toml")
+                    .to_string_lossy()
+                    .into_owned(),
+                package_ids: vec!["path+external#dep@0.1.0".into()],
+            }],
+        };
+        let mut index = IndexedInputs::new_with_cargo_scope(workspace.path(), &scope).unwrap();
+        let initial = index.refresh(1).unwrap();
+        assert_eq!(initial.kind, Some(IndexedRefreshKind::InitialFullScan));
+        assert!(index.manifest().sources.contains_key("src/lib.rs"));
+        assert_eq!(
+            index.manifest().sources["external/0000/src/lib.rs"],
+            format!("{:x}", Sha256::digest("workspace path collides textually"))
+        );
+        assert_eq!(
+            index.manifest().external_sources["external/0000/src/lib.rs"],
+            format!("{:x}", Sha256::digest("external one"))
+        );
+        assert_eq!(
+            index.manifest().external_excluded_sensitive_files,
+            vec!["external/0000/private.jks"]
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            index.manifest().external_untracked_directory_links,
+            vec!["external/0000/directory-link"]
+        );
+        assert!(
+            !index
+                .manifest()
+                .excluded_sensitive_files
+                .iter()
+                .any(|path| path.starts_with(EXTERNAL_INPUT_PREFIX))
+        );
+        let encoded = serde_json::to_string(index.manifest()).unwrap();
+        assert!(!encoded.contains(external.path().to_str().unwrap()));
+        assert!(!encoded.contains(EXTERNAL_INPUT_PREFIX));
+
+        let external_file = external.path().join("src/lib.rs");
+        fs::write(&external_file, "external two").unwrap();
+        index.mark_dirty(&external_file);
+        let refresh = index.refresh(1).unwrap();
+        assert_eq!(refresh.hashed_files, 1);
+        assert_ne!(
+            index.manifest().external_sources["external/0000/src/lib.rs"],
+            format!("{:x}", Sha256::digest("external one"))
+        );
+
+        let second_external = tempfile::tempdir().unwrap();
+        fs::write(
+            second_external.path().join("Cargo.toml"),
+            "[package]\nname='dep2'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+        fs::write(second_external.path().join("lib.rs"), "second root").unwrap();
+        let changed_scope = CargoInputScope {
+            workspace_root: scope.workspace_root.clone(),
+            external_path_dependencies: vec![
+                scope.external_path_dependencies[0].clone(),
+                ExternalPathDependency {
+                    root: second_external.path().to_string_lossy().into_owned(),
+                    manifest_path: second_external
+                        .path()
+                        .join("Cargo.toml")
+                        .to_string_lossy()
+                        .into_owned(),
+                    package_ids: vec!["path+external#dep2@0.1.0".into()],
+                },
+            ],
+        };
+        assert!(index.refresh_cargo_scope(&changed_scope).unwrap());
+        let scope_refresh = index.refresh(1).unwrap();
+        assert_eq!(
+            scope_refresh.kind,
+            Some(IndexedRefreshKind::InitialFullScan)
+        );
+        assert!(
+            index
+                .manifest()
+                .external_sources
+                .contains_key("external/0000/lib.rs")
+        );
+        assert!(
+            !index
+                .manifest()
+                .external_sources
+                .contains_key("external/0001/lib.rs")
+        );
+    }
+
+    #[test]
+    fn external_root_slots_follow_package_identity_not_absolute_path_order() {
+        let workspace = tempfile::tempdir().unwrap();
+        let alpha_root = tempfile::tempdir().unwrap();
+        let zulu_root = tempfile::tempdir().unwrap();
+        for (root, name, source) in [
+            (alpha_root.path(), "alpha", "alpha source"),
+            (zulu_root.path(), "zulu", "zulu source"),
+        ] {
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("[package]\nname='{name}'\nversion='0.1.0'\n"),
+            )
+            .unwrap();
+            fs::write(root.join("src/lib.rs"), source).unwrap();
+        }
+        let make_dependency = |root: &Path, name: &str| ExternalPathDependency {
+            root: fs::canonicalize(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            manifest_path: fs::canonicalize(root.join("Cargo.toml"))
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            package_ids: vec![format!("path+file:///checkout#{name}@0.1.0")],
+        };
+        let alpha = make_dependency(alpha_root.path(), "alpha");
+        let zulu = make_dependency(zulu_root.path(), "zulu");
+        let workspace_root = fs::canonicalize(workspace.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let first_scope = CargoInputScope {
+            workspace_root: workspace_root.clone(),
+            external_path_dependencies: vec![zulu.clone(), alpha.clone()],
+        };
+        let second_scope = CargoInputScope {
+            workspace_root,
+            external_path_dependencies: vec![alpha, zulu],
+        };
+
+        let mut first =
+            IndexedInputs::new_with_cargo_scope(workspace.path(), &first_scope).unwrap();
+        let mut second =
+            IndexedInputs::new_with_cargo_scope(workspace.path(), &second_scope).unwrap();
+        first.refresh(1).unwrap();
+        second.refresh(1).unwrap();
+
+        assert_eq!(
+            first.manifest().external_sources,
+            second.manifest().external_sources
+        );
+        assert_eq!(
+            first.manifest().external_sources["external/0000/src/lib.rs"],
+            format!("{:x}", Sha256::digest("alpha source"))
+        );
+        assert_eq!(
+            first.manifest().external_sources["external/0001/src/lib.rs"],
+            format!("{:x}", Sha256::digest("zulu source"))
+        );
+    }
+
+    #[test]
     fn indexed_refresh_falls_back_after_overflow_and_dirty_queue_limit() {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("main.rs"), "first").unwrap();
@@ -1873,6 +2650,103 @@ mod tests {
         let next = index.refresh(1).unwrap();
         assert_eq!(next.kind, Some(IndexedRefreshKind::FallbackFullScan));
         assert_eq!(next.hashed_files, 1);
+    }
+
+    #[test]
+    fn local_temporary_filesystem_is_classified_for_incremental_indexing() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(filesystem_incremental_policy(root.path()), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_network_and_unknown_filesystems_disable_metadata_reuse() {
+        assert!(macos_filesystem_policy("nfs").is_some());
+        assert!(macos_filesystem_policy("smbfs").is_some());
+        assert!(macos_filesystem_policy("unrecognized").is_some());
+        assert!(macos_filesystem_policy("exfat").is_some());
+        assert!(macos_filesystem_policy("msdos").is_some());
+        assert_eq!(macos_filesystem_policy("apfs"), None);
+        assert_eq!(macos_filesystem_policy("hfs"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_network_and_unknown_filesystems_disable_metadata_reuse() {
+        assert!(linux_filesystem_policy(libc::NFS_SUPER_MAGIC as u64).is_some());
+        assert!(linux_filesystem_policy(libc::SMB_SUPER_MAGIC as u64).is_some());
+        assert!(linux_filesystem_policy(libc::FUSE_SUPER_MAGIC as u64).is_some());
+        assert_eq!(linux_filesystem_policy(libc::EXT4_SUPER_MAGIC as u64), None);
+        assert_eq!(linux_filesystem_policy(0x00004d44), None);
+        assert_eq!(linux_filesystem_policy(0x2011_bab0), None);
+        assert!(linux_filesystem_policy(0x0102_1997).is_some());
+        assert!(linux_filesystem_policy(0x7472_6976).is_some());
+        assert!(linux_filesystem_policy(0xdeadbeef).is_some());
+    }
+
+    #[test]
+    fn external_cargo_build_script_forces_root_rescans() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        fs::write(
+            external.path().join("Cargo.toml"),
+            "[package]\nname='dep'\nversion='0.1.0'\nbuild='build.rs'\n",
+        )
+        .unwrap();
+        fs::write(external.path().join("build.rs"), "fn main() {}\n").unwrap();
+        fs::write(external.path().join("build-input.txt"), "one").unwrap();
+        let scope = CargoInputScope {
+            workspace_root: fs::canonicalize(workspace.path())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            external_path_dependencies: vec![ExternalPathDependency {
+                root: fs::canonicalize(external.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                manifest_path: fs::canonicalize(external.path().join("Cargo.toml"))
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                package_ids: vec!["path+file:///dependency#dep@0.1.0".into()],
+            }],
+        };
+        let mut index = IndexedInputs::new_with_cargo_scope(workspace.path(), &scope).unwrap();
+        assert!(!index.is_index_disabled());
+        index.refresh(1).unwrap();
+        let input = external.path().join("build-input.txt");
+        fs::write(&input, "two").unwrap();
+        index.mark_dirty(&input);
+        let refresh = index.refresh(1).unwrap();
+        assert_eq!(refresh.kind, Some(IndexedRefreshKind::Incremental));
+        assert_eq!(refresh.hashed_files, 3);
+        assert_eq!(
+            index.manifest().external_sources["external/0000/build-input.txt"],
+            format!("{:x}", Sha256::digest("two"))
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_unknown_and_remote_drive_types_disable_metadata_reuse() {
+        use windows_sys::Win32::System::WindowsProgramming::{
+            DRIVE_FIXED, DRIVE_REMOTE, DRIVE_UNKNOWN,
+        };
+
+        assert_eq!(windows_drive_policy(DRIVE_FIXED), None);
+        assert!(windows_drive_policy(DRIVE_REMOTE).is_some());
+        assert!(windows_drive_policy(DRIVE_UNKNOWN).is_some());
+        assert!(windows_path_is_unc(Path::new(r"\\server\share\project")));
+        assert!(windows_path_is_unc(Path::new(
+            r"\\?\UNC\server\share\project"
+        )));
+        assert!(!windows_path_is_unc(Path::new(r"\\?\D:\a\project")));
+        assert!(!windows_path_is_unc(Path::new(r"D:\a\project")));
+        assert_eq!(
+            windows_drive_root(Path::new(r"\\?\D:\a\project")),
+            Some("D:\\".encode_utf16().chain([0]).collect())
+        );
     }
 
     #[test]
@@ -1983,7 +2857,9 @@ mod tests {
             (initial_oracle, initial_oracle_metrics),
             initial_oracle_wall_ns,
             initial_oracle_cpu_ns,
-        ) = benchmark_measure(|| Inputs::scan_stable_with_metrics(root.path(), 2).unwrap());
+        ) = benchmark_measure(|| {
+            scan_input_roots_stable(&[workspace_indexed_root(root.path())], 2).unwrap()
+        });
         assert_eq!(indexed.manifest(), &initial_oracle);
 
         let mut samples = Vec::with_capacity(warmup_pairs + measured_pairs);
@@ -2011,8 +2887,9 @@ mod tests {
                 oracle_cpu_ns,
             ) = if indexed_first {
                 let (refresh, wall, cpu) = benchmark_measure(|| indexed.refresh(2).unwrap());
-                let ((manifest, metrics), oracle_wall, oracle_cpu) =
-                    benchmark_measure(|| Inputs::scan_stable_with_metrics(root.path(), 2).unwrap());
+                let ((manifest, metrics), oracle_wall, oracle_cpu) = benchmark_measure(|| {
+                    scan_input_roots_stable(&[workspace_indexed_root(root.path())], 2).unwrap()
+                });
                 (
                     refresh,
                     wall,
@@ -2023,8 +2900,9 @@ mod tests {
                     oracle_cpu,
                 )
             } else {
-                let ((manifest, metrics), oracle_wall, oracle_cpu) =
-                    benchmark_measure(|| Inputs::scan_stable_with_metrics(root.path(), 2).unwrap());
+                let ((manifest, metrics), oracle_wall, oracle_cpu) = benchmark_measure(|| {
+                    scan_input_roots_stable(&[workspace_indexed_root(root.path())], 2).unwrap()
+                });
                 let (refresh, wall, cpu) = benchmark_measure(|| indexed.refresh(2).unwrap());
                 (
                     refresh,
@@ -2122,7 +3000,7 @@ mod tests {
                 "warmup_pairs": warmup_pairs,
                 "measurement_pairs": measured_pairs,
                 "order": "alternating; file edit and mtime restoration excluded from scan timings",
-                "oracle": "Inputs::scan_stable_with_metrics(max_rescans=2)",
+                "oracle": "stable full content scan (max_rescans=2)",
             },
             "initial_scan": {
                 "indexed_wall_ns": initial_index_wall_ns,
@@ -2310,12 +3188,12 @@ mod tests {
                     None,
                 ),
                 package(
-                    "path+file:///dependencies/z-package#z-package@0.1.0",
+                    "path+file:///dependencies/z-package#a-package@0.1.0",
                     &dependencies.path().join("z-package/Cargo.toml"),
                     None,
                 ),
                 package(
-                    "path+file:///dependencies/a-package#a-package@0.1.0",
+                    "path+file:///dependencies/a-package#z-package@0.1.0",
                     &dependencies.path().join("a-package/Cargo.toml"),
                     None,
                 ),
@@ -2346,7 +3224,104 @@ mod tests {
         );
         assert_eq!(
             scope.external_path_dependencies[0].package_ids,
-            vec!["path+file:///dependencies/a-package#a-package@0.1.0"]
+            vec!["path+file:///dependencies/a-package#z-package@0.1.0"]
+        );
+    }
+
+    #[test]
+    fn external_packages_with_duplicate_stable_identities_are_rejected() {
+        let workspace = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for (root, package_name) in [(first.path(), "first"), (second.path(), "second")] {
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("[package]\nname='{package_name}'\nversion='0.1.0'\n"),
+            )
+            .unwrap();
+        }
+        let scope = CargoInputScope {
+            workspace_root: fs::canonicalize(workspace.path())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            external_path_dependencies: [first.path(), second.path()]
+                .into_iter()
+                .map(|root| ExternalPathDependency {
+                    root: fs::canonicalize(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    manifest_path: fs::canonicalize(root.join("Cargo.toml"))
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    package_ids: vec![
+                        "path+file:///different/location#same-package@0.1.0".to_string(),
+                    ],
+                })
+                .collect(),
+        };
+
+        let error =
+            indexed_roots_for_cargo_scope(&fs::canonicalize(workspace.path()).unwrap(), &scope)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ambiguous stable package identities")
+        );
+    }
+
+    #[test]
+    fn nested_external_packages_share_one_indexed_root() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let nested = external.path().join("member");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            external.path().join("Cargo.toml"),
+            "[package]\nname='outer'\nversion='0.1.0'\n[workspace]\nmembers=['member']\n",
+        )
+        .unwrap();
+        fs::write(
+            nested.join("Cargo.toml"),
+            "[package]\nname='inner'\nversion='0.1.0'\nbuild='build.rs'\n",
+        )
+        .unwrap();
+        fs::write(nested.join("build.rs"), "fn main() {}\n").unwrap();
+        fs::write(nested.join("input.txt"), "outer scan sees nested package").unwrap();
+        let dependency = |root: &Path, package_id: &str| ExternalPathDependency {
+            root: fs::canonicalize(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            manifest_path: fs::canonicalize(root.join("Cargo.toml"))
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            package_ids: vec![format!("path+file:///external#{package_id}@0.1.0")],
+        };
+        let scope = CargoInputScope {
+            workspace_root: fs::canonicalize(workspace.path())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            external_path_dependencies: vec![
+                dependency(external.path(), "outer"),
+                dependency(&nested, "inner"),
+            ],
+        };
+
+        let mut index = IndexedInputs::new_with_cargo_scope(workspace.path(), &scope).unwrap();
+        assert_eq!(index.watch_roots().len(), 2);
+        assert!(!index.is_index_disabled());
+        index.refresh(1).unwrap();
+        assert!(
+            index
+                .manifest()
+                .external_sources
+                .contains_key("external/0000/member/input.txt")
         );
     }
 
@@ -2614,5 +3589,84 @@ mod tests {
                 .unwrap()
                 .contains("../../external-lib")
         );
+    }
+
+    #[test]
+    fn frozen_external_slots_are_stable_and_avoid_workspace_path_collisions() {
+        let checkout = tempfile::tempdir().unwrap();
+        let workspace = checkout.path().join("workspace");
+        let dependencies = checkout.path().join("dependencies");
+        let first_external = dependencies.join("first");
+        let second_external = dependencies.join("second");
+        let destination_parent = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.join("app/src")).unwrap();
+        fs::create_dir_all(workspace.join("external/0000/src")).unwrap();
+        fs::create_dir_all(&first_external).unwrap();
+        fs::create_dir_all(&second_external).unwrap();
+        fs::write(
+            workspace.join("Cargo.toml"),
+            "[workspace]\nmembers=['app']\nresolver='2'\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("app/Cargo.toml"),
+            "[package]\nname='app'\nversion='0.1.0'\nedition='2024'\n\n[dependencies]\nfirst={path='../../dependencies/first'}\nsecond={path='../../dependencies/second'}\n",
+        )
+        .unwrap();
+        fs::write(workspace.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            workspace.join("external/0000/src/lib.rs"),
+            "workspace collision file",
+        )
+        .unwrap();
+        for (root, name) in [(&first_external, "first"), (&second_external, "second")] {
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("[package]\nname='{name}'\nversion='0.1.0'\n"),
+            )
+            .unwrap();
+            fs::write(root.join("src.rs"), name).unwrap();
+        }
+        let dependency = |root: &Path, name: &str| ExternalPathDependency {
+            root: root.to_string_lossy().into_owned(),
+            manifest_path: root.join("Cargo.toml").to_string_lossy().into_owned(),
+            package_ids: vec![format!("path+file:///dependencies#{name}@0.1.0")],
+        };
+        let scope = CargoInputScope {
+            workspace_root: fs::canonicalize(&workspace)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            external_path_dependencies: vec![
+                dependency(&second_external, "second"),
+                dependency(&first_external, "first"),
+            ],
+        };
+        let first_snapshot = destination_parent.path().join("snapshot-a");
+        let second_snapshot = destination_parent.path().join("snapshot-b");
+
+        let first =
+            Inputs::freeze_to_with_cargo_scope(&workspace, &first_snapshot, &scope, 1).unwrap();
+        let second =
+            Inputs::freeze_to_with_cargo_scope(&workspace, &second_snapshot, &scope, 1).unwrap();
+
+        assert_eq!(first.input_hash, second.input_hash);
+        assert_eq!(
+            first.path_relocations[0].snapshot_root,
+            "__gpui_external_0001__/0000"
+        );
+        assert!(first_snapshot.join("external/0000/src/lib.rs").is_file());
+        assert!(
+            first_snapshot
+                .join("__gpui_external_0001__/0000/src.rs")
+                .is_file()
+        );
+        assert!(
+            first.external_inputs[0]
+                .snapshot_root
+                .starts_with("__gpui_external_0001__/")
+        );
+        let frozen_external_roots = serde_json::to_string(&first.external_inputs).unwrap();
+        assert!(!frozen_external_roots.contains(checkout.path().to_str().unwrap()));
     }
 }
