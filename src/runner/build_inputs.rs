@@ -5,7 +5,7 @@ use super::output_layout::{BuildOutputLayout, BuildPlatform};
 use crate::devserver::inputs::{Inputs, NativeInputs};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -1742,13 +1742,14 @@ fn bounded_java_directory_fingerprint(
         return None;
     }
     let canonical_root = fs::canonicalize(root).ok()?;
-    let mut pending = vec![canonical_root.clone()];
-    let mut visited_directories = BTreeSet::new();
+    let mut pending = vec![(
+        PathBuf::new(),
+        canonical_root.clone(),
+        vec![canonical_root.clone()],
+    )];
     let mut entries = Vec::new();
-    while let Some(directory) = pending.pop() {
-        if !visited_directories.insert(directory.clone()) {
-            continue;
-        }
+    let mut file_hashes = BTreeMap::<PathBuf, String>::new();
+    while let Some((logical_directory, directory, ancestors)) = pending.pop() {
         let mut children = fs::read_dir(&directory)
             .ok()?
             .map(|entry| entry.ok())
@@ -1756,53 +1757,77 @@ fn bounded_java_directory_fingerprint(
         children.sort_by_key(|entry| entry.file_name());
         for entry in children {
             let path = entry.path();
-            let relative = path.strip_prefix(&canonical_root).ok()?;
-            let relative = relative.to_str()?.replace('\\', "/");
+            let name = entry.file_name();
+            let logical_path = logical_directory.join(name);
+            let relative = logical_path.to_str()?.replace('\\', "/");
             let metadata = fs::symlink_metadata(&path).ok()?;
             let file_type = metadata.file_type();
             if file_type.is_symlink() {
                 let resolved = fs::canonicalize(&path).ok()?;
-                if !resolved.starts_with(&canonical_root) {
-                    return None;
-                }
                 let resolved_metadata = fs::symlink_metadata(&resolved).ok()?;
                 if !resolved_metadata.is_dir() && !resolved_metadata.is_file() {
                     return None;
                 }
-                let target = resolved
-                    .strip_prefix(&canonical_root)
-                    .ok()?
-                    .to_str()?
-                    .replace('\\', "/");
+                let target = if resolved.starts_with(&canonical_root) {
+                    "internal-link"
+                } else if resolved_metadata.is_dir() {
+                    "external-directory-link"
+                } else if resolved_metadata.is_file() {
+                    "external-file-link"
+                } else {
+                    return None;
+                };
                 budget.record(0)?;
-                entries.push((
-                    relative,
-                    resolved.clone(),
-                    b'l',
-                    Some(target),
-                    resolved_metadata.is_file(),
-                ));
+                entries.push((relative.clone(), b'l', Some(target), None));
                 if resolved_metadata.is_dir() {
-                    pending.push(resolved);
+                    if ancestors.contains(&resolved) {
+                        return None;
+                    }
+                    let mut child_ancestors = ancestors.clone();
+                    child_ancestors.push(resolved.clone());
+                    pending.push((logical_path, resolved, child_ancestors));
+                } else if resolved_metadata.is_file() {
+                    let content_hash = if let Some(hash) = file_hashes.get(&resolved) {
+                        hash.clone()
+                    } else {
+                        budget.record(resolved_metadata.len())?;
+                        let hash = hash_file_contents(&resolved).ok()?;
+                        file_hashes.insert(resolved, hash.clone());
+                        hash
+                    };
+                    entries.push((relative, b'h', None, Some(content_hash)));
                 }
             } else if metadata.is_dir() {
                 budget.record(0)?;
-                entries.push((relative, path.clone(), b'd', None, false));
-                pending.push(path);
+                entries.push((relative, b'd', None, None));
+                let canonical = fs::canonicalize(&path).ok()?;
+                if ancestors.contains(&canonical) {
+                    return None;
+                }
+                let mut child_ancestors = ancestors.clone();
+                child_ancestors.push(canonical.clone());
+                pending.push((logical_path, canonical, child_ancestors));
             } else if metadata.is_file() {
-                budget.record(0)?;
-                entries.push((relative, path, b'f', None, true));
+                let resolved = fs::canonicalize(&path).ok()?;
+                let content_hash = if let Some(hash) = file_hashes.get(&resolved) {
+                    hash.clone()
+                } else {
+                    budget.record(metadata.len())?;
+                    let hash = hash_file_contents(&resolved).ok()?;
+                    file_hashes.insert(resolved, hash.clone());
+                    hash
+                };
+                entries.push((relative, b'f', None, Some(content_hash)));
             } else {
                 return None;
             }
         }
     }
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
 
     let mut digest = Sha256::new();
-    let mut file_hashes = BTreeMap::<PathBuf, String>::new();
     digest.update(domain);
-    for (relative, path, kind, target, is_file) in entries {
+    for (relative, kind, target, content_hash) in entries {
         digest.update([kind]);
         digest.update((relative.len() as u64).to_be_bytes());
         digest.update(relative.as_bytes());
@@ -1810,16 +1835,7 @@ fn bounded_java_directory_fingerprint(
             digest.update((target.len() as u64).to_be_bytes());
             digest.update(target.as_bytes());
         }
-        if is_file {
-            let content_hash = if let Some(hash) = file_hashes.get(&path) {
-                hash.clone()
-            } else {
-                let metadata = fs::metadata(&path).ok()?;
-                budget.record(metadata.len())?;
-                let hash = hash_file_contents(&path).ok()?;
-                file_hashes.insert(path, hash.clone());
-                hash
-            };
+        if let Some(content_hash) = content_hash {
             digest.update(content_hash.as_bytes());
         }
     }
@@ -3024,7 +3040,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn android_java_runtime_fingerprint_rejects_symlinks_escaping_the_root() {
+    fn android_java_runtime_fingerprint_allows_external_file_links_without_paths() {
         use std::os::unix::fs::symlink;
 
         let java_root = tempfile::tempdir().unwrap();
@@ -3037,7 +3053,38 @@ mod tests {
         )
         .unwrap();
 
-        assert!(java_runtime_fingerprint(java_root.path()).is_none());
+        let fingerprint = java_runtime_fingerprint(java_root.path()).unwrap();
+        assert!(!fingerprint.contains(&outside.path().display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_java_runtime_fingerprint_tracks_external_directory_links() {
+        use std::os::unix::fs::symlink;
+
+        let java_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(java_root.path().join("lib")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("nested")).unwrap();
+        fs::write(
+            outside.path().join("nested/runtime.properties"),
+            b"runtime-v1",
+        )
+        .unwrap();
+        symlink(
+            outside.path().join("nested"),
+            java_root.path().join("lib/nested"),
+        )
+        .unwrap();
+
+        let first = java_runtime_fingerprint(java_root.path()).unwrap();
+        assert!(!first.contains(&outside.path().display().to_string()));
+        fs::write(
+            outside.path().join("nested/runtime.properties"),
+            b"runtime-v2",
+        )
+        .unwrap();
+        assert_ne!(first, java_runtime_fingerprint(java_root.path()).unwrap());
     }
 
     #[test]
