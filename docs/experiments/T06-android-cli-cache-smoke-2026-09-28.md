@@ -3,7 +3,8 @@
 状态：PR #257 将 Gradle 9.4.1 官方 distribution SHA-256 纳入生成模板，并要求有效 wrapper checksum
 才允许复用 artifact cache；PR #259 又将动态/changing Gradle dependency 作为 cache bypass 条件；
 PR #261 将当前 host NDK 编译器和链接器内容纳入 Android toolchain fingerprint；PR #263 再纳入
-host sysroot 和 Clang builtin headers 内容。
+host sysroot 和 Clang builtin headers 内容；PR #265 又纳入项目实际选定的 SDK platform 与
+build-tools package 内容。
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -25,6 +26,10 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   (`1.+`)、版本范围、SNAPSHOT、latest 和 changing-module resolution 会输出 cache miss reason。
   普通 app `src/main/java`/`src/main/kotlin` 源码不在该依赖规则扫描中，避免把 ABI 集合或 API 文本
   中的 `+` 误判为动态版本。
+- Android toolchain fingerprint 从项目 Gradle app 的字面量 `compileSdk` 选择对应 platform；显式
+  `buildToolsVersion` 选择对应 build-tools，否则选择 SDK 中最新的数值版本。只对这些实际选定
+  package 做相对路径、entry type 和内容摘要，并与 NDK 资源扫描共享 100,000 entries/512 MiB 预算；
+  动态/无法解析的选择、缺包、软链接、special entry、读取失败或超预算只关闭 cache reuse。
 
 ## 证据
 
@@ -44,6 +49,11 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   `buildSrc`/`build-logic` 插件源码，并用固定版本、动态版本、版本范围、SNAPSHOT/latest、
   changing-module 及三种插件语言回归锁定边界。最终 PR 与 push 两套 Linux/macOS/Windows、
   Android/desktop template、baseline-driver CI 全绿；#259 squash 为 `35b0afc`，无版本发布或 tag。
+- PR #265 首轮 Android 强制 toolchain probe 暴露“扫描所有已安装 SDK package”会把未使用包和
+  预算混入 active identity；修正为只扫描项目选定的 platform/build-tools，并增加内容替换、未使用
+  package 忽略、显式/默认 build-tools、动态选择拒绝、软链接和有界预算回归。最终 PR 与 push 两套
+  Linux/macOS/Windows、Android/desktop template、baseline-driver CI 全绿，Android 生成/打包验证
+  通过；#265 squash 为 `2a713da`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -65,3 +75,7 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   fingerprint；不记录绝对安装路径。扫描上限为 100,000 个 filesystem entries / 512 MiB，软链接、
 special file、读取失败或超过上限会禁用 cache reuse，但普通构建继续。强制 fingerprint 测试约 9.6 秒。
   这不哈希整个 NDK、非活动 host、AGP/plugin resolved artifacts 或任意 build-script I/O。
+- PR #265 仅摘要项目实际选定的 SDK platform/build-tools package，不扫描 SDK 中未使用的安装包；
+  同一 package revision 下的文件替换会改变 fingerprint。Gradle SDK 选择必须是可安全解析的字面量，
+  动态/无法解析时保持 cache bypass；该切片仍不验证 AGP/plugin resolved artifacts、远端仓库状态或
+  任意 build-script I/O。

@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-03，主分支 `8777b8d`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-03，主分支 `2a713da`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -448,6 +448,13 @@ PR #263 再将当前 host 的 NDK sysroot 与 Clang builtin headers 的相对路
 纳入 fingerprint；符号链接、special file、不可读内容或树规模超过 100,000 entries/512 MiB 时只
 关闭 cache reuse，不阻止构建。active macOS NDK 的整套 toolchain probe 约 9.6 秒。AGP/plugin
 解析产物及任意 build-script I/O 仍未进入输入闭包。
+PR #265 又将项目实际选定的 Android SDK platform 与 build-tools package 纳入内容 fingerprint：
+按项目 Gradle app 的字面量 `compileSdk` 选择 `platforms/android-*`，显式字面量
+`buildToolsVersion` 优先，否则选择 SDK 中最新数值版本；只摘要这些 package 的相对路径、entry type
+和文件内容，并与 NDK 目录扫描共享 100,000 entries/512 MiB 有界预算。动态/无法解析的选择、缺包、
+软链接、special entry、读取失败或超预算只关闭 cache reuse，不阻止普通构建，也不扫描未使用的已安装
+package。该切片仍不闭合 AGP/plugin resolved artifacts 或任意 build-script I/O；记录见
+[T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
 iOS key 另纳入当前 Xcode build 与目标 SDK version/build 指纹；身份不可读时关闭 simulator
 cache hit，记录见
 [M04 iOS Xcode/SDK fingerprint](../experiments/M04-ios-xcode-sdk-fingerprint-2026-09-28.md)。
@@ -880,6 +887,11 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 build 另已接入 output-root lock、`.build-owner.json` ownership record 和支持目标的 preview/check
 coordinator；有界预热仍拟议。遵循 M04 BuildKey；现有切片与输入遗漏见 M04 和
 [当前审计](current-status.md)。
+
+Android toolchain identity 目前还会对项目选定的 SDK platform/build-tools package 做有界内容摘要；
+同一 package revision 下替换文件会导致 cache miss，无法安全解析项目选择或完整读取 package 时只
+禁用 cache reuse。该内容闭包不包括所有已安装 SDK package、AGP/plugin resolved artifacts 或任意
+build-script I/O；有界预热仍未实现。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
