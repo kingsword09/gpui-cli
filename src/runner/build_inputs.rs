@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -91,6 +91,23 @@ const ANDROID_SIGNING_MARKERS: &[&str] = &[
     "storePassword",
     "keyAlias",
     "keyPassword",
+];
+const ANDROID_GRADLE_GLOBAL_CONFIG_CACHE_DISABLED_REASON: &str =
+    "Android global Gradle configuration is not modeled; cache reuse is disabled";
+const ANDROID_GRADLE_GLOBAL_ENVIRONMENT_NAMES: &[&str] = &[
+    "GRADLE_HOME",
+    "GRADLE_OPTS",
+    "JAVA_OPTS",
+    "JAVA_TOOL_OPTIONS",
+    "JAVACMD",
+    "JDK_JAVA_OPTIONS",
+    "_JAVA_OPTIONS",
+];
+const ANDROID_GRADLE_USER_CONFIG_PATHS: &[&str] = &[
+    "gradle.properties",
+    "init.gradle",
+    "init.gradle.kts",
+    "init.d",
 ];
 
 /// A stable Cargo workspace copy whose lifetime is bound to a build command.
@@ -951,6 +968,8 @@ pub fn android_preview_cache_policy(
         android_gradle_verification_cache_disabled_reason(&root, &native);
     let dynamic_dependency_disabled_reason =
         android_dynamic_dependency_cache_disabled_reason(&root, &native)?;
+    let global_configuration_disabled_reason =
+        android_gradle_global_configuration_cache_disabled_reason(&root);
     let signing_policy = android_cache_signing_policy(&root, release, &mut native)?;
     let (_, rustc_fingerprint) = rustc_identity()?;
     let (_, toolchain_disabled_reason) = bind_android_toolchain_identity(
@@ -970,6 +989,7 @@ pub fn android_preview_cache_policy(
             wrapper_disabled_reason,
             verification_disabled_reason,
             dynamic_dependency_disabled_reason,
+            global_configuration_disabled_reason,
             signing_disabled_reason,
             build_script_disabled_reason,
         ]),
@@ -1053,6 +1073,8 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         android_gradle_verification_cache_disabled_reason(&snapshot.root, &native);
     let dynamic_dependency_disabled_reason =
         android_dynamic_dependency_cache_disabled_reason(&snapshot.root, &native)?;
+    let global_configuration_disabled_reason =
+        android_gradle_global_configuration_cache_disabled_reason(&snapshot.root);
     native
         .excluded_sensitive_files
         .extend(snapshot.manifest.excluded_sensitive_files.iter().cloned());
@@ -1072,6 +1094,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         wrapper_disabled_reason,
         verification_disabled_reason,
         dynamic_dependency_disabled_reason,
+        global_configuration_disabled_reason,
         signing_policy.disabled_reason,
         build_script_disabled_reason,
     ]);
@@ -1215,6 +1238,106 @@ fn android_gradle_wrapper_cache_disabled_reason(
             "Android Gradle wrapper distribution checksum is missing or invalid; cache reuse is disabled"
                 .into()
         }))
+}
+
+fn android_gradle_global_configuration_cache_disabled_reason(root: &Path) -> Option<String> {
+    let gradle_user_home = android_gradle_user_home(
+        root,
+        env::var_os("GRADLE_USER_HOME").as_deref(),
+        android_default_user_home().as_deref(),
+    );
+    android_gradle_global_configuration_cache_disabled_reason_for(
+        gradle_user_home.as_deref(),
+        has_unmodeled_android_gradle_environment(env::vars_os()),
+    )
+}
+
+fn android_gradle_global_configuration_cache_disabled_reason_for(
+    gradle_user_home: Option<&Path>,
+    has_unmodeled_environment: bool,
+) -> Option<String> {
+    if has_unmodeled_environment
+        || gradle_user_home.is_none()
+        || gradle_user_home.is_some_and(android_gradle_user_configuration_is_present)
+    {
+        Some(ANDROID_GRADLE_GLOBAL_CONFIG_CACHE_DISABLED_REASON.into())
+    } else {
+        None
+    }
+}
+
+fn android_default_user_home() -> Option<OsString> {
+    #[cfg(windows)]
+    let home = env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = env::var_os("HOME");
+    home
+}
+
+fn android_gradle_user_home(
+    root: &Path,
+    gradle_user_home: Option<&OsStr>,
+    default_user_home: Option<&OsStr>,
+) -> Option<PathBuf> {
+    let path = match gradle_user_home {
+        Some(path) => {
+            if path == OsStr::new("") {
+                return None;
+            }
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                root.join("mobile/android/gradle").join(path)
+            }
+        }
+        None => {
+            let home = PathBuf::from(default_user_home?);
+            if !home.is_absolute() {
+                return None;
+            }
+            home.join(".gradle")
+        }
+    };
+    path.is_absolute().then_some(path)
+}
+
+fn android_gradle_user_configuration_is_present(gradle_user_home: &Path) -> bool {
+    match fs::symlink_metadata(gradle_user_home) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if fs::metadata(gradle_user_home).is_err() {
+                return true;
+            }
+        }
+        Ok(metadata) if !metadata.is_dir() => return true,
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    }
+
+    ANDROID_GRADLE_USER_CONFIG_PATHS.iter().any(|relative| {
+        match fs::symlink_metadata(gradle_user_home.join(relative)) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => true,
+        }
+    })
+}
+
+fn has_unmodeled_android_gradle_environment(
+    variables: impl IntoIterator<Item = (OsString, OsString)>,
+) -> bool {
+    variables.into_iter().any(|(name, _)| {
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        ANDROID_GRADLE_GLOBAL_ENVIRONMENT_NAMES
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+            || name
+                .get(.."ORG_GRADLE_PROJECT_".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ORG_GRADLE_PROJECT_"))
+    })
 }
 
 fn android_gradle_verification_cache_disabled_reason(
@@ -4375,6 +4498,81 @@ mod tests {
                 .is_some_and(|path| path.ends_with("gradle-build"))
         );
         assert_eq!(first.key_hash.len(), 64);
+    }
+
+    #[test]
+    fn android_gradle_global_user_configuration_disables_cache_reuse_without_reading_it() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join("caches")).unwrap();
+        fs::create_dir_all(home.path().join("wrapper/dists")).unwrap();
+        assert!(!android_gradle_user_configuration_is_present(home.path()));
+
+        for relative in ["gradle.properties", "init.gradle", "init.gradle.kts"] {
+            let path = home.path().join(relative);
+            fs::write(&path, "password=do-not-disclose\n").unwrap();
+            assert!(android_gradle_user_configuration_is_present(home.path()));
+            fs::remove_file(path).unwrap();
+        }
+
+        fs::create_dir(home.path().join("init.d")).unwrap();
+        assert!(android_gradle_user_configuration_is_present(home.path()));
+
+        let reason =
+            android_gradle_global_configuration_cache_disabled_reason_for(Some(home.path()), false)
+                .unwrap();
+        assert_eq!(reason, ANDROID_GRADLE_GLOBAL_CONFIG_CACHE_DISABLED_REASON);
+        assert!(!reason.contains("do-not-disclose"));
+        assert!(!reason.contains(home.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn android_gradle_global_cache_gate_fails_closed_for_unknown_home_and_environment() {
+        assert!(
+            android_gradle_global_configuration_cache_disabled_reason_for(None, false).is_some()
+        );
+
+        let home = tempfile::tempdir().unwrap();
+        assert!(
+            android_gradle_global_configuration_cache_disabled_reason_for(Some(home.path()), true,)
+                .is_some()
+        );
+
+        for name in [
+            "GRADLE_HOME",
+            "GRADLE_OPTS",
+            "JAVA_OPTS",
+            "JAVA_TOOL_OPTIONS",
+            "JAVACMD",
+            "JDK_JAVA_OPTIONS",
+            "_JAVA_OPTIONS",
+            "ORG_GRADLE_PROJECT_signingPassword",
+        ] {
+            assert!(has_unmodeled_android_gradle_environment([(
+                OsString::from(name),
+                OsString::from("secret-value"),
+            )]));
+        }
+        assert!(!has_unmodeled_android_gradle_environment([(
+            OsString::from("GRADLE_USER_HOME"),
+            OsString::from("/private/gradle-home"),
+        )]));
+    }
+
+    #[test]
+    fn android_gradle_user_home_resolves_override_and_default() {
+        let project = tempfile::tempdir().unwrap();
+        let default_home = tempfile::tempdir().unwrap();
+        let gradle_dir = project.path().join("mobile/android/gradle");
+
+        assert_eq!(
+            android_gradle_user_home(project.path(), Some(OsStr::new("custom-home")), None,),
+            Some(gradle_dir.join("custom-home"))
+        );
+        assert_eq!(
+            android_gradle_user_home(project.path(), None, Some(default_home.path().as_os_str()),),
+            Some(default_home.path().join(".gradle"))
+        );
+        assert!(android_gradle_user_home(project.path(), Some(OsStr::new("")), None).is_none());
     }
 
     #[test]
