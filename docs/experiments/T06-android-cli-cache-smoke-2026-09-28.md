@@ -2,7 +2,8 @@
 
 状态：PR #257 将 Gradle 9.4.1 官方 distribution SHA-256 纳入生成模板，并要求有效 wrapper checksum
 才允许复用 artifact cache；PR #259 又将动态/changing Gradle dependency 作为 cache bypass 条件；
-PR #261 将当前 host NDK 编译器和链接器内容纳入 Android toolchain fingerprint。
+PR #261 将当前 host NDK 编译器和链接器内容纳入 Android toolchain fingerprint；PR #263 再纳入
+host sysroot 和 Clang builtin headers 内容。
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -58,4 +59,9 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 - NDK fingerprint 现在包含当前 host prebuilt 的 clang/clang++、lld/ld.lld、LLVM archiver/inspection
   tools 和 ABI-specific clang launcher 的 link target/content hash；sha2 汇编优化只用于非 Windows，
   Windows MSVC 使用纯 Rust fallback。活跃 macOS NDK 环境测试约 5 秒，canonical target hash 去重。
-  这不包含 NDK sysroot、headers/libraries、AGP/plugin resolved artifacts 或任意 build-script I/O。
+  #261 当时还不包含 NDK sysroot/header；该边界由下述 #263 进一步覆盖。AGP/plugin resolved artifacts
+  和任意 build-script I/O 仍未纳入。
+- PR #263 将当前 host 的 NDK `sysroot` 和 Clang `lib/clang/*/include` 纳入相对路径/文件类型/内容
+  fingerprint；不记录绝对安装路径。扫描上限为 100,000 个 filesystem entries / 512 MiB，软链接、
+special file、读取失败或超过上限会禁用 cache reuse，但普通构建继续。强制 fingerprint 测试约 9.6 秒。
+  这不哈希整个 NDK、非活动 host、AGP/plugin resolved artifacts 或任意 build-script I/O。
