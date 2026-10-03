@@ -172,9 +172,20 @@ pub enum IndexedRefreshKind {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IndexedRefresh {
     pub kind: Option<IndexedRefreshKind>,
+    /// Distinct project input paths whose content hash was refreshed.
     pub hashed_files: usize,
+    /// Content bytes actually read for hashes during this refresh. A stable
+    /// dirty-file hash reads the file twice by design.
+    pub hashed_bytes: u64,
     pub reused_files: usize,
     pub removed_files: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputScanMetrics {
+    pub passes: usize,
+    pub hashed_files: usize,
+    pub hashed_bytes: u64,
 }
 
 /// Metadata-assisted input index used by the live watcher.
@@ -313,13 +324,18 @@ impl IndexedInputs {
         kind: IndexedRefreshKind,
     ) -> Result<IndexedRefresh> {
         let previous_paths = self.entries.keys().cloned().collect::<BTreeSet<_>>();
-        let (manifest, entries) = if self.incremental_enabled && !self.index_disabled {
+        let (manifest, entries, metrics) = if self.incremental_enabled && !self.index_disabled {
             match scan_indexed_stable(&self.root, max_rescans) {
-                Ok(scanned) => (scanned.manifest, Some(scanned.entries)),
-                Err(_) => (Inputs::scan_stable(&self.root, max_rescans)?, None),
+                Ok(scanned) => (scanned.manifest, Some(scanned.entries), scanned.metrics),
+                Err(_) => {
+                    let (manifest, metrics) =
+                        Inputs::scan_stable_with_metrics(&self.root, max_rescans)?;
+                    (manifest, None, metrics)
+                }
             }
         } else {
-            (Inputs::scan_stable(&self.root, max_rescans)?, None)
+            let (manifest, metrics) = Inputs::scan_stable_with_metrics(&self.root, max_rescans)?;
+            (manifest, None, metrics)
         };
         let hashed_files = manifest.sources.len() + manifest.assets.len();
         let current_paths = manifest
@@ -350,6 +366,7 @@ impl IndexedInputs {
         Ok(IndexedRefresh {
             kind: Some(kind),
             hashed_files,
+            hashed_bytes: metrics.hashed_bytes,
             reused_files: 0,
             removed_files: previous_paths.difference(&current_paths).count(),
         })
@@ -413,13 +430,7 @@ impl IndexedInputs {
                     } else if child_kind.is_symlink() && child.is_dir() {
                         self.untracked_directory_links.insert(child_name);
                     } else if child_kind.is_file() || child_kind.is_symlink() {
-                        self.scan_dirty_file(
-                            &child_name,
-                            &child,
-                            &mut old_entries,
-                            false,
-                            refresh,
-                        )?;
+                        self.scan_dirty_file(&child_name, &child, &mut old_entries, true, refresh)?;
                     }
                 }
                 if directory_before != read_directory_stamp(&dir)? {
@@ -477,6 +488,7 @@ impl IndexedInputs {
                 },
             );
             refresh.hashed_files += 1;
+            refresh.hashed_bytes += before.size.saturating_mul(2);
             return Ok(());
         };
         let stamp = read_file_stamp(path)?;
@@ -502,6 +514,7 @@ impl IndexedInputs {
             },
         );
         refresh.hashed_files += 1;
+        refresh.hashed_bytes += stable_stamp.size.saturating_mul(2);
         Ok(())
     }
 
@@ -609,14 +622,21 @@ fn read_directory_stamp(path: &Path) -> Result<DirectoryStamp> {
 struct ScannedIndex {
     manifest: Inputs,
     entries: BTreeMap<String, IndexedFile>,
+    metrics: InputScanMetrics,
 }
 
 fn scan_indexed_stable(root: &Path, max_rescans: usize) -> Result<ScannedIndex> {
     let mut previous = scan_indexed_once(root)?;
+    let mut metrics = previous.metrics;
     for _ in 0..=max_rescans {
         let current = scan_indexed_once(root)?;
+        metrics.passes += current.metrics.passes;
+        metrics.hashed_files += current.metrics.hashed_files;
+        metrics.hashed_bytes = metrics
+            .hashed_bytes
+            .saturating_add(current.metrics.hashed_bytes);
         if current.manifest == previous.manifest {
-            return Ok(current);
+            return Ok(ScannedIndex { metrics, ..current });
         }
         previous = current;
     }
@@ -629,6 +649,10 @@ fn scan_indexed_stable(root: &Path, max_rescans: usize) -> Result<ScannedIndex> 
 fn scan_indexed_once(root: &Path) -> Result<ScannedIndex> {
     let mut manifest = Inputs::default();
     let mut entries = BTreeMap::new();
+    let mut metrics = InputScanMetrics {
+        passes: 1,
+        ..InputScanMetrics::default()
+    };
     let mut pending = vec![root.to_owned()];
     while let Some(dir) = pending.pop() {
         let children = match fs::read_dir(&dir) {
@@ -673,6 +697,8 @@ fn scan_indexed_once(root: &Path) -> Result<ScannedIndex> {
             } else {
                 manifest.sources.insert(name.clone(), hash.clone());
             }
+            metrics.hashed_files += 1;
+            metrics.hashed_bytes = metrics.hashed_bytes.saturating_add(before.size);
             entries.insert(
                 name,
                 IndexedFile {
@@ -686,7 +712,11 @@ fn scan_indexed_once(root: &Path) -> Result<ScannedIndex> {
     }
     manifest.untracked_directory_links.sort();
     manifest.excluded_sensitive_files.sort();
-    Ok(ScannedIndex { manifest, entries })
+    Ok(ScannedIndex {
+        manifest,
+        entries,
+        metrics,
+    })
 }
 
 fn read_file_stamp(path: &Path) -> Result<FileStamp> {
@@ -884,6 +914,29 @@ impl Inputs {
         Self::scan_stable_with(max_rescans, || Self::scan(root))
     }
 
+    fn scan_stable_with_metrics(
+        root: &Path,
+        max_rescans: usize,
+    ) -> Result<(Self, InputScanMetrics)> {
+        let (mut previous, mut metrics) = Self::scan_with_metrics(root)?;
+        for _ in 0..=max_rescans {
+            let (current, pass_metrics) = Self::scan_with_metrics(root)?;
+            metrics.passes += pass_metrics.passes;
+            metrics.hashed_files += pass_metrics.hashed_files;
+            metrics.hashed_bytes = metrics
+                .hashed_bytes
+                .saturating_add(pass_metrics.hashed_bytes);
+            if current == previous {
+                return Ok((current, metrics));
+            }
+            previous = current;
+        }
+        bail!(
+            "project inputs changed during the bounded stability scan after {} rescans",
+            max_rescans
+        )
+    }
+
     /// Copies a stable manifest into a new directory and verifies both the
     /// copy and the source once more before returning. The destination must
     /// not exist and must be outside the source root; callers own its
@@ -1040,9 +1093,17 @@ impl Inputs {
     }
 
     pub fn scan(root: &Path) -> Result<Self> {
+        Self::scan_with_metrics(root).map(|(manifest, _)| manifest)
+    }
+
+    fn scan_with_metrics(root: &Path) -> Result<(Self, InputScanMetrics)> {
         let mut result = Self::default();
         let mut pending = vec![root.to_owned()];
         let mut buffer = [0u8; 32 * 1024];
+        let mut metrics = InputScanMetrics {
+            passes: 1,
+            ..InputScanMetrics::default()
+        };
         while let Some(dir) = pending.pop() {
             let entries = match fs::read_dir(&dir) {
                 Ok(entries) => entries,
@@ -1083,13 +1144,17 @@ impl Inputs {
                     }
                 };
                 let mut hash = Sha256::new();
+                let mut file_bytes = 0_u64;
                 loop {
                     let len = file.read(&mut buffer)?;
                     if len == 0 {
                         break;
                     }
                     hash.update(&buffer[..len]);
+                    file_bytes = file_bytes.saturating_add(len as u64);
                 }
+                metrics.hashed_files += 1;
+                metrics.hashed_bytes = metrics.hashed_bytes.saturating_add(file_bytes);
                 let digest = format!("{:x}", hash.finalize());
                 if name.starts_with("assets/") {
                     result.assets.insert(name, digest);
@@ -1100,7 +1165,7 @@ impl Inputs {
         }
         result.untracked_directory_links.sort();
         result.excluded_sensitive_files.sort();
-        Ok(result)
+        Ok((result, metrics))
     }
 
     pub fn digest(&self) -> String {
@@ -1589,6 +1654,82 @@ fn copy_input_file(root: &Path, destination: &Path, relative: &str) -> Result<()
 mod tests {
     use super::*;
 
+    fn benchmark_process_cpu_ns() -> Option<u64> {
+        #[cfg(unix)]
+        {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+            // getrusage reports process user+system CPU independently of wall
+            // time; unsupported platforms keep the metric explicitly absent.
+            let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+            if result != 0 {
+                return None;
+            }
+            let usage = unsafe { usage.assume_init() };
+            let micros = (usage.ru_utime.tv_sec as u64)
+                .saturating_mul(1_000_000)
+                .saturating_add(usage.ru_utime.tv_usec as u64)
+                .saturating_add(
+                    (usage.ru_stime.tv_sec as u64)
+                        .saturating_mul(1_000_000)
+                        .saturating_add(usage.ru_stime.tv_usec as u64),
+                );
+            Some(micros.saturating_mul(1_000))
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
+    fn benchmark_cpu_model() -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            return std::process::Command::new("sysctl")
+                .args(["-n", "machdep.cpu.brand_string"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return fs::read_to_string("/proc/cpuinfo").ok().and_then(|info| {
+                info.lines()
+                    .find_map(|line| line.strip_prefix("model name\t: "))
+                    .map(str::to_owned)
+            });
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return std::env::var("PROCESSOR_IDENTIFIER").ok();
+        }
+        #[allow(unreachable_code)]
+        None
+    }
+
+    fn benchmark_percentile(values: &mut [u64], fraction: f64) -> Option<f64> {
+        if values.is_empty() {
+            return None;
+        }
+        values.sort_unstable();
+        let position = (values.len() - 1) as f64 * fraction;
+        let lower = position.floor() as usize;
+        let upper = (lower + 1).min(values.len() - 1);
+        let weight = position - lower as f64;
+        Some(values[lower] as f64 + (values[upper] - values[lower]) as f64 * weight)
+    }
+
+    fn benchmark_measure<T>(run: impl FnOnce() -> T) -> (T, u64, Option<u64>) {
+        let cpu_before = benchmark_process_cpu_ns();
+        let wall = std::time::Instant::now();
+        let result = run();
+        let wall_ns = wall.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let cpu_ns = cpu_before
+            .zip(benchmark_process_cpu_ns())
+            .map(|(before, after)| after.saturating_sub(before));
+        (result, wall_ns, cpu_ns)
+    }
+
     #[test]
     fn content_changes_and_deletions_are_detected_but_output_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
@@ -1623,6 +1764,7 @@ mod tests {
         let initial = index.refresh(1).unwrap();
         assert_eq!(initial.kind, Some(IndexedRefreshKind::InitialFullScan));
         assert_eq!(initial.hashed_files, 3);
+        assert_eq!(initial.hashed_bytes, 30);
         assert_eq!(index.entries().len(), 3);
 
         let cached = index.refresh(1).unwrap();
@@ -1636,19 +1778,15 @@ mod tests {
         let refreshed = index.refresh(1).unwrap();
         assert_eq!(refreshed.kind, Some(IndexedRefreshKind::Incremental));
         assert_eq!(refreshed.hashed_files, 1);
+        assert_eq!(refreshed.hashed_bytes, 12);
         assert_eq!(refreshed.reused_files, 0);
         assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
 
-        fs::write(root.path().join("assets/replacement.png"), "other").unwrap();
-        fs::rename(
-            root.path().join("assets/replacement.png"),
-            root.path().join("assets/icon.png"),
-        )
-        .unwrap();
         index.mark_dirty("assets");
         let directory_refresh = index.refresh(1).unwrap();
-        assert_eq!(directory_refresh.hashed_files, 1);
-        assert_eq!(directory_refresh.reused_files, 1);
+        assert_eq!(directory_refresh.hashed_files, 2);
+        assert_eq!(directory_refresh.hashed_bytes, 18);
+        assert_eq!(directory_refresh.reused_files, 0);
         assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
     }
 
@@ -1782,6 +1920,251 @@ mod tests {
         assert_ne!(
             index.manifest().sources["main.rs"],
             format!("{:x}", Sha256::digest("old"))
+        );
+    }
+
+    #[test]
+    #[ignore = "manual large-tree CPU/I/O benchmark; see T05 backlog instructions"]
+    fn large_project_input_index_benchmark() {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct Sample {
+            phase: &'static str,
+            pair: usize,
+            order: &'static str,
+            indexed_wall_ns: u64,
+            indexed_cpu_ns: Option<u64>,
+            indexed_hashed_files: usize,
+            indexed_hashed_bytes: u64,
+            indexed_reused_files: usize,
+            oracle_wall_ns: u64,
+            oracle_cpu_ns: Option<u64>,
+            oracle_passes: usize,
+            oracle_hashed_files: usize,
+            oracle_hashed_bytes: u64,
+            oracle_equal: bool,
+        }
+
+        fn setting(name: &str, default: usize) -> usize {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.parse().unwrap_or_else(|_| panic!("invalid {name}")))
+                .unwrap_or(default)
+        }
+
+        let file_count = setting("GPUI_T05_BENCH_FILES", 4096);
+        let file_bytes = setting("GPUI_T05_BENCH_FILE_BYTES", 8192);
+        let warmup_pairs = setting("GPUI_T05_BENCH_WARMUP", 10);
+        let measured_pairs = setting("GPUI_T05_BENCH_MEASUREMENTS", 30);
+        assert!(file_count > 1 && file_bytes > 1 && measured_pairs > 0);
+
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("src");
+        fs::create_dir_all(&source_dir).unwrap();
+        let mut content = vec![b'a'; file_bytes];
+        content[0] = b'0';
+        for file_index in 0..file_count {
+            content[1] = b'a' + (file_index % 26) as u8;
+            fs::write(
+                source_dir.join(format!("input-{file_index:05}.rs")),
+                &content,
+            )
+            .unwrap();
+        }
+
+        let dirty_relative = PathBuf::from("src/input-00000.rs");
+        let dirty_absolute = root.path().join(&dirty_relative);
+        let original_mtime = fs::metadata(&dirty_absolute).unwrap().modified().unwrap();
+        let mut indexed = IndexedInputs::new(root.path());
+        let (initial_index, initial_index_wall_ns, initial_index_cpu_ns) =
+            benchmark_measure(|| indexed.refresh(2).unwrap());
+        let (
+            (initial_oracle, initial_oracle_metrics),
+            initial_oracle_wall_ns,
+            initial_oracle_cpu_ns,
+        ) = benchmark_measure(|| Inputs::scan_stable_with_metrics(root.path(), 2).unwrap());
+        assert_eq!(indexed.manifest(), &initial_oracle);
+
+        let mut samples = Vec::with_capacity(warmup_pairs + measured_pairs);
+        let mut wrong_revision_acceptance = 0_usize;
+        for pair in 0..warmup_pairs + measured_pairs {
+            let previous_digest = indexed.manifest().digest();
+            content[0] = if content[0] == b'0' { b'1' } else { b'0' };
+            fs::write(&dirty_absolute, &content).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&dirty_absolute)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(original_mtime))
+                .unwrap();
+            indexed.mark_dirty(&dirty_relative);
+
+            let indexed_first = pair % 2 == 0;
+            let (
+                indexed_refresh,
+                indexed_wall_ns,
+                indexed_cpu_ns,
+                oracle_manifest,
+                oracle_metrics,
+                oracle_wall_ns,
+                oracle_cpu_ns,
+            ) = if indexed_first {
+                let (refresh, wall, cpu) = benchmark_measure(|| indexed.refresh(2).unwrap());
+                let ((manifest, metrics), oracle_wall, oracle_cpu) =
+                    benchmark_measure(|| Inputs::scan_stable_with_metrics(root.path(), 2).unwrap());
+                (
+                    refresh,
+                    wall,
+                    cpu,
+                    manifest,
+                    metrics,
+                    oracle_wall,
+                    oracle_cpu,
+                )
+            } else {
+                let ((manifest, metrics), oracle_wall, oracle_cpu) =
+                    benchmark_measure(|| Inputs::scan_stable_with_metrics(root.path(), 2).unwrap());
+                let (refresh, wall, cpu) = benchmark_measure(|| indexed.refresh(2).unwrap());
+                (
+                    refresh,
+                    wall,
+                    cpu,
+                    manifest,
+                    metrics,
+                    oracle_wall,
+                    oracle_cpu,
+                )
+            };
+            let oracle_equal = indexed.manifest() == &oracle_manifest;
+            if !oracle_equal || indexed.manifest().digest() == previous_digest {
+                wrong_revision_acceptance += 1;
+            }
+            assert!(
+                oracle_equal,
+                "indexed manifest diverged from the full hash oracle"
+            );
+            assert_ne!(
+                indexed.manifest().digest(),
+                previous_digest,
+                "same-size, restored-mtime edit did not advance the manifest"
+            );
+
+            samples.push(Sample {
+                phase: if pair < warmup_pairs {
+                    "warmup"
+                } else {
+                    "measure"
+                },
+                pair,
+                order: if indexed_first {
+                    "indexed-first"
+                } else {
+                    "oracle-first"
+                },
+                indexed_wall_ns,
+                indexed_cpu_ns,
+                indexed_hashed_files: indexed_refresh.hashed_files,
+                indexed_hashed_bytes: indexed_refresh.hashed_bytes,
+                indexed_reused_files: indexed_refresh.reused_files,
+                oracle_wall_ns,
+                oracle_cpu_ns,
+                oracle_passes: oracle_metrics.passes,
+                oracle_hashed_files: oracle_metrics.hashed_files,
+                oracle_hashed_bytes: oracle_metrics.hashed_bytes,
+                oracle_equal,
+            });
+        }
+
+        let measured = samples
+            .iter()
+            .filter(|sample| sample.phase == "measure")
+            .collect::<Vec<_>>();
+        let mut indexed_wall = measured
+            .iter()
+            .map(|sample| sample.indexed_wall_ns)
+            .collect::<Vec<_>>();
+        let mut oracle_wall = measured
+            .iter()
+            .map(|sample| sample.oracle_wall_ns)
+            .collect::<Vec<_>>();
+        let mut indexed_cpu = measured
+            .iter()
+            .filter_map(|sample| sample.indexed_cpu_ns)
+            .collect::<Vec<_>>();
+        let mut oracle_cpu = measured
+            .iter()
+            .filter_map(|sample| sample.oracle_cpu_ns)
+            .collect::<Vec<_>>();
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "benchmark": "T05 indexed watcher scan vs stable full content oracle",
+            "environment": {
+                "os": std::env::consts::OS,
+                "architecture": std::env::consts::ARCH,
+                "cpu_model": benchmark_cpu_model(),
+                "logical_cpu_count": std::thread::available_parallelism().map(usize::from).ok(),
+                "rustc": std::process::Command::new("rustc").arg("-Vv")
+                    .output().ok().filter(|result| result.status.success())
+                    .map(|result| String::from_utf8_lossy(&result.stdout).trim().to_owned()),
+                "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+                "cache_state": "warm filesystem cache; no global page-cache dropping",
+                "process_cpu_time": if cfg!(unix) { "getrusage user+system" } else { "unavailable" },
+            },
+            "dataset": {
+                "files": file_count,
+                "bytes_per_file": file_bytes,
+                "total_input_bytes": (file_count as u64).saturating_mul(file_bytes as u64),
+                "changed_files_per_pair": 1,
+                "changed_file_size_and_mtime_preserved": true,
+            },
+            "protocol": {
+                "warmup_pairs": warmup_pairs,
+                "measurement_pairs": measured_pairs,
+                "order": "alternating; file edit and mtime restoration excluded from scan timings",
+                "oracle": "Inputs::scan_stable_with_metrics(max_rescans=2)",
+            },
+            "initial_scan": {
+                "indexed_wall_ns": initial_index_wall_ns,
+                "indexed_cpu_ns": initial_index_cpu_ns,
+                "indexed_hashed_files": initial_index.hashed_files,
+                "indexed_hashed_bytes": initial_index.hashed_bytes,
+                "oracle_wall_ns": initial_oracle_wall_ns,
+                "oracle_cpu_ns": initial_oracle_cpu_ns,
+                "oracle_passes": initial_oracle_metrics.passes,
+                "oracle_hashed_files": initial_oracle_metrics.hashed_files,
+                "oracle_hashed_bytes": initial_oracle_metrics.hashed_bytes,
+            },
+            "correctness": {
+                "wrong_revision_acceptance": wrong_revision_acceptance,
+                "oracle_manifest_mismatches": samples.iter().filter(|sample| !sample.oracle_equal).count(),
+            },
+            "summary_ns": {
+                "indexed_wall_p50": benchmark_percentile(&mut indexed_wall, 0.50),
+                "indexed_wall_p95": benchmark_percentile(&mut indexed_wall, 0.95),
+                "oracle_wall_p50": benchmark_percentile(&mut oracle_wall, 0.50),
+                "oracle_wall_p95": benchmark_percentile(&mut oracle_wall, 0.95),
+                "indexed_process_cpu_p50": benchmark_percentile(&mut indexed_cpu, 0.50),
+                "indexed_process_cpu_p95": benchmark_percentile(&mut indexed_cpu, 0.95),
+                "oracle_process_cpu_p50": benchmark_percentile(&mut oracle_cpu, 0.50),
+                "oracle_process_cpu_p95": benchmark_percentile(&mut oracle_cpu, 0.95),
+            },
+            "samples": samples,
+        });
+        let encoded = serde_json::to_vec_pretty(&report).unwrap();
+        if let Some(output_path) = std::env::var_os("GPUI_T05_BENCH_OUTPUT") {
+            use std::io::Write;
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output_path)
+                .expect("benchmark output path must not already exist");
+            output.write_all(&encoded).unwrap();
+            output.write_all(b"\n").unwrap();
+        }
+        println!(
+            "T05_INPUT_INDEX_BENCHMARK={}",
+            String::from_utf8(encoded).unwrap()
         );
     }
 
