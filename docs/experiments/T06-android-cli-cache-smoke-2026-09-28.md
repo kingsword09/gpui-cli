@@ -50,6 +50,16 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 该边界只表示已声明的 Cargo build-script policy；build.rs 的实际文件/环境/网络读集仍未建模，正常
   冻结和构建可继续，但不能据此宣称完整输入闭包或真实 Android 设备验收。
 
+## T06 编译环境键闭包证据（2026-10-03）
+
+- PR #283（`d132fe9`）将 `RUSTC_WORKSPACE_WRAPPER` 和所选 target 对应的
+  `CARGO_TARGET_<TARGET>_LINKER` / `CARGO_TARGET_<TARGET>_RUSTFLAGS` 纳入 BuildKey 环境摘要；target
+  triple 按 Cargo 环境变量规则规范化。
+- 回归分别改变 workspace wrapper、target linker、target Rust flags，并切换 target triple；每项都会
+  改变摘要，且一个 target 的专属变量不会被当成另一个 target 的输入。
+- 这只修复已确认的 BuildKey allowlist 遗漏；不发现 wrapper 实际内容、build.rs/Gradle/NDK/Xcode
+  任意隐藏 I/O 或远端状态，不能据此宣称完整输入闭包。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
