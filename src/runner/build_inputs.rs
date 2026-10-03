@@ -41,6 +41,10 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "SDKROOT",
     "JAVA_HOME",
 ];
+const WRAPPER_ENVIRONMENT: &[&str] = &["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"];
+const MAX_WRAPPER_FINGERPRINT_BYTES: u64 = 64 * 1024 * 1024;
+const WRAPPER_CACHE_DISABLED_REASON: &str =
+    "Rust compiler wrapper could not be safely fingerprinted; cache reuse is disabled";
 
 const ANDROID_KEYSTORE_PROPERTIES_RELATIVE: &str = "mobile/android/gradle/keystore.properties";
 const ANDROID_GRADLE_WRAPPER_PROPERTIES_RELATIVE: &str =
@@ -178,6 +182,13 @@ pub struct AndroidPreviewCachePolicy {
     pub disabled_reason: Option<String>,
     pub debug_keystore_hash: Option<String>,
     pub android_signing_fingerprint: Option<String>,
+}
+
+struct BuildKeyInputs<'a> {
+    project_root: &'a Path,
+    manifest: &'a Inputs,
+    source_manifest_hash: String,
+    native: &'a NativeInputs,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -558,6 +569,7 @@ pub fn desktop_build_key(root: &Path, release: bool) -> Result<BuildKey> {
     let (host, toolchain_fingerprint) = rustc_identity()?;
     let target_triple = env::var("CARGO_BUILD_TARGET").unwrap_or(host);
     build_key_for_target(root, target_triple, release, toolchain_fingerprint, None)
+        .map(|(key, _)| key)
 }
 
 /// Freezes the desktop workspace before deriving its BuildKey and output
@@ -571,10 +583,13 @@ pub fn desktop_build_plan(root: &Path, release: bool) -> Result<DesktopBuildPlan
     let (host, toolchain_fingerprint) = rustc_identity()?;
     let target_triple = env::var("CARGO_BUILD_TARGET").unwrap_or(host);
     let native = NativeInputs::scan(&snapshot.root)?;
-    let key = build_key_from_inputs(
-        &snapshot.manifest,
-        snapshot.input_hash.clone(),
-        &native,
+    let (key, wrapper_disabled_reason) = build_key_from_inputs(
+        BuildKeyInputs {
+            project_root: &snapshot.root,
+            manifest: &snapshot.manifest,
+            source_manifest_hash: snapshot.input_hash.clone(),
+            native: &native,
+        },
         target_triple,
         release,
         toolchain_fingerprint,
@@ -587,7 +602,10 @@ pub fn desktop_build_plan(root: &Path, release: bool) -> Result<DesktopBuildPlan
         key,
         layout,
         snapshot,
-        cache_hit_disabled_reason: frozen.cache_hit_disabled_reason,
+        cache_hit_disabled_reason: combine_cache_hit_disabled_reasons([
+            frozen.cache_hit_disabled_reason,
+            wrapper_disabled_reason,
+        ]),
     })
 }
 
@@ -626,15 +644,20 @@ pub fn ios_build_plan(root: &Path, release: bool, rust_target: &str) -> Result<I
         build_script_disabled_reason,
         signing_disabled_reason,
     ]);
-    let key = build_key_from_inputs(
-        &snapshot.manifest,
-        snapshot.input_hash.clone(),
-        &native,
+    let (key, wrapper_disabled_reason) = build_key_from_inputs(
+        BuildKeyInputs {
+            project_root: &snapshot.root,
+            manifest: &snapshot.manifest,
+            source_manifest_hash: snapshot.input_hash.clone(),
+            native: &native,
+        },
         rust_target.to_string(),
         release,
         toolchain_fingerprint,
         None,
     )?;
+    let cache_hit_disabled_reason =
+        combine_cache_hit_disabled_reasons([cache_hit_disabled_reason, wrapper_disabled_reason]);
     let layout = BuildOutputLayout::for_key(&root.join(".gpui/builds"), &key, BuildPlatform::Ios)?;
     layout.prepare()?;
     Ok(IosBuildPlan {
@@ -658,14 +681,18 @@ pub fn ios_build_key(root: &Path, release: bool, rust_target: &str) -> Result<Bu
     let physical = rust_target == "aarch64-apple-ios";
     let _ = bind_ios_physical_signing_identity(&mut native, physical)?;
     build_key_from_inputs(
-        &manifest,
-        manifest.digest(),
-        &native,
+        BuildKeyInputs {
+            project_root: &root,
+            manifest: &manifest,
+            source_manifest_hash: manifest.digest(),
+            native: &native,
+        },
         rust_target.to_string(),
         release,
         toolchain_fingerprint,
         None,
     )
+    .map(|(key, _)| key)
 }
 
 fn ios_xcode_sdk_fingerprint(rust_target: &str) -> Option<String> {
@@ -857,14 +884,18 @@ pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<
         android_toolchain_fingerprint(&root),
     );
     build_key_from_inputs(
-        &manifest,
-        manifest.digest(),
-        &native,
+        BuildKeyInputs {
+            project_root: &root,
+            manifest: &manifest,
+            source_manifest_hash: manifest.digest(),
+            native: &native,
+        },
         target_triple,
         release,
         toolchain_fingerprint,
         Some(abi_set),
     )
+    .map(|(key, _)| key)
 }
 
 /// Returns the cache-safety inputs needed by a live Android preview. The
@@ -900,6 +931,7 @@ pub fn android_preview_cache_policy(
     };
     Ok(AndroidPreviewCachePolicy {
         disabled_reason: combine_cache_hit_disabled_reasons([
+            rustc_wrapper_cache_disabled_reason(&root),
             toolchain_disabled_reason,
             wrapper_disabled_reason,
             verification_disabled_reason,
@@ -913,6 +945,27 @@ pub fn android_preview_cache_policy(
         android_signing_fingerprint: signing_policy
             .signing_identity
             .map(|identity| identity.fingerprint),
+    })
+}
+
+/// Returns a conservative cache gate for consumers that derive a BuildKey
+/// without a full desktop/iOS build plan, such as matrix preview planning.
+pub fn rustc_wrapper_cache_disabled_reason(project_root: &Path) -> Option<String> {
+    if non_unicode_wrapper_cache_disabled_reason().is_some() {
+        return Some(WRAPPER_CACHE_DISABLED_REASON.to_owned());
+    }
+    let path_environment = env::var("PATH").ok();
+    let path_extensions = env::var("PATHEXT").ok();
+    WRAPPER_ENVIRONMENT.iter().find_map(|name| {
+        let value = env::var(name).ok()?;
+        wrapper_fingerprint(
+            project_root,
+            &value,
+            path_environment.as_deref(),
+            path_extensions.as_deref(),
+        )
+        .err()
+        .map(|_| WRAPPER_CACHE_DISABLED_REASON.to_owned())
     })
 }
 
@@ -971,15 +1024,22 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         signing_policy.disabled_reason,
         build_script_disabled_reason,
     ]);
-    let key = build_key_from_inputs(
-        &snapshot.manifest,
-        snapshot.input_hash.clone(),
-        &native,
+    let (key, wrapper_environment_disabled_reason) = build_key_from_inputs(
+        BuildKeyInputs {
+            project_root: &snapshot.root,
+            manifest: &snapshot.manifest,
+            source_manifest_hash: snapshot.input_hash.clone(),
+            native: &native,
+        },
         target_triple,
         release,
         toolchain_fingerprint,
         Some(abi_set),
     )?;
+    let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
+        cache_hit_disabled_reason,
+        wrapper_environment_disabled_reason,
+    ]);
     let layout =
         BuildOutputLayout::for_key(&root.join(".gpui/builds"), &key, BuildPlatform::Android)?;
     layout.prepare()?;
@@ -2473,13 +2533,16 @@ fn build_key_for_target(
     release: bool,
     toolchain_fingerprint: String,
     abi: Option<String>,
-) -> Result<BuildKey> {
+) -> Result<(BuildKey, Option<String>)> {
     let manifest = Inputs::scan_stable(root, 2)?;
     let native = NativeInputs::scan(root)?;
     build_key_from_inputs(
-        &manifest,
-        manifest.digest(),
-        &native,
+        BuildKeyInputs {
+            project_root: root,
+            manifest: &manifest,
+            source_manifest_hash: manifest.digest(),
+            native: &native,
+        },
         target_triple,
         release,
         toolchain_fingerprint,
@@ -2488,19 +2551,20 @@ fn build_key_for_target(
 }
 
 fn build_key_from_inputs(
-    manifest: &Inputs,
-    source_manifest_hash: String,
-    native: &NativeInputs,
+    inputs: BuildKeyInputs<'_>,
     target_triple: String,
     release: bool,
     toolchain_fingerprint: String,
     abi: Option<String>,
-) -> Result<BuildKey> {
-    let relevant_environment =
-        relevant_build_environment_hash(&target_triple, |name| env::var(name).ok())?;
-    BuildKey::new(BuildKeyMaterial {
-        source_manifest_hash,
-        cargo_lock_hash: manifest
+) -> Result<(BuildKey, Option<String>)> {
+    let (relevant_environment, wrapper_disabled_reason) =
+        relevant_build_environment_hash(inputs.project_root, &target_triple, |name| {
+            env::var(name).ok()
+        })?;
+    let key = BuildKey::new(BuildKeyMaterial {
+        source_manifest_hash: inputs.source_manifest_hash,
+        cargo_lock_hash: inputs
+            .manifest
             .sources
             .get("Cargo.lock")
             .cloned()
@@ -2509,17 +2573,35 @@ fn build_key_from_inputs(
         profile: if release { "release" } else { "dev" }.into(),
         features: Vec::new(),
         abi,
-        native_config_hash: native.digest(),
+        native_config_hash: inputs.native.digest(),
         toolchain_fingerprint,
         relevant_env_hash: relevant_environment,
         preview_registry_hash: "none".into(),
-    })
+    })?;
+    Ok((
+        key,
+        combine_cache_hit_disabled_reasons([
+            wrapper_disabled_reason,
+            non_unicode_wrapper_cache_disabled_reason(),
+        ]),
+    ))
+}
+
+fn non_unicode_wrapper_cache_disabled_reason() -> Option<String> {
+    WRAPPER_ENVIRONMENT
+        .iter()
+        .any(|name| env::var_os(name).is_some() && env::var(name).is_err())
+        .then(|| WRAPPER_CACHE_DISABLED_REASON.to_owned())
 }
 
 fn relevant_build_environment_hash(
+    project_root: &Path,
     target_triple: &str,
     mut read_environment: impl FnMut(&str) -> Option<String>,
-) -> Result<String> {
+) -> Result<(String, Option<String>)> {
+    let path_environment = read_environment("PATH");
+    let path_extensions = read_environment("PATHEXT");
+    let mut wrapper_disabled_reason = None;
     let mut names = RELEVANT_ENVIRONMENT
         .iter()
         .map(|name| (*name).to_string())
@@ -2539,8 +2621,115 @@ fn relevant_build_environment_hash(
 
     hash_relevant_environment(names.into_iter().map(|name| {
         let value = read_environment(&name).unwrap_or_else(|| "<unset>".into());
+        let value = if WRAPPER_ENVIRONMENT.contains(&name.as_str()) && value != "<unset>" {
+            match wrapper_fingerprint(
+                project_root,
+                &value,
+                path_environment.as_deref(),
+                path_extensions.as_deref(),
+            ) {
+                Ok(fingerprint) => format!("{value}\nwrapper-fingerprint={fingerprint}"),
+                Err(_) => {
+                    wrapper_disabled_reason = Some(WRAPPER_CACHE_DISABLED_REASON.into());
+                    format!("{value}\nwrapper-fingerprint=unavailable")
+                }
+            }
+        } else {
+            value
+        };
         (name, value)
     }))
+    .map(|hash| (hash, wrapper_disabled_reason))
+}
+
+fn wrapper_fingerprint(
+    project_root: &Path,
+    value: &str,
+    path_environment: Option<&str>,
+    path_extensions: Option<&str>,
+) -> Result<String> {
+    let path = resolve_wrapper_path(project_root, value, path_environment, path_extensions)
+        .context("resolving compiler wrapper executable")?;
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => bail!("compiler wrapper is not a regular file"),
+        Err(error) => return Err(error).context("inspecting compiler wrapper executable"),
+    };
+    if metadata.len() > MAX_WRAPPER_FINGERPRINT_BYTES {
+        bail!("compiler wrapper executable exceeds the fingerprint budget");
+    }
+    let mut file = fs::File::open(&path).context("opening compiler wrapper executable")?;
+    let opened_metadata = file
+        .metadata()
+        .context("checking compiler wrapper executable")?;
+    if !opened_metadata.is_file() || opened_metadata.len() > MAX_WRAPPER_FINGERPRINT_BYTES {
+        bail!("compiler wrapper executable changed while fingerprinting");
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_WRAPPER_FINGERPRINT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("reading compiler wrapper executable")?;
+    let final_metadata = file
+        .metadata()
+        .context("rechecking compiler wrapper executable")?;
+    if bytes.len() as u64 != opened_metadata.len()
+        || final_metadata.len() != opened_metadata.len()
+        || final_metadata.modified().ok() != opened_metadata.modified().ok()
+    {
+        bail!("compiler wrapper executable changed while fingerprinting");
+    }
+    Ok(format!(
+        "sha256={:x};bytes={}",
+        Sha256::digest(bytes),
+        opened_metadata.len()
+    ))
+}
+
+fn resolve_wrapper_path(
+    project_root: &Path,
+    value: &str,
+    path_environment: Option<&str>,
+    path_extensions: Option<&str>,
+) -> Option<PathBuf> {
+    let candidate = Path::new(value);
+    if candidate.is_absolute() || value.contains('/') || value.contains('\\') {
+        let candidate = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            project_root.join(candidate)
+        };
+        return fs::metadata(&candidate)
+            .is_ok_and(|metadata| metadata.is_file())
+            .then_some(candidate);
+    }
+
+    let extensions = if cfg!(windows) && candidate.extension().is_none() {
+        path_extensions
+            .unwrap_or(".COM;.EXE;.BAT;.CMD")
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        vec![String::new()]
+    };
+    path_environment
+        .map(OsStr::new)
+        .into_iter()
+        .flat_map(env::split_paths)
+        .flat_map(|directory| {
+            let directory = if directory.is_absolute() {
+                directory
+            } else {
+                project_root.join(directory)
+            };
+            extensions
+                .iter()
+                .map(|extension| directory.join(format!("{}{extension}", candidate.display())))
+                .collect::<Vec<_>>()
+        })
+        .find(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_file()))
 }
 
 fn android_rust_target(abi: &str) -> Result<&'static str> {
@@ -2647,10 +2836,12 @@ mod tests {
             ),
             ("RUSTC_WORKSPACE_WRAPPER".to_string(), "<unset>".to_string()),
         ]);
-        let baseline = relevant_build_environment_hash("aarch64-apple-darwin", |name| {
-            values.get(name).cloned()
-        })
-        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let baseline =
+            relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
+                values.get(name).cloned()
+            })
+            .unwrap();
 
         for (name, changed_value) in [
             ("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", "custom-linker"),
@@ -2660,22 +2851,87 @@ mod tests {
             ),
             ("RUSTC_WORKSPACE_WRAPPER", "workspace-wrapper"),
         ] {
-            let changed = relevant_build_environment_hash("aarch64-apple-darwin", |candidate| {
-                if candidate == name {
-                    Some(changed_value.to_string())
-                } else {
-                    values.get(candidate).cloned()
-                }
-            })
-            .unwrap();
+            let changed =
+                relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |candidate| {
+                    if candidate == name {
+                        Some(changed_value.to_string())
+                    } else {
+                        values.get(candidate).cloned()
+                    }
+                })
+                .unwrap();
             assert_ne!(baseline, changed, "{name} must affect the build key");
         }
 
-        let other_target = relevant_build_environment_hash("x86_64-apple-darwin", |name| {
+        let other_target =
+            relevant_build_environment_hash(root.path(), "x86_64-apple-darwin", |name| {
+                values.get(name).cloned()
+            })
+            .unwrap();
+        assert_ne!(baseline, other_target);
+    }
+
+    #[test]
+    fn wrapper_content_changes_the_build_environment_hash() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join(if cfg!(windows) {
+            "rust-wrapper.exe"
+        } else {
+            "rust-wrapper"
+        });
+        let wrapper_name = wrapper.file_name().unwrap().to_string_lossy().to_string();
+        fs::write(&wrapper, b"wrapper-v1").unwrap();
+        let values = BTreeMap::from([
+            ("PATH".to_string(), bin.display().to_string()),
+            ("RUSTC_WRAPPER".to_string(), wrapper_name),
+        ]);
+
+        let first = relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
             values.get(name).cloned()
         })
         .unwrap();
-        assert_ne!(baseline, other_target);
+        fs::write(&wrapper, b"wrapper-v2").unwrap();
+        let second = relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
+            values.get(name).cloned()
+        })
+        .unwrap();
+
+        assert_ne!(first.0, second.0);
+        assert_eq!(first.1, None);
+        assert_eq!(second.1, None);
+    }
+
+    #[test]
+    fn unavailable_or_over_budget_wrapper_disables_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let unavailable = relevant_build_environment_hash(
+            root.path(),
+            "aarch64-apple-darwin",
+            |name| match name {
+                "RUSTC_WRAPPER" => Some("missing-wrapper".into()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        assert!(unavailable.1.is_some());
+
+        let wrapper = root.path().join("large-wrapper");
+        fs::File::create(&wrapper)
+            .unwrap()
+            .set_len(MAX_WRAPPER_FINGERPRINT_BYTES + 1)
+            .unwrap();
+        let oversized = relevant_build_environment_hash(
+            root.path(),
+            "aarch64-apple-darwin",
+            |name| match name {
+                "RUSTC_WRAPPER" => Some(wrapper.display().to_string()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        assert!(oversized.1.is_some());
     }
 
     #[test]
