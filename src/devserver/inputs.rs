@@ -870,7 +870,7 @@ fn filesystem_incremental_policy(path: &Path) -> Option<String> {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
 
-        if path.to_string_lossy().starts_with("\\\\") {
+        if windows_path_is_unc(path) {
             return Some("UNC/network filesystem; metadata reuse disabled".into());
         }
         let mut path_wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
@@ -943,6 +943,17 @@ fn windows_drive_root(path: &Path) -> Option<Vec<u16>> {
             .encode_wide()
             .chain([0])
             .collect(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn windows_path_is_unc(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
     )
 }
 
@@ -2726,6 +2737,16 @@ mod tests {
         assert_eq!(windows_drive_policy(DRIVE_FIXED), None);
         assert!(windows_drive_policy(DRIVE_REMOTE).is_some());
         assert!(windows_drive_policy(DRIVE_UNKNOWN).is_some());
+        assert!(windows_path_is_unc(Path::new(r"\\server\share\project")));
+        assert!(windows_path_is_unc(Path::new(
+            r"\\?\UNC\server\share\project"
+        )));
+        assert!(!windows_path_is_unc(Path::new(r"\\?\D:\a\project")));
+        assert!(!windows_path_is_unc(Path::new(r"D:\a\project")));
+        assert_eq!(
+            windows_drive_root(Path::new(r"\\?\D:\a\project")),
+            Some("D:\\".encode_utf16().chain([0]).collect())
+        );
     }
 
     #[test]
