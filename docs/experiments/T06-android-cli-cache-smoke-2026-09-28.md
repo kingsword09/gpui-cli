@@ -71,6 +71,13 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 该保护只覆盖 wrapper 文件本身，不发现 wrapper 启动的子进程、额外文件/环境/网络读取，也不闭合
   build.rs/Gradle/NDK/Xcode 任意隐藏输入。
 
+## T06 native compiler 环境键证据（2026-10-03）
+
+- PR #287（`a385d8a`）将 `AR`、`CFLAGS`、`CXXFLAGS` 纳入显式 BuildKey 环境 allowlist；回归分别
+  改变每个变量并确认环境摘要变化。
+- 这只覆盖 Cargo/native 编译通过这些变量声明的配置；工具实际读取的其他环境、工具二进制替换、
+  build.rs/Gradle/NDK/Xcode 隐式 I/O 与远端状态仍未闭合。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
