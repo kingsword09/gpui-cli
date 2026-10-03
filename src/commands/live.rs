@@ -16,7 +16,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,7 +29,7 @@ use super::run::{
 use crate::device::{self, DeviceFlags, android, inventory, ios};
 use crate::devserver::control::ControlServer;
 use crate::devserver::events::{Kind, Scope};
-use crate::devserver::inputs::{AssetDelta, should_trigger};
+use crate::devserver::inputs::{AssetDelta, Inputs, should_trigger};
 use crate::devserver::output::{self, AppProcess};
 use crate::devserver::protocol::{self, AssetManifestEntry, ServerMessage};
 use crate::devserver::session::{Build, BuildCancellationReason, Session};
@@ -1909,6 +1909,25 @@ fn valid_asset_path(path: &str) -> bool {
         })
 }
 
+fn start_live_session(project: &Project, target_id: &str) -> Result<Arc<Session>> {
+    match Inputs::cargo_input_scope(&project.root) {
+        Ok(scope) => {
+            Session::start_with_cargo_scope(&project.root, &project.name, target_id, &scope)
+        }
+        Err(_error) => {
+            let session = Session::start(&project.root, &project.name, target_id)?;
+            let message = "Cargo external input scope is unavailable; live watching is limited to the workspace (absolute paths omitted)";
+            eprintln!("[live] warning: {message}");
+            session.emit(
+                Kind::WatchError,
+                &Scope::default(),
+                json!({"message": message, "fallback": "workspace_only"}),
+            );
+            Ok(session)
+        }
+    }
+}
+
 /// Applies a reconnect-time manifest reconciliation to one app connection.
 /// Only paths declared by the current manifest are sent as content; removed
 /// paths are validated as asset-relative names before a delete is forwarded.
@@ -2219,7 +2238,7 @@ pub fn handle_preview(
         Plan::Android { serial, .. } => format!("android:{serial}"),
     };
     let target_id = preview_target_id(target_id);
-    let session = Session::start(&project.root, &project.name, &target_id)?;
+    let session = start_live_session(project, &target_id)?;
     struct EndSession(Arc<Session>);
     impl Drop for EndSession {
         fn drop(&mut self) {
@@ -2389,7 +2408,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         ),
         Plan::Android { serial, .. } => format!("android:{serial}"),
     };
-    let session = Session::start(&project.root, &project.name, &target_id)?;
+    let session = start_live_session(project, &target_id)?;
     struct EndSession(Arc<Session>);
     impl Drop for EndSession {
         fn drop(&mut self) {
@@ -2453,7 +2472,11 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         }
     });
 
-    let watch_root = session.root.clone();
+    let mut watch_roots = session.input_watch_roots();
+    let workspace_root = session.root.clone();
+    let callback_watch_roots = Arc::new(RwLock::new(watch_roots.clone()));
+    let callback_watch_roots_for_event = callback_watch_roots.clone();
+    let watcher_tx = tx.clone();
     let watch_session = session.clone();
     let watch_overflow = overflow.clone();
     let mut debouncer = new_debouncer(
@@ -2462,13 +2485,13 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         move |result: DebounceEventResult| {
             let events = match result {
                 Ok(events) => events,
-                Err(errors) => {
+                Err(_errors) => {
                     watch_session.mark_input_overflow();
                     watch_overflow.store(true, Ordering::SeqCst);
                     watch_session.emit(
                         Kind::WatchError,
                         &Scope::default(),
-                        json!({"message": format!("{errors:?}")}),
+                        json!({"message": "filesystem watcher reported an error; absolute paths omitted"}),
                     );
                     return;
                 }
@@ -2477,6 +2500,10 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
             let mut code_change = false;
             let mut dirty_paths = Vec::new();
             let mut incomplete_rename = false;
+            let callback_watch_roots = callback_watch_roots_for_event
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
             for event in events {
                 if matches!(event.kind, EventKind::Access(_)) {
                     continue;
@@ -2490,14 +2517,22 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     incomplete_rename = true;
                 }
                 for path in &event.paths {
-                    let Ok(relative) = path.strip_prefix(&watch_root) else {
+                    let Some((watch_root, relative)) =
+                        callback_watch_roots.iter().find_map(|root| {
+                            path.strip_prefix(root)
+                                .ok()
+                                .map(|relative| (root, relative))
+                        })
+                    else {
                         continue;
                     };
                     if !should_trigger(relative) {
                         continue;
                     }
                     dirty_paths.push(path.clone());
-                    if asset_rel_path(&watch_root, path).is_some() {
+                    if watch_root == &workspace_root
+                        && asset_rel_path(&workspace_root, path).is_some()
+                    {
                         saw_asset_path = true;
                     } else {
                         code_change = true;
@@ -2513,15 +2548,17 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                 watch_overflow.store(true, Ordering::SeqCst);
             }
             let event = Event::Dirty { code_change };
-            if tx.try_send(event).is_err() {
+            if watcher_tx.try_send(event).is_err() {
                 watch_session.mark_input_overflow();
                 watch_overflow.store(true, Ordering::SeqCst);
             }
         },
     )?;
-    debouncer
-        .watch(&session.root, RecursiveMode::Recursive)
-        .with_context(|| format!("watching {}", session.root.display()))?;
+    for watch_root in &watch_roots {
+        debouncer
+            .watch(watch_root, RecursiveMode::Recursive)
+            .context("registering live watcher root")?;
+    }
     println!(
         "\n[live] watching {} (debug builds)",
         session.root.display()
@@ -2544,6 +2581,29 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         device_lease.as_ref(),
     )?;
     while !quit && !session.stopping.load(Ordering::SeqCst) {
+        let desired_watch_roots = session.input_watch_roots();
+        if desired_watch_roots != watch_roots {
+            *callback_watch_roots
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) = desired_watch_roots.clone();
+            let changed =
+                reconcile_watch_roots(&mut watch_roots, desired_watch_roots, |path, add| {
+                    if add {
+                        debouncer
+                            .watch(path, RecursiveMode::Recursive)
+                            .map_err(anyhow::Error::from)
+                    } else {
+                        debouncer.unwatch(path).map_err(anyhow::Error::from)
+                    }
+                })?;
+            if changed {
+                session.mark_input_overflow();
+                if tx.try_send(Event::Dirty { code_change: true }).is_err() {
+                    session.mark_input_overflow();
+                    overflow.store(true, Ordering::SeqCst);
+                }
+            }
+        }
         if let Some(lease) = device_lease.as_ref() {
             lease
                 .assert_owned()
@@ -2594,15 +2654,31 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
         let event = match event {
             Ok(Event::Dirty { code_change }) => {
                 let previous = session.store.state().desired;
-                match session.sync_watcher_inputs_with_delta() {
+                let sync_result = session.sync_watcher_inputs_with_delta();
+                let desired_watch_roots = session.input_watch_roots();
+                if desired_watch_roots != watch_roots {
+                    *callback_watch_roots
+                        .write()
+                        .unwrap_or_else(|error| error.into_inner()) = desired_watch_roots.clone();
+                    reconcile_watch_roots(&mut watch_roots, desired_watch_roots, |path, add| {
+                        if add {
+                            debouncer
+                                .watch(path, RecursiveMode::Recursive)
+                                .map_err(anyhow::Error::from)
+                        } else {
+                            debouncer.unwatch(path).map_err(anyhow::Error::from)
+                        }
+                    })?;
+                }
+                match sync_result {
                     Ok((revision, _)) if revision == previous => continue,
                     Ok((_, _)) if code_change => Ok(Event::Change),
                     Ok((_, delta)) => Ok(Event::Assets(delta)),
-                    Err(error) => {
+                    Err(_error) => {
                         session.emit(
                             Kind::WatchError,
                             &Scope::default(),
-                            json!({"message": format!("{error:#}")}),
+                            json!({"message": "input scan failed; absolute paths omitted"}),
                         );
                         continue;
                     }
@@ -2706,6 +2782,31 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
     Ok(())
 }
 
+fn reconcile_watch_roots(
+    active: &mut Vec<PathBuf>,
+    desired: Vec<PathBuf>,
+    mut update: impl FnMut(&Path, bool) -> Result<()>,
+) -> Result<bool> {
+    let mut desired_roots = Vec::with_capacity(desired.len());
+    for root in desired {
+        if !desired_roots.contains(&root) {
+            desired_roots.push(root);
+        }
+    }
+    if *active == desired_roots {
+        return Ok(false);
+    }
+
+    for root in active.iter().filter(|root| !desired_roots.contains(root)) {
+        update(root, false).context("unregistering live watcher root")?;
+    }
+    for root in desired_roots.iter().filter(|root| !active.contains(root)) {
+        update(root, true).context("registering live watcher root")?;
+    }
+    *active = desired_roots;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2713,6 +2814,34 @@ mod tests {
         BUILD_ARTIFACT_MANIFEST_SCHEMA_VERSION, BuildArtifactFile,
     };
     use crate::runner::output_layout::BuildPlatform;
+
+    #[test]
+    fn live_watcher_roots_follow_changed_cargo_scope() {
+        let workspace = PathBuf::from("/workspace");
+        let old_dependency = PathBuf::from("/dependencies/old");
+        let new_dependency = PathBuf::from("/dependencies/new");
+        let mut active = vec![workspace.clone(), old_dependency.clone()];
+        let mut actions = Vec::new();
+
+        let changed = reconcile_watch_roots(
+            &mut active,
+            vec![workspace.clone(), new_dependency.clone()],
+            |path, add| {
+                actions.push((path.to_owned(), add));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(changed);
+        assert_eq!(active, vec![workspace.clone(), new_dependency.clone()]);
+        assert_eq!(
+            actions,
+            vec![(old_dependency, false), (new_dependency, true)]
+        );
+        let unchanged = active.clone();
+        assert!(!reconcile_watch_roots(&mut active, unchanged, |_, _| Ok(())).unwrap());
+    }
 
     #[test]
     fn ignores_build_output_and_generated_dirs() {

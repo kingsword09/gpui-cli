@@ -1,6 +1,7 @@
 use super::DevServer;
 use super::control::{self, Command, ControlServer};
 use super::events::{Kind, RollingFile, Scope};
+use super::inputs::Inputs;
 use super::operations::SubmitResult;
 use super::protocol::{self, ClientMessage, ServerMessage};
 use super::session::Session;
@@ -170,6 +171,86 @@ fn watcher_input_sync_is_incremental_but_explicit_sync_fully_verifies() {
     assert_eq!(
         verified_revision.asset_revision,
         watcher_revision.asset_revision
+    );
+}
+
+#[test]
+fn watcher_input_sync_tracks_external_cargo_path_packages() {
+    let project = tempfile::tempdir().unwrap();
+    let dependency = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src")).unwrap();
+    fs::create_dir_all(dependency.path().join("src")).unwrap();
+    fs::write(
+        project.path().join("Cargo.toml"),
+        format!(
+            "[package]\nname='workspace-app'\nversion='0.1.0'\nedition='2024'\n[dependencies]\ndep={{path={:?}}}\n",
+            dependency.path()
+        ),
+    )
+    .unwrap();
+    fs::write(project.path().join("src/lib.rs"), "workspace source").unwrap();
+    fs::write(
+        dependency.path().join("Cargo.toml"),
+        "[package]\nname='dep'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .unwrap();
+    fs::write(dependency.path().join("src/lib.rs"), "external source one").unwrap();
+    let lock = std::process::Command::new("cargo")
+        .current_dir(project.path())
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .unwrap();
+    assert!(
+        lock.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lock.stderr)
+    );
+    let scope = Inputs::cargo_input_scope(project.path()).unwrap();
+    assert_eq!(scope.external_path_dependencies.len(), 1);
+
+    let session =
+        Session::start_with_cargo_scope(project.path(), "test", "desktop:test", &scope).unwrap();
+    assert!(
+        session
+            .input_watch_roots()
+            .contains(&fs::canonicalize(dependency.path()).unwrap())
+    );
+    let previous = session.store.state().desired;
+
+    let external_file = dependency.path().join("src/lib.rs");
+    fs::write(&external_file, "external source two").unwrap();
+    session.mark_inputs_dirty(std::slice::from_ref(&external_file));
+    let (revision, delta) = session.sync_watcher_inputs_with_delta().unwrap();
+
+    assert_eq!(revision.source_revision, previous.source_revision + 1);
+    assert!(delta.is_empty());
+    let (verified_revision, _, _) = session.sync_inputs_with_delta_and_hash().unwrap();
+    assert_eq!(verified_revision, revision);
+
+    fs::remove_dir_all(dependency.path()).unwrap();
+    fs::create_dir_all(dependency.path().join("src")).unwrap();
+    fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname='workspace-app'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .unwrap();
+    let removed_revision = session.sync_inputs().unwrap();
+    assert_eq!(
+        removed_revision.source_revision,
+        revision.source_revision + 1
+    );
+    assert!(
+        !session
+            .input_watch_roots()
+            .contains(&fs::canonicalize(dependency.path()).unwrap())
+    );
+    assert_eq!(
+        session
+            .asset_manifest()
+            .iter()
+            .filter(|entry| entry.path.starts_with("__cargo_external__/"))
+            .count(),
+        0
     );
 }
 
