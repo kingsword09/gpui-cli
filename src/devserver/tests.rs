@@ -117,6 +117,63 @@ fn registration_advertises_current_control_schema() {
 }
 
 #[test]
+fn watcher_input_sync_is_incremental_but_explicit_sync_fully_verifies() {
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("assets")).unwrap();
+    fs::write(project.path().join("main.rs"), "fn main() {}\n").unwrap();
+    fs::write(project.path().join("assets/old.png"), "old").unwrap();
+    let session = Session::start(project.path(), "test", "desktop:test").unwrap();
+    let initial_revision = session.store.state().desired;
+
+    fs::write(
+        project.path().join("main.rs"),
+        "fn main() { println!(\"changed\"); }\n",
+    )
+    .unwrap();
+    fs::rename(
+        project.path().join("assets/old.png"),
+        project.path().join("assets/new.png"),
+    )
+    .unwrap();
+    let dirty_paths = [
+        std::path::PathBuf::from("main.rs"),
+        std::path::PathBuf::from("assets"),
+    ];
+    session.mark_inputs_dirty(&dirty_paths);
+    assert_eq!(session.store.state().desired, initial_revision);
+
+    let (watcher_revision, delta) = session.sync_watcher_inputs_with_delta().unwrap();
+    assert_eq!(
+        watcher_revision.source_revision,
+        initial_revision.source_revision + 1
+    );
+    assert_eq!(
+        watcher_revision.asset_revision,
+        initial_revision.asset_revision + 1
+    );
+    assert_eq!(delta.changed, vec!["assets/new.png"]);
+    assert_eq!(delta.removed, vec!["assets/old.png"]);
+    assert_eq!(session.asset_manifest()[0].path, "assets/new.png");
+
+    // An edit without a watcher event must still be detected at an explicit
+    // full-verification boundary (build/observe synchronization).
+    fs::write(
+        project.path().join("main.rs"),
+        "fn main() { println!(\"unreported\"); }\n",
+    )
+    .unwrap();
+    let verified_revision = session.sync_inputs().unwrap();
+    assert_eq!(
+        verified_revision.source_revision,
+        watcher_revision.source_revision + 1
+    );
+    assert_eq!(
+        verified_revision.asset_revision,
+        watcher_revision.asset_revision
+    );
+}
+
+#[test]
 fn control_build_request_is_queued_for_the_live_coordinator() {
     let project = tempfile::tempdir().unwrap();
     fs::write(project.path().join("main.rs"), "fn main() {}").unwrap();

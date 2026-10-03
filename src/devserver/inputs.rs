@@ -267,6 +267,13 @@ impl IndexedInputs {
         self.force_full_scan = true;
     }
 
+    /// Revalidates the entire input tree regardless of the watcher index. Used
+    /// by explicit synchronization boundaries such as observe --sync/build.
+    pub fn verify_full(&mut self, max_rescans: usize) -> Result<IndexedRefresh> {
+        self.force_full_scan = true;
+        self.refresh(max_rescans)
+    }
+
     pub fn refresh(&mut self, max_rescans: usize) -> Result<IndexedRefresh> {
         if !self.initialized
             || self.force_full_scan
@@ -306,9 +313,13 @@ impl IndexedInputs {
         kind: IndexedRefreshKind,
     ) -> Result<IndexedRefresh> {
         let previous_paths = self.entries.keys().cloned().collect::<BTreeSet<_>>();
-        let (manifest, entries) = match scan_indexed_stable(&self.root, max_rescans) {
-            Ok(scanned) => (scanned.manifest, Some(scanned.entries)),
-            Err(_) => (Inputs::scan_stable(&self.root, max_rescans)?, None),
+        let (manifest, entries) = if self.incremental_enabled && !self.index_disabled {
+            match scan_indexed_stable(&self.root, max_rescans) {
+                Ok(scanned) => (scanned.manifest, Some(scanned.entries)),
+                Err(_) => (Inputs::scan_stable(&self.root, max_rescans)?, None),
+            }
+        } else {
+            (Inputs::scan_stable(&self.root, max_rescans)?, None)
         };
         let hashed_files = manifest.sources.len() + manifest.assets.len();
         let current_paths = manifest
@@ -383,8 +394,13 @@ impl IndexedInputs {
                 let directory_before = read_directory_stamp(&dir)?;
                 let entries = fs::read_dir(&dir)
                     .with_context(|| format!("reading dirty inputs in {}", dir.display()))?;
+                let entries = entries.collect::<std::io::Result<Vec<_>>>()?;
+                let mut names_before = entries
+                    .iter()
+                    .map(|entry| entry.file_name())
+                    .collect::<Vec<_>>();
+                names_before.sort();
                 for entry in entries {
-                    let entry = entry?;
                     let child = entry.path();
                     let child_relative = child.strip_prefix(&self.root)?;
                     if !should_trigger(child_relative) {
@@ -397,12 +413,30 @@ impl IndexedInputs {
                     } else if child_kind.is_symlink() && child.is_dir() {
                         self.untracked_directory_links.insert(child_name);
                     } else if child_kind.is_file() || child_kind.is_symlink() {
-                        self.scan_dirty_file(&child_name, &child, &mut old_entries, true, refresh)?;
+                        self.scan_dirty_file(
+                            &child_name,
+                            &child,
+                            &mut old_entries,
+                            false,
+                            refresh,
+                        )?;
                     }
                 }
                 if directory_before != read_directory_stamp(&dir)? {
                     bail!(
                         "directory changed while refreshing inputs: {}",
+                        dir.display()
+                    );
+                }
+                let entries_after = fs::read_dir(&dir)
+                    .with_context(|| format!("rechecking dirty inputs in {}", dir.display()))?;
+                let mut names_after = entries_after
+                    .map(|entry| entry.map(|entry| entry.file_name()))
+                    .collect::<std::io::Result<Vec<_>>>()?;
+                names_after.sort();
+                if names_before != names_after {
+                    bail!(
+                        "directory entries changed while refreshing inputs: {}",
                         dir.display()
                     );
                 }
@@ -432,15 +466,7 @@ impl IndexedInputs {
             return Ok(());
         }
         let Some(old) = old_entries.remove(relative) else {
-            let before = read_file_stamp(path)?;
-            let hash = hash_input_file(path)?;
-            let after = read_file_stamp(path)?;
-            if before != after {
-                bail!(
-                    "input changed while incrementally hashing: {}",
-                    path.display()
-                );
-            }
+            let (hash, before) = hash_input_file_stable(path)?;
             self.entries.insert(
                 relative.to_owned(),
                 IndexedFile {
@@ -459,9 +485,8 @@ impl IndexedInputs {
             refresh.reused_files += 1;
             return Ok(());
         }
-        let hash = hash_input_file(path)?;
-        let after = read_file_stamp(path)?;
-        if stamp != after {
+        let (hash, stable_stamp) = hash_input_file_stable(path)?;
+        if stamp != stable_stamp {
             bail!(
                 "input changed while incrementally hashing: {}",
                 path.display()
@@ -471,9 +496,9 @@ impl IndexedInputs {
             relative.to_owned(),
             IndexedFile {
                 hash,
-                modified: stamp.modified,
-                size: stamp.size,
-                identity: stamp.identity,
+                modified: stable_stamp.modified,
+                size: stable_stamp.size,
+                identity: stable_stamp.identity,
             },
         );
         refresh.hashed_files += 1;
@@ -699,6 +724,21 @@ fn hash_input_file(path: &Path) -> Result<String> {
         hash.update(&buffer[..len]);
     }
     Ok(format!("{:x}", hash.finalize()))
+}
+
+fn hash_input_file_stable(path: &Path) -> Result<(String, FileStamp)> {
+    let before = read_file_stamp(path)?;
+    let first = hash_input_file(path)?;
+    let middle = read_file_stamp(path)?;
+    let second = hash_input_file(path)?;
+    let after = read_file_stamp(path)?;
+    if before != middle || middle != after || first != second {
+        bail!(
+            "input changed while incrementally hashing: {}",
+            path.display()
+        );
+    }
+    Ok((second, after))
 }
 
 fn input_relative_name(path: &Path) -> String {
@@ -1577,12 +1617,13 @@ mod tests {
         fs::create_dir_all(root.path().join("assets")).unwrap();
         fs::write(root.path().join("main.rs"), "source").unwrap();
         fs::write(root.path().join("assets/icon.png"), "image").unwrap();
+        fs::write(root.path().join("assets/unchanged.txt"), "same").unwrap();
 
         let mut index = IndexedInputs::new(root.path());
         let initial = index.refresh(1).unwrap();
         assert_eq!(initial.kind, Some(IndexedRefreshKind::InitialFullScan));
-        assert_eq!(initial.hashed_files, 2);
-        assert_eq!(index.entries().len(), 2);
+        assert_eq!(initial.hashed_files, 3);
+        assert_eq!(index.entries().len(), 3);
 
         let cached = index.refresh(1).unwrap();
         assert_eq!(cached.kind, Some(IndexedRefreshKind::Cached));
@@ -1598,10 +1639,16 @@ mod tests {
         assert_eq!(refreshed.reused_files, 0);
         assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
 
+        fs::write(root.path().join("assets/replacement.png"), "other").unwrap();
+        fs::rename(
+            root.path().join("assets/replacement.png"),
+            root.path().join("assets/icon.png"),
+        )
+        .unwrap();
         index.mark_dirty("assets");
         let directory_refresh = index.refresh(1).unwrap();
         assert_eq!(directory_refresh.hashed_files, 1);
-        assert_eq!(directory_refresh.reused_files, 0);
+        assert_eq!(directory_refresh.reused_files, 1);
         assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
     }
 
