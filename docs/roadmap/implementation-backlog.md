@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-03，主分支 `bdfd717`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-03，主分支 `4aa6ed3`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -462,6 +462,12 @@ live preview 仅在 `verify-metadata=true`、每个组件制品都有单一有�
 Gradle 正常构建。metadata 覆盖基于 Gradle 9.4.1 debug/release 任务图生成并实测，包含 host-specific
 AAPT2 classifiers。当前锁定模板依赖的图和验证时观测到的 debug/release artifacts；升级 Gradle/AGP
 或构建图需要重新生成清单。远端仓库状态、签名校验、自动更新流程和任意 build-script I/O 仍未闭合，记录见
+[T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
+PR #269 又将实际 Java `java.home`/`java.version` 纳入 Android toolchain identity，并对活动 JDK
+运行时树做有界内容摘要。JDK 内部目录链接按逻辑路径递归，JDK 外部目录链接按逻辑内容递归，外部文件
+链接仅纳入文件内容 hash；绝对安装路径不进入摘要。断链、循环、特殊文件、读取失败或超过
+100,000 entries/512 MiB 时只关闭 cache reuse，不阻止普通构建；该链接策略只用于 Java runtime，
+不放宽 NDK/SDK package 的严格 symlink 拒绝。记录见
 [T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
 iOS key 另纳入当前 Xcode build 与目标 SDK version/build 指纹；身份不可读时关闭 simulator
 cache hit，记录见
