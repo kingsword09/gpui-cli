@@ -78,6 +78,21 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 这只覆盖 Cargo/native 编译通过这些变量声明的配置；工具实际读取的其他环境、工具二进制替换、
   build.rs/Gradle/NDK/Xcode 隐式 I/O 与远端状态仍未闭合。
 
+## T06 compiler/linker 工具内容指纹证据（2026-10-04）
+
+- PR #289（`caf03eb`）将 `RUSTC_WRAPPER`、`RUSTC_WORKSPACE_WRAPPER`、`CC`、`CXX`、`AR` 和所选
+  target 的 `CARGO_TARGET_<TARGET>_LINKER` 统一解析到可执行文件，并把路径、SHA-256 内容摘要与字节数
+  纳入 BuildKey 环境摘要；相同路径替换内容会导致 cache miss。Android matrix preview 按当前 ABI 映射
+  Rust target 后使用对应 target linker gate，desktop/iOS 使用 BuildKey 中的 target triple。
+- 每次工具读取都有 64 MiB 的共享有界预算，并在读取前后重核验 regular-file、大小、修改时间和 file
+  identity；Unix 使用稳定的文件 identity，Windows 使用稳定 Win32 `GetFileInformationByHandle`。
+  命令参数、shell 语法、缺失/非普通文件/不可执行文件、读取竞态、非 Unicode 环境值或超预算输入只
+  返回 cache-disabled reason，普通构建路径继续。
+- 回归覆盖 wrapper、target linker、组合 target linker 以及 `CC`/`CXX`/`AR` 内容替换；不可解析命令、
+  带参数或 shell 语法、不可执行文件和超预算工具均确认不会阻止 BuildKey/普通构建，只禁用缓存复用。
+  该切片仍不发现工具启动的子进程、额外环境/文件/网络读取，也不闭合 build.rs/Gradle/NDK/Xcode
+  任意隐藏 I/O 或远端状态。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
