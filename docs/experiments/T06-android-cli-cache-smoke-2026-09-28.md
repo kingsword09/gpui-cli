@@ -104,6 +104,16 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 该切片只闭合显式 Rust compiler selector 环境，不闭合 Cargo 可执行文件/global Cargo 配置、默认
   `rustc` 之外的工具链隐式读取、编译器子进程或 build.rs/Gradle/NDK/Xcode 隐藏 I/O 与远端状态。
 
+## T06 Cargo flags/profile override 输入证据（2026-10-04）
+
+- PR #293（`b2dc719`）将 `CARGO_BUILD_RUSTFLAGS` 与 dev/release profile 的输出相关环境覆盖纳入
+  BuildKey 环境摘要：debug、debug assertions、codegen units、incremental、LTO、opt-level、
+  overflow-checks、panic、rpath、split-debuginfo 和 strip。
+- 回归逐项改变上述变量，并确认每项都会改变环境摘要；普通构建路径不因这些环境值缺失或变化而被
+  阻止，缓存复用只在 BuildKey 不同后自然失效。
+- 该切片只覆盖当前 CLI 使用的 dev/release profile 显式环境覆盖，不闭合 custom profile 覆盖、Cargo
+  可执行文件/global Cargo 配置、build.rs/Gradle/NDK/Xcode 隐藏 I/O 或远端状态。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 

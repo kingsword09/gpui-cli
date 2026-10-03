@@ -416,7 +416,7 @@ custom/release signing 增加独立的项目内 keystore 扩展名过滤和短�
 `src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要，并已接入普通构建路径与 T06
 产物缓存。当前 desktop `build`/`run` 已通过
 `src/runner/build_inputs.rs` 组合稳定源码 manifest、Cargo.lock、NativeInputs、
-`rustc -vV` 和显式环境 allowlist（含 workspace wrapper、所选 target 的 linker/Rust flags、C/C++ 编译变量，以及 Rust wrapper、native compiler/archiver、所选 target linker 和显式 `RUSTC` selector 的可执行文件内容指纹，并纳入 `RUSTUP_TOOLCHAIN`/`RUSTC_BOOTSTRAP`），使用真实 BuildKey 生成
+`rustc -vV` 和显式环境 allowlist（含 workspace wrapper、所选 target 的 linker/Rust flags、C/C++ 编译变量，以及 Rust wrapper、native compiler/archiver、所选 target linker 和显式 `RUSTC` selector 的可执行文件内容指纹，并纳入 `RUSTUP_TOOLCHAIN`/`RUSTC_BOOTSTRAP`、Cargo build flags 与 dev/release profile overrides），使用真实 BuildKey 生成
 `.gpui/builds/desktop/<key>/cargo-target` 并设置 `CARGO_TARGET_DIR`；见
 [M04 desktop BuildKey](../experiments/M04-desktop-build-key-2026-09-27.md)。
 当前 desktop build plan 还会先创建临时 `FrozenInputs` 副本，将 Cargo workspace 和允许的
@@ -572,7 +572,8 @@ allowlist 遗漏已由 #149 修复；#283 又补齐 workspace wrapper 与所选 
 `CXXFLAGS`；#289 将 Rust wrapper、`CC`、`CXX`、`AR` 与所选 target linker 统一纳入有界 executable
 content fingerprint，命令参数、shell 语法、不可执行/不可读取/竞态/非 Unicode/超预算输入只 bypass
 cache reuse，普通构建继续；#291 再纳入显式 `RUSTC` selector 内容与 `RUSTUP_TOOLCHAIN`/
-`RUSTC_BOOTSTRAP`。其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
+`RUSTC_BOOTSTRAP`；#293 纳入 `CARGO_BUILD_RUSTFLAGS` 及 dev/release profile overrides。其他输入遗漏、
+跨命令共享构建和冻结执行边界仍有效，
 见[当前审计](current-status.md)。
 
 T06 的 desktop 首个缓存切片以 BuildKey 级 OS 文件锁串行请求，manifest 完整校验后跳过
@@ -899,7 +900,7 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 1. 已合并路径/hash/mtime/大小/file identity 索引；watcher 只记 dirty，rename/delete 两边失效，overflow/incomplete rename 和目录/文件读取竞态回退全量扫描。
 2. live watcher/session 已消费索引；Cargo metadata 发现的外部 path-package roots 使用稳定 package identity slot，Cargo.toml 改动刷新 scope 并增删 watcher roots。外部 build.rs package 的变化会触发该 root 的稳定全量扫描；build/observe/显式 sync 仍完整稳定核验。
 3. T06 cache policy 按 Cargo package manifest 解释 workspace 和 frozen external package 的 build script：默认 `build.rs`、`build=true` 或自定义脚本路径禁用 artifact cache reuse，`build=false` 不误触发；正常冻结/构建仍可继续；不声称自动发现 build script 实际读集。
-4. metadata 复用仅对平台 allow-list 类型开启：macOS/Linux 识别未知、网络/用户态类型后全量扫描；Windows 使用 volume path/drive type，并区分 UNC 与 verbatim disk path。PR #275/#277/#279/#281/#283/#285/#287/#289/#291 的 Linux/macOS/Windows CI 全绿；策略逻辑和单机数据不等于已在实际网络/用户态挂载上完成性能/事件可靠性对照。
+4. metadata 复用仅对平台 allow-list 类型开启：macOS/Linux 识别未知、网络/用户态类型后全量扫描；Windows 使用 volume path/drive type，并区分 UNC 与 verbatim disk path。PR #275/#277/#279/#281/#283/#285/#287/#289/#291/#293 的 Linux/macOS/Windows CI 全绿；策略逻辑和单机数据不等于已在实际网络/用户态挂载上完成性能/事件可靠性对照。
 5. 已有忽略手动基准：Apple M2/macOS release，4096×8192-byte inputs、10 warmup + 30 alternating pairs；wrong_revision_acceptance=0，oracle mismatch=0；索引单文件更新 P95 1.280 ms wall/1.242 ms CPU，稳定全量 oracle 170.913/170.458 ms；单文件更新 hash I/O 16 KiB，oracle 64 MiB。未完成：build.rs 声明及实际目录外读集/环境/网络输入闭包、网络/用户态文件系统实挂载对照和 Linux/Windows 性能对照。上列单机热缓存合成集数据不可外推为产品性能承诺；非构建文件仍不能按扩展名武断忽略。
 
 验收 T-08/T-09/P-02。回退：自动恢复全量扫描，优先保证 wrong_revision_acceptance=0。
