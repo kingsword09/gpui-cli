@@ -5,7 +5,7 @@ use super::output_layout::{BuildOutputLayout, BuildPlatform};
 use crate::devserver::inputs::{Inputs, NativeInputs};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -1725,11 +1725,105 @@ fn java_runtime_details() -> Option<(String, PathBuf)> {
 }
 
 fn java_runtime_fingerprint(java_home: &Path) -> Option<String> {
-    bounded_directory_fingerprint(
+    bounded_java_directory_fingerprint(
         java_home,
         b"gpui-android-java-runtime-v1\0",
         &mut DirectoryFingerprintBudget::default(),
     )
+}
+
+fn bounded_java_directory_fingerprint(
+    root: &Path,
+    domain: &[u8],
+    budget: &mut DirectoryFingerprintBudget,
+) -> Option<String> {
+    let metadata = fs::symlink_metadata(root).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let mut pending = vec![canonical_root.clone()];
+    let mut visited_directories = BTreeSet::new();
+    let mut entries = Vec::new();
+    while let Some(directory) = pending.pop() {
+        if !visited_directories.insert(directory.clone()) {
+            continue;
+        }
+        let mut children = fs::read_dir(&directory)
+            .ok()?
+            .map(|entry| entry.ok())
+            .collect::<Option<Vec<_>>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for entry in children {
+            let path = entry.path();
+            let relative = path.strip_prefix(&canonical_root).ok()?;
+            let relative = relative.to_str()?.replace('\\', "/");
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                let resolved = fs::canonicalize(&path).ok()?;
+                if !resolved.starts_with(&canonical_root) {
+                    return None;
+                }
+                let resolved_metadata = fs::symlink_metadata(&resolved).ok()?;
+                if !resolved_metadata.is_dir() && !resolved_metadata.is_file() {
+                    return None;
+                }
+                let target = resolved
+                    .strip_prefix(&canonical_root)
+                    .ok()?
+                    .to_str()?
+                    .replace('\\', "/");
+                budget.record(0)?;
+                entries.push((
+                    relative,
+                    resolved.clone(),
+                    b'l',
+                    Some(target),
+                    resolved_metadata.is_file(),
+                ));
+                if resolved_metadata.is_dir() {
+                    pending.push(resolved);
+                }
+            } else if metadata.is_dir() {
+                budget.record(0)?;
+                entries.push((relative, path.clone(), b'd', None, false));
+                pending.push(path);
+            } else if metadata.is_file() {
+                budget.record(0)?;
+                entries.push((relative, path, b'f', None, true));
+            } else {
+                return None;
+            }
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut digest = Sha256::new();
+    let mut file_hashes = BTreeMap::<PathBuf, String>::new();
+    digest.update(domain);
+    for (relative, path, kind, target, is_file) in entries {
+        digest.update([kind]);
+        digest.update((relative.len() as u64).to_be_bytes());
+        digest.update(relative.as_bytes());
+        if let Some(target) = target {
+            digest.update((target.len() as u64).to_be_bytes());
+            digest.update(target.as_bytes());
+        }
+        if is_file {
+            let content_hash = if let Some(hash) = file_hashes.get(&path) {
+                hash.clone()
+            } else {
+                let metadata = fs::metadata(&path).ok()?;
+                budget.record(metadata.len())?;
+                let hash = hash_file_contents(&path).ok()?;
+                file_hashes.insert(path, hash.clone());
+                hash
+            };
+            digest.update(content_hash.as_bytes());
+        }
+    }
+    Some(format!("{:x}", digest.finalize()))
 }
 
 fn command_version(
@@ -2907,7 +3001,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn android_java_runtime_fingerprint_rejects_symlinked_runtime_files() {
+    fn android_java_runtime_fingerprint_tracks_internal_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let java_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(java_root.path().join("lib/modules")).unwrap();
+        fs::create_dir_all(java_root.path().join("jmods")).unwrap();
+        fs::write(java_root.path().join("lib/runtime.bin"), b"JVM runtime v1").unwrap();
+        fs::write(java_root.path().join("jmods/java.base.jmod"), b"module v1").unwrap();
+        symlink("runtime.bin", java_root.path().join("lib/runtime-link.bin")).unwrap();
+        symlink(
+            "../../jmods",
+            java_root.path().join("lib/modules/jmods-alias"),
+        )
+        .unwrap();
+
+        let first = java_runtime_fingerprint(java_root.path())
+            .expect("internal JDK symlinks should be fingerprinted");
+        fs::write(java_root.path().join("lib/runtime.bin"), b"JVM runtime v2").unwrap();
+        assert_ne!(first, java_runtime_fingerprint(java_root.path()).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_java_runtime_fingerprint_rejects_symlinks_escaping_the_root() {
         use std::os::unix::fs::symlink;
 
         let java_root = tempfile::tempdir().unwrap();
