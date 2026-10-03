@@ -1318,10 +1318,50 @@ fn android_ndk_compiler_resource_fingerprint(host_root: &Path) -> Option<String>
     ))
 }
 
-fn android_ndk_directory_fingerprint(root: &Path) -> Option<String> {
-    const MAX_FILES: usize = 100_000;
-    const MAX_BYTES: u64 = 512 * 1024 * 1024;
+#[derive(Clone, Copy)]
+struct DirectoryFingerprintBudget {
+    entries: usize,
+    bytes: u64,
+    max_entries: usize,
+    max_bytes: u64,
+}
 
+impl DirectoryFingerprintBudget {
+    fn new(max_entries: usize, max_bytes: u64) -> Self {
+        Self {
+            entries: 0,
+            bytes: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    fn record(&mut self, bytes: u64) -> Option<()> {
+        self.entries = self.entries.checked_add(1)?;
+        self.bytes = self.bytes.checked_add(bytes)?;
+        (self.entries <= self.max_entries && self.bytes <= self.max_bytes).then_some(())
+    }
+}
+
+impl Default for DirectoryFingerprintBudget {
+    fn default() -> Self {
+        Self::new(100_000, 512 * 1024 * 1024)
+    }
+}
+
+fn android_ndk_directory_fingerprint(root: &Path) -> Option<String> {
+    bounded_directory_fingerprint(
+        root,
+        b"gpui-android-ndk-directory-v1\0",
+        &mut DirectoryFingerprintBudget::default(),
+    )
+}
+
+fn bounded_directory_fingerprint(
+    root: &Path,
+    domain: &[u8],
+    budget: &mut DirectoryFingerprintBudget,
+) -> Option<String> {
     let metadata = fs::symlink_metadata(root).ok()?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return None;
@@ -1329,7 +1369,6 @@ fn android_ndk_directory_fingerprint(root: &Path) -> Option<String> {
     let canonical_root = fs::canonicalize(root).ok()?;
     let mut pending = vec![canonical_root.clone()];
     let mut entries = Vec::new();
-    let mut total_bytes = 0_u64;
     while let Some(directory) = pending.pop() {
         let mut children = fs::read_dir(&directory)
             .ok()?
@@ -1346,32 +1385,21 @@ fn android_ndk_directory_fingerprint(root: &Path) -> Option<String> {
                 return None;
             }
             if metadata.is_dir() {
+                budget.record(0)?;
                 entries.push((relative, path.clone(), b'd'));
-                if entries.len() > MAX_FILES {
-                    return None;
-                }
                 pending.push(path);
             } else if metadata.is_file() {
-                total_bytes = total_bytes.checked_add(metadata.len())?;
-                if total_bytes > MAX_BYTES {
-                    return None;
-                }
+                budget.record(metadata.len())?;
                 entries.push((relative, path, b'f'));
-                if entries.len() > MAX_FILES {
-                    return None;
-                }
             } else {
                 return None;
             }
         }
     }
-    if entries.len() > MAX_FILES {
-        return None;
-    }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut digest = Sha256::new();
-    digest.update(b"gpui-android-ndk-directory-v1\0");
+    digest.update(domain);
     for (relative, path, kind) in entries {
         digest.update([kind]);
         digest.update((relative.len() as u64).to_be_bytes());
@@ -1465,6 +1493,7 @@ fn consistent_directories(paths: impl IntoIterator<Item = Option<PathBuf>>) -> O
 
 fn android_sdk_package_fingerprint(sdk_root: &Path) -> Option<String> {
     let mut packages = Vec::new();
+    let mut budget = DirectoryFingerprintBudget::default();
     for category in ["platforms", "build-tools"] {
         let category_path = sdk_root.join(category);
         let category_metadata = fs::symlink_metadata(&category_path).ok()?;
@@ -1483,7 +1512,12 @@ fn android_sdk_package_fingerprint(sdk_root: &Path) -> Option<String> {
                 return None;
             }
             let revision = android_package_revision(&entry.path().join("source.properties"))?;
-            packages.push(format!("{category}/{name}={revision}"));
+            let contents = bounded_directory_fingerprint(
+                &entry.path(),
+                b"gpui-android-sdk-package-v1\0",
+                &mut budget,
+            )?;
+            packages.push(format!("{category}/{name}={revision};contents={contents}"));
             category_count += 1;
         }
         if category_count == 0 {
@@ -2590,6 +2624,19 @@ mod tests {
     }
 
     #[test]
+    fn bounded_directory_fingerprint_rejects_trees_over_the_shared_budget() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("one"), b"1").unwrap();
+        fs::write(root.path().join("two"), b"2").unwrap();
+        let mut budget = DirectoryFingerprintBudget::new(1, 8);
+
+        assert!(
+            bounded_directory_fingerprint(root.path(), b"test-directory-v1\0", &mut budget)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn android_sdk_fingerprint_tracks_installed_platform_and_build_tools_revisions() {
         let sdk = tempfile::tempdir().unwrap();
         let platform = sdk.path().join("platforms/android-34");
@@ -2597,16 +2644,22 @@ mod tests {
         fs::create_dir_all(&platform).unwrap();
         fs::create_dir_all(&build_tools).unwrap();
         fs::write(platform.join("source.properties"), "Pkg.Revision=3\n").unwrap();
+        fs::write(platform.join("android.jar"), b"platform API v1").unwrap();
         fs::write(
             build_tools.join("source.properties"),
             "Pkg.Revision=34.0.0\n",
         )
         .unwrap();
+        fs::write(build_tools.join("aapt2"), b"build tool v1").unwrap();
 
         let first = android_sdk_package_fingerprint(sdk.path()).unwrap();
         assert!(first.contains("platforms/android-34=3"));
         assert!(first.contains("build-tools/34.0.0=34.0.0"));
         assert!(!first.contains(&sdk.path().display().to_string()));
+
+        fs::write(build_tools.join("aapt2"), b"replacement build tool").unwrap();
+        let replaced_content = android_sdk_package_fingerprint(sdk.path()).unwrap();
+        assert_ne!(first, replaced_content);
 
         fs::write(
             build_tools.join("source.properties"),
@@ -2614,7 +2667,32 @@ mod tests {
         )
         .unwrap();
         let second = android_sdk_package_fingerprint(sdk.path()).unwrap();
-        assert_ne!(first, second);
+        assert_ne!(replaced_content, second);
+
+        let other_sdk = tempfile::tempdir().unwrap();
+        for (relative, contents) in [
+            (
+                "platforms/android-34/source.properties",
+                "Pkg.Revision=3\n".as_bytes(),
+            ),
+            (
+                "platforms/android-34/android.jar",
+                b"platform API v1".as_slice(),
+            ),
+            (
+                "build-tools/34.0.0/source.properties",
+                "Pkg.Revision=34.0.0\n".as_bytes(),
+            ),
+            ("build-tools/34.0.0/aapt2", b"build tool v1".as_slice()),
+        ] {
+            let path = other_sdk.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        assert_eq!(
+            first,
+            android_sdk_package_fingerprint(other_sdk.path()).unwrap()
+        );
     }
 
     #[test]
@@ -2644,6 +2722,28 @@ mod tests {
             .unwrap();
             fs::create_dir_all(linked_sdk.path().join("build-tools")).unwrap();
             assert!(android_sdk_package_fingerprint(linked_sdk.path()).is_none());
+
+            let linked_package_sdk = tempfile::tempdir().unwrap();
+            let linked_platform = linked_package_sdk.path().join("platforms/android-34");
+            let linked_build_tools = linked_package_sdk.path().join("build-tools/34.0.0");
+            fs::create_dir_all(&linked_platform).unwrap();
+            fs::create_dir_all(&linked_build_tools).unwrap();
+            fs::write(
+                linked_platform.join("source.properties"),
+                "Pkg.Revision=3\n",
+            )
+            .unwrap();
+            fs::write(
+                linked_build_tools.join("source.properties"),
+                "Pkg.Revision=34.0.0\n",
+            )
+            .unwrap();
+            symlink(
+                sdk.path().join("platforms/android-34/source.properties"),
+                linked_platform.join("android.jar"),
+            )
+            .unwrap();
+            assert!(android_sdk_package_fingerprint(linked_package_sdk.path()).is_none());
         }
     }
 
