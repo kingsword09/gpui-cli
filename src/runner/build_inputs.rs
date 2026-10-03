@@ -1288,9 +1288,10 @@ fn android_toolchain_fingerprint(project_root: &Path) -> Option<String> {
     let ndk_compiler_resources =
         android_ndk_compiler_resource_fingerprint(&android_ndk_host_root(&ndk_home)?)?;
     let cargo_ndk = command_version("cargo", &["ndk", "--version"], false)?;
-    let java = java_version()?;
+    let (java, java_home) = java_runtime_details()?;
+    let java_runtime = java_runtime_fingerprint(&java_home)?;
     let identity = format!(
-        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\nndk-compiler-resources={ndk_compiler_resources}\ncargo-ndk={cargo_ndk}\njava={java}"
+        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\nndk-compiler-resources={ndk_compiler_resources}\ncargo-ndk={cargo_ndk}\njava={java}\njava-runtime={java_runtime}"
     );
     Some(format!("{:x}", Sha256::digest(identity.as_bytes())))
 }
@@ -1686,19 +1687,49 @@ fn android_package_revision(source_properties: &Path) -> Option<String> {
     })
 }
 
-fn java_version() -> Option<String> {
-    match env::var_os("JAVA_HOME") {
-        Some(home) if !home.is_empty() => {
-            let executable = PathBuf::from(home).join("bin").join(if cfg!(windows) {
-                "java.exe"
-            } else {
-                "java"
-            });
-            command_version(executable.as_os_str(), &["-version"], true)
-        }
-        Some(_) => None,
-        None => command_version(OsStr::new("java"), &["-version"], true),
+fn java_runtime_details() -> Option<(String, PathBuf)> {
+    let (program, args) = match env::var_os("JAVA_HOME") {
+        Some(home) if !home.is_empty() => (
+            PathBuf::from(home)
+                .join("bin")
+                .join(if cfg!(windows) { "java.exe" } else { "java" }),
+            vec!["-XshowSettings:properties", "-version"],
+        ),
+        Some(_) => return None,
+        None => (
+            PathBuf::from("java"),
+            vec!["-XshowSettings:properties", "-version"],
+        ),
+    };
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
     }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut version = None;
+    let mut home = None;
+    for line in stdout.lines().chain(stderr.lines()) {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "java.version" => version = Some(value.trim().to_owned()),
+            "java.home" => home = Some(PathBuf::from(value.trim())),
+            _ => {}
+        }
+    }
+    let version = version.filter(|value| !value.is_empty())?;
+    let home = home.filter(|path| !path.as_os_str().is_empty())?;
+    Some((version, home))
+}
+
+fn java_runtime_fingerprint(java_home: &Path) -> Option<String> {
+    bounded_directory_fingerprint(
+        java_home,
+        b"gpui-android-java-runtime-v1\0",
+        &mut DirectoryFingerprintBudget::default(),
+    )
 }
 
 fn command_version(
@@ -2837,6 +2868,62 @@ mod tests {
     }
 
     #[test]
+    fn android_java_runtime_fingerprint_tracks_content_and_ignores_install_root() {
+        let first_root = tempfile::tempdir().unwrap();
+        let first_java = first_root.path().join("Contents/Home");
+        fs::create_dir_all(first_java.join("bin")).unwrap();
+        fs::create_dir_all(first_java.join("lib/server")).unwrap();
+        fs::write(first_java.join("release"), "JAVA_VERSION=\"21.0.1\"\n").unwrap();
+        fs::write(first_java.join("bin/java"), b"java launcher").unwrap();
+        fs::write(
+            first_java.join("lib/server/libjvm.dylib"),
+            b"JVM runtime v1",
+        )
+        .unwrap();
+
+        let first = java_runtime_fingerprint(&first_java).unwrap();
+        assert!(!first.contains(&first_root.path().display().to_string()));
+
+        let second_root = tempfile::tempdir().unwrap();
+        let second_java = second_root.path().join("Contents/Home");
+        fs::create_dir_all(second_java.join("bin")).unwrap();
+        fs::create_dir_all(second_java.join("lib/server")).unwrap();
+        fs::write(second_java.join("release"), "JAVA_VERSION=\"21.0.1\"\n").unwrap();
+        fs::write(second_java.join("bin/java"), b"java launcher").unwrap();
+        fs::write(
+            second_java.join("lib/server/libjvm.dylib"),
+            b"JVM runtime v1",
+        )
+        .unwrap();
+        assert_eq!(first, java_runtime_fingerprint(&second_java).unwrap());
+
+        fs::write(
+            second_java.join("lib/server/libjvm.dylib"),
+            b"JVM runtime v2",
+        )
+        .unwrap();
+        assert_ne!(first, java_runtime_fingerprint(&second_java).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_java_runtime_fingerprint_rejects_symlinked_runtime_files() {
+        use std::os::unix::fs::symlink;
+
+        let java_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(java_root.path().join("lib")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("libjvm.dylib"), b"JVM runtime").unwrap();
+        symlink(
+            outside.path().join("libjvm.dylib"),
+            java_root.path().join("lib/libjvm.dylib"),
+        )
+        .unwrap();
+
+        assert!(java_runtime_fingerprint(java_root.path()).is_none());
+    }
+
+    #[test]
     fn android_sdk_fingerprint_tracks_installed_platform_and_build_tools_revisions() {
         let sdk = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
@@ -2998,7 +3085,7 @@ mod tests {
         let ndk_alias_matches = env::var_os("NDK_HOME").is_none()
             || consistent_environment_directory(&["NDK_HOME"]).as_ref() == ndk_home.as_ref();
         let probes_available = command_version("cargo", &["ndk", "--version"], false).is_some()
-            && java_version().is_some();
+            && java_runtime_details().is_some();
         let package_metadata_available = sdk_root
             .as_deref()
             .and_then(|root| android_sdk_package_fingerprint(root, &project_root))
