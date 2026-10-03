@@ -24,6 +24,9 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   watcher；外部逻辑 slot 按稳定 package identity 排序，不公开绝对 source root；Cargo.toml 变化刷新
   scope 并增删 watcher roots。workspace 与 external 同名逻辑路径保持独立；冻结副本 slot 与 workspace
   路径碰撞时换用受控逻辑目录，input hash 不依赖 checkout 根路径。
+- PR #277（`657fd93`）将 T06 build-script cache bypass 扩展至 frozen external path package，并识别
+  默认 `build.rs` 与 Cargo `[package].build` 自定义脚本；外部自定义脚本被复制进快照并触发 artifact
+  cache bypass，普通构建继续可用。该策略不发现脚本的真实文件/环境/网络读集，也不构成完整输入闭包。
 - 包含外部 `build.rs` 的 package 在该 root 内任一 watcher 变化时做稳定全量重扫，避免 metadata 复用
   漏过声明范围内的文件变化；这不是对 build.rs 声明或实际读集的发现。目录外读取、环境变量、时间、
   网络等隐藏输入仍不属于该索引闭包。
