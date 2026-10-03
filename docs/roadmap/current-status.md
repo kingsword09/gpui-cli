@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-03（Asia/Shanghai）。核查代码：`f911394`（PR #285 squash merge）。
+更新日期：2026-10-03（Asia/Shanghai）。核查代码：`a385d8a`（PR #287 squash merge）。
 本轮核查时 `origin/main` 指向该提交；后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -165,6 +165,7 @@ build-script 声明/实际读集和网络/用户态文件系统跨平台对照�
 | `c5003b0`（#281） | 增加冻结 desktop build plan 回归：Cargo package 设置 `build=false`、源码树仍有 `build.rs` 时，脚本文件会进入冻结快照但不关闭 cache eligibility；默认/自定义脚本和 external package 的 bypass 语义保持 | 仍只验证 Cargo manifest 声明边界；不发现 build.rs 实际文件/环境/网络读集，也不把正常冻结/构建宣称为完整输入闭包 |
 | `d132fe9`（#283） | BuildKey 环境摘要纳入 `RUSTC_WORKSPACE_WRAPPER`，以及所选 target 对应的 Cargo linker/Rust flags；分别增加变化和 target 隔离回归 | 修复已确认的编译环境键遗漏；不等于任意 wrapper 内容、build.rs/Gradle/NDK/Xcode 隐藏 I/O 或远端状态已闭合 |
 | `f911394`（#285） | 对 `RUSTC_WRAPPER`/`RUSTC_WORKSPACE_WRAPPER` 指向的可执行文件做有界 SHA-256/大小指纹；内容变化改变 BuildKey，无法解析、读取竞态、非普通文件或超过 64 MiB 时仅禁用 cache reuse；matrix desktop/iOS preview 同步采用该 gate | 不递归 wrapper 的依赖/子进程/环境隐式读取；不闭合 build.rs/Gradle/NDK/Xcode 任意 I/O 或远端状态 |
+| `a385d8a`（#287） | BuildKey 环境摘要补齐 `AR`、`CFLAGS`、`CXXFLAGS`，各变量变化均有 hash 回归 | 仅覆盖显式 native 编译环境变量；不代表工具链所有隐式输入或任意构建脚本读取已闭合 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -380,6 +381,7 @@ build-script 声明/实际读集和网络/用户态文件系统跨平台对照�
 | PR #281 合并 | 增加 `build=false` 且残留 `build.rs` 的冻结 desktop plan cache-eligibility 回归；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 最终全绿；workspace 432 passed、1 个手动 benchmark ignored；无发布/tag |
 | PR #283 合并 | BuildKey 纳入 workspace wrapper 与所选 target 的 linker/Rust flags，并通过各维度变化及 target 隔离回归；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；workspace 433 passed、1 个手动 benchmark ignored；无发布/tag |
 | PR #285 合并 | Rust compiler wrapper 可执行文件指纹与不可安全指纹时的 cache bypass 接入普通三端计划及 matrix desktop/iOS/Android preview gate；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；workspace 435 passed、1 个手动 benchmark ignored；无发布/tag |
+| PR #287 合并 | BuildKey allowlist 纳入 `AR`、`CFLAGS`、`CXXFLAGS`，每项均有变更 hash 回归；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；workspace 436 passed、1 个手动 benchmark ignored；无发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
