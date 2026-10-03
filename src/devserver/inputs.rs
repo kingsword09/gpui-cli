@@ -3,11 +3,12 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 const IGNORED: &[&str] = &[
     "target",
@@ -19,6 +20,7 @@ const IGNORED: &[&str] = &[
     "node_modules",
     "Pods",
 ];
+const MAX_INDEXED_DIRTY_PATHS: usize = 4096;
 const SENSITIVE_INPUT_FILE_NAMES: &[&str] = &["local.properties", "keystore.properties"];
 const SENSITIVE_INPUT_FILE_EXTENSIONS: &[&str] = &["jks", "keystore", "p12", "pfx"];
 
@@ -145,6 +147,566 @@ impl AssetDelta {
     pub fn is_empty(&self) -> bool {
         self.changed.is_empty() && self.removed.is_empty()
     }
+}
+
+/// A filesystem stamp that is safe to use for deciding whether an existing
+/// content hash can be reused. The file identity is important for editors
+/// that replace a file in place: a path, size and timestamp can otherwise
+/// look unchanged while the underlying file has changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexedFile {
+    pub hash: String,
+    pub modified: SystemTime,
+    pub size: u64,
+    pub identity: file_id::FileId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexedRefreshKind {
+    Cached,
+    InitialFullScan,
+    Incremental,
+    FallbackFullScan,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IndexedRefresh {
+    pub kind: Option<IndexedRefreshKind>,
+    pub hashed_files: usize,
+    pub reused_files: usize,
+    pub removed_files: usize,
+}
+
+/// Metadata-assisted input index used by the live watcher.
+///
+/// Watcher callbacks only call [`Self::mark_dirty`] or
+/// [`Self::mark_renamed`]. They never read the project. A later refresh walks
+/// only the dirty subtrees, reuses hashes whose metadata and identity are
+/// unchanged, and removes entries that disappeared from a dirty subtree.
+/// Initial refreshes, overflow, unsupported file identities, and read races
+/// use the stable full scanner instead.
+#[derive(Debug)]
+pub struct IndexedInputs {
+    root: PathBuf,
+    entries: BTreeMap<String, IndexedFile>,
+    untracked_directory_links: BTreeSet<String>,
+    excluded_sensitive_files: BTreeSet<String>,
+    manifest: Inputs,
+    dirty: BTreeSet<String>,
+    initialized: bool,
+    force_full_scan: bool,
+    index_disabled: bool,
+    incremental_enabled: bool,
+}
+
+impl IndexedInputs {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            entries: BTreeMap::new(),
+            untracked_directory_links: BTreeSet::new(),
+            excluded_sensitive_files: BTreeSet::new(),
+            manifest: Inputs::default(),
+            dirty: BTreeSet::new(),
+            initialized: false,
+            force_full_scan: false,
+            index_disabled: false,
+            incremental_enabled: true,
+        }
+    }
+
+    pub fn manifest(&self) -> &Inputs {
+        &self.manifest
+    }
+
+    pub fn entries(&self) -> &BTreeMap<String, IndexedFile> {
+        &self.entries
+    }
+
+    pub fn is_index_disabled(&self) -> bool {
+        self.index_disabled || !self.incremental_enabled
+    }
+
+    /// Permanently disables metadata reuse for this index instance. Use this
+    /// for filesystems whose timestamps or identities are not trustworthy;
+    /// every refresh then uses the stable full content scanner.
+    pub fn disable_incremental(&mut self) {
+        self.incremental_enabled = false;
+        self.force_full_scan = true;
+    }
+
+    /// Records a watcher path without touching the filesystem.
+    pub fn mark_dirty(&mut self, path: impl AsRef<Path>) {
+        let Some(relative) = self.relative_dirty_path(path.as_ref()) else {
+            self.force_full_scan = true;
+            return;
+        };
+        if !should_trigger(Path::new(&relative)) {
+            return;
+        }
+        if self.dirty.len() >= MAX_INDEXED_DIRTY_PATHS && !self.dirty.contains(&relative) {
+            self.dirty.clear();
+            self.force_full_scan = true;
+            return;
+        }
+        self.dirty.insert(relative);
+    }
+
+    /// Invalidates both sides of a rename. This also covers a directory move:
+    /// the old subtree is removed during refresh and the new subtree is
+    /// scanned, so a late event for either path cannot leave stale entries.
+    pub fn mark_renamed(&mut self, from: impl AsRef<Path>, to: impl AsRef<Path>) {
+        self.mark_dirty(from);
+        self.mark_dirty(to);
+    }
+
+    /// Marks the watcher stream as unreliable. The next refresh performs a
+    /// stable full scan, which is the safe response to notify overflow or a
+    /// backend that cannot report complete paths.
+    pub fn mark_overflow(&mut self) {
+        self.force_full_scan = true;
+    }
+
+    pub fn refresh(&mut self, max_rescans: usize) -> Result<IndexedRefresh> {
+        if !self.initialized
+            || self.force_full_scan
+            || self.index_disabled
+            || !self.incremental_enabled
+        {
+            let kind = if self.initialized {
+                IndexedRefreshKind::FallbackFullScan
+            } else {
+                IndexedRefreshKind::InitialFullScan
+            };
+            return self.refresh_full(max_rescans, kind);
+        }
+        if self.dirty.is_empty() {
+            return Ok(IndexedRefresh {
+                kind: Some(IndexedRefreshKind::Cached),
+                ..IndexedRefresh::default()
+            });
+        }
+
+        let dirty = self.coalesced_dirty_paths();
+        match self.refresh_dirty(&dirty) {
+            Ok(refresh) => {
+                self.dirty.clear();
+                Ok(refresh)
+            }
+            Err(_) => {
+                self.force_full_scan = true;
+                self.refresh_full(max_rescans, IndexedRefreshKind::FallbackFullScan)
+            }
+        }
+    }
+
+    fn refresh_full(
+        &mut self,
+        max_rescans: usize,
+        kind: IndexedRefreshKind,
+    ) -> Result<IndexedRefresh> {
+        let previous_paths = self.entries.keys().cloned().collect::<BTreeSet<_>>();
+        let (manifest, entries) = match scan_indexed_stable(&self.root, max_rescans) {
+            Ok(scanned) => (scanned.manifest, Some(scanned.entries)),
+            Err(_) => (Inputs::scan_stable(&self.root, max_rescans)?, None),
+        };
+        let hashed_files = manifest.sources.len() + manifest.assets.len();
+        let current_paths = manifest
+            .sources
+            .keys()
+            .chain(manifest.assets.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        self.manifest = manifest;
+        self.entries = entries.unwrap_or_default();
+        self.untracked_directory_links = self
+            .manifest
+            .untracked_directory_links
+            .iter()
+            .cloned()
+            .collect();
+        self.excluded_sensitive_files = self
+            .manifest
+            .excluded_sensitive_files
+            .iter()
+            .cloned()
+            .collect();
+        self.index_disabled = self.entries.is_empty() && !current_paths.is_empty();
+        self.initialized = true;
+        self.force_full_scan = false;
+        self.dirty.clear();
+
+        Ok(IndexedRefresh {
+            kind: Some(kind),
+            hashed_files,
+            reused_files: 0,
+            removed_files: previous_paths.difference(&current_paths).count(),
+        })
+    }
+
+    fn refresh_dirty(&mut self, dirty: &[String]) -> Result<IndexedRefresh> {
+        let mut refresh = IndexedRefresh {
+            kind: Some(IndexedRefreshKind::Incremental),
+            ..IndexedRefresh::default()
+        };
+        for relative in dirty {
+            let old_entries = self.take_entries_under(relative);
+            self.take_special_paths_under(relative);
+            let path = self.root.join(relative);
+            self.scan_dirty_path(relative, &path, old_entries, &mut refresh)?;
+        }
+        self.rebuild_manifest();
+        Ok(refresh)
+    }
+
+    fn scan_dirty_path(
+        &mut self,
+        relative: &str,
+        path: &Path,
+        mut old_entries: BTreeMap<String, IndexedFile>,
+        refresh: &mut IndexedRefresh,
+    ) -> Result<()> {
+        let kind = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                refresh.removed_files += old_entries.len();
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading dirty input {}", path.display()));
+            }
+        };
+        if kind.is_dir() {
+            let mut pending = vec![path.to_owned()];
+            while let Some(dir) = pending.pop() {
+                let directory_before = read_directory_stamp(&dir)?;
+                let entries = fs::read_dir(&dir)
+                    .with_context(|| format!("reading dirty inputs in {}", dir.display()))?;
+                for entry in entries {
+                    let entry = entry?;
+                    let child = entry.path();
+                    let child_relative = child.strip_prefix(&self.root)?;
+                    if !should_trigger(child_relative) {
+                        continue;
+                    }
+                    let child_name = input_relative_name(child_relative);
+                    let child_kind = entry.file_type()?;
+                    if child_kind.is_dir() {
+                        pending.push(child);
+                    } else if child_kind.is_symlink() && child.is_dir() {
+                        self.untracked_directory_links.insert(child_name);
+                    } else if child_kind.is_file() || child_kind.is_symlink() {
+                        self.scan_dirty_file(&child_name, &child, &mut old_entries, true, refresh)?;
+                    }
+                }
+                if directory_before != read_directory_stamp(&dir)? {
+                    bail!(
+                        "directory changed while refreshing inputs: {}",
+                        dir.display()
+                    );
+                }
+            }
+        } else if kind.is_symlink() && path.is_dir() {
+            self.untracked_directory_links.insert(relative.to_owned());
+        } else if kind.is_file() || kind.is_symlink() {
+            self.scan_dirty_file(relative, path, &mut old_entries, true, refresh)?;
+        }
+        refresh.removed_files += old_entries.len();
+        Ok(())
+    }
+
+    fn scan_dirty_file(
+        &mut self,
+        relative: &str,
+        path: &Path,
+        old_entries: &mut BTreeMap<String, IndexedFile>,
+        force_hash: bool,
+        refresh: &mut IndexedRefresh,
+    ) -> Result<()> {
+        if is_sensitive_input_file(path) {
+            self.excluded_sensitive_files.insert(relative.to_owned());
+            if old_entries.remove(relative).is_some() {
+                refresh.removed_files += 1;
+            }
+            return Ok(());
+        }
+        let Some(old) = old_entries.remove(relative) else {
+            let before = read_file_stamp(path)?;
+            let hash = hash_input_file(path)?;
+            let after = read_file_stamp(path)?;
+            if before != after {
+                bail!(
+                    "input changed while incrementally hashing: {}",
+                    path.display()
+                );
+            }
+            self.entries.insert(
+                relative.to_owned(),
+                IndexedFile {
+                    hash,
+                    modified: before.modified,
+                    size: before.size,
+                    identity: before.identity,
+                },
+            );
+            refresh.hashed_files += 1;
+            return Ok(());
+        };
+        let stamp = read_file_stamp(path)?;
+        if !force_hash && same_file_stamp(&old, &stamp) {
+            self.entries.insert(relative.to_owned(), old);
+            refresh.reused_files += 1;
+            return Ok(());
+        }
+        let hash = hash_input_file(path)?;
+        let after = read_file_stamp(path)?;
+        if stamp != after {
+            bail!(
+                "input changed while incrementally hashing: {}",
+                path.display()
+            );
+        }
+        self.entries.insert(
+            relative.to_owned(),
+            IndexedFile {
+                hash,
+                modified: stamp.modified,
+                size: stamp.size,
+                identity: stamp.identity,
+            },
+        );
+        refresh.hashed_files += 1;
+        Ok(())
+    }
+
+    fn take_entries_under(&mut self, relative: &str) -> BTreeMap<String, IndexedFile> {
+        let matching = self
+            .entries
+            .keys()
+            .filter(|path| path_is_under(path, relative))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut old = BTreeMap::new();
+        for path in matching {
+            if let Some(entry) = self.entries.remove(&path) {
+                old.insert(path, entry);
+            }
+        }
+        old
+    }
+
+    fn take_special_paths_under(&mut self, relative: &str) {
+        self.untracked_directory_links
+            .retain(|path| !path_is_under(path, relative));
+        self.excluded_sensitive_files
+            .retain(|path| !path_is_under(path, relative));
+    }
+
+    fn rebuild_manifest(&mut self) {
+        let mut manifest = Inputs {
+            untracked_directory_links: self.untracked_directory_links.iter().cloned().collect(),
+            excluded_sensitive_files: self.excluded_sensitive_files.iter().cloned().collect(),
+            ..Inputs::default()
+        };
+        for (path, entry) in &self.entries {
+            if path.starts_with("assets/") {
+                manifest.assets.insert(path.clone(), entry.hash.clone());
+            } else {
+                manifest.sources.insert(path.clone(), entry.hash.clone());
+            }
+        }
+        self.manifest = manifest;
+    }
+
+    fn coalesced_dirty_paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        for path in &self.dirty {
+            if paths.iter().any(|parent| path_is_under(path, parent)) {
+                continue;
+            }
+            paths.retain(|existing| !path_is_under(existing, path));
+            paths.push(path.clone());
+        }
+        paths
+    }
+
+    fn relative_dirty_path(&self, path: &Path) -> Option<String> {
+        let candidate = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            self.root.join(path)
+        };
+        let relative = candidate.strip_prefix(&self.root).ok()?;
+        if relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        let relative = input_relative_name(relative);
+        Some(relative)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    modified: SystemTime,
+    size: u64,
+    identity: file_id::FileId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirectoryStamp {
+    modified: SystemTime,
+    size: u64,
+    identity: file_id::FileId,
+}
+
+fn read_directory_stamp(path: &Path) -> Result<DirectoryStamp> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("reading input directory metadata: {}", path.display()))?;
+    if !metadata.is_dir() {
+        bail!("input directory changed type: {}", path.display());
+    }
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("reading input directory mtime: {}", path.display()))?;
+    let identity = file_id::get_file_id(path)
+        .with_context(|| format!("reading input directory identity: {}", path.display()))?;
+    Ok(DirectoryStamp {
+        modified,
+        size: metadata.len(),
+        identity,
+    })
+}
+
+struct ScannedIndex {
+    manifest: Inputs,
+    entries: BTreeMap<String, IndexedFile>,
+}
+
+fn scan_indexed_stable(root: &Path, max_rescans: usize) -> Result<ScannedIndex> {
+    let mut previous = scan_indexed_once(root)?;
+    for _ in 0..=max_rescans {
+        let current = scan_indexed_once(root)?;
+        if current.manifest == previous.manifest {
+            return Ok(current);
+        }
+        previous = current;
+    }
+    bail!(
+        "project inputs changed during the bounded indexed scan after {} rescans",
+        max_rescans
+    )
+}
+
+fn scan_indexed_once(root: &Path) -> Result<ScannedIndex> {
+    let mut manifest = Inputs::default();
+    let mut entries = BTreeMap::new();
+    let mut pending = vec![root.to_owned()];
+    while let Some(dir) = pending.pop() {
+        let children = match fs::read_dir(&dir) {
+            Ok(children) => children,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading inputs in {}", dir.display()));
+            }
+        };
+        for child in children {
+            let child = child?;
+            let path = child.path();
+            let relative = path.strip_prefix(root)?;
+            if !should_trigger(relative) {
+                continue;
+            }
+            let name = input_relative_name(relative);
+            let kind = child.file_type()?;
+            if kind.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if kind.is_symlink() && path.is_dir() {
+                manifest.untracked_directory_links.push(name);
+                continue;
+            }
+            if !kind.is_file() && !kind.is_symlink() {
+                continue;
+            }
+            if is_sensitive_input_file(&path) {
+                manifest.excluded_sensitive_files.push(name);
+                continue;
+            }
+            let before = read_file_stamp(&path)?;
+            let hash = hash_input_file(&path)?;
+            let after = read_file_stamp(&path)?;
+            if before != after {
+                bail!("input changed while indexing: {}", path.display());
+            }
+            if name.starts_with("assets/") {
+                manifest.assets.insert(name.clone(), hash.clone());
+            } else {
+                manifest.sources.insert(name.clone(), hash.clone());
+            }
+            entries.insert(
+                name,
+                IndexedFile {
+                    hash,
+                    modified: before.modified,
+                    size: before.size,
+                    identity: before.identity,
+                },
+            );
+        }
+    }
+    manifest.untracked_directory_links.sort();
+    manifest.excluded_sensitive_files.sort();
+    Ok(ScannedIndex { manifest, entries })
+}
+
+fn read_file_stamp(path: &Path) -> Result<FileStamp> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("reading input metadata: {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("input is no longer a regular file: {}", path.display());
+    }
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("reading input mtime: {}", path.display()))?;
+    let identity = file_id::get_file_id(path)
+        .with_context(|| format!("reading input identity: {}", path.display()))?;
+    Ok(FileStamp {
+        modified,
+        size: metadata.len(),
+        identity,
+    })
+}
+
+fn same_file_stamp(entry: &IndexedFile, stamp: &FileStamp) -> bool {
+    entry.modified == stamp.modified && entry.size == stamp.size && entry.identity == stamp.identity
+}
+
+fn hash_input_file(path: &Path) -> Result<String> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("reading input {}", path.display()))?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 32 * 1024];
+    loop {
+        let len = file.read(&mut buffer)?;
+        if len == 0 {
+            break;
+        }
+        hash.update(&buffer[..len]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn input_relative_name(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn path_is_under(path: &str, prefix: &str) -> bool {
+    prefix.is_empty() || path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
 impl NativeInputs {
@@ -1007,6 +1569,173 @@ mod tests {
         let delta = AssetDelta::between(&after.assets, &deleted.assets);
         assert_eq!(delta.changed, Vec::<String>::new());
         assert_eq!(delta.removed, vec!["assets/icon"]);
+    }
+
+    #[test]
+    fn indexed_refresh_hashes_dirty_files_and_reuses_unchanged_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("assets")).unwrap();
+        fs::write(root.path().join("main.rs"), "source").unwrap();
+        fs::write(root.path().join("assets/icon.png"), "image").unwrap();
+
+        let mut index = IndexedInputs::new(root.path());
+        let initial = index.refresh(1).unwrap();
+        assert_eq!(initial.kind, Some(IndexedRefreshKind::InitialFullScan));
+        assert_eq!(initial.hashed_files, 2);
+        assert_eq!(index.entries().len(), 2);
+
+        let cached = index.refresh(1).unwrap();
+        assert_eq!(cached.kind, Some(IndexedRefreshKind::Cached));
+        assert_eq!(cached.hashed_files, 0);
+
+        // A direct watcher path is always rehashed, even if size/mtime/file ID
+        // happen to look unchanged by the time the debounced event is handled.
+        fs::write(root.path().join("main.rs"), "source").unwrap();
+        index.mark_dirty("main.rs");
+        let refreshed = index.refresh(1).unwrap();
+        assert_eq!(refreshed.kind, Some(IndexedRefreshKind::Incremental));
+        assert_eq!(refreshed.hashed_files, 1);
+        assert_eq!(refreshed.reused_files, 0);
+        assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
+
+        index.mark_dirty("assets");
+        let directory_refresh = index.refresh(1).unwrap();
+        assert_eq!(directory_refresh.hashed_files, 1);
+        assert_eq!(directory_refresh.reused_files, 0);
+        assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
+    }
+
+    #[test]
+    fn indexed_refresh_invalidates_both_sides_of_file_and_directory_moves() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("old/nested")).unwrap();
+        fs::write(root.path().join("old/nested/a.rs"), "a").unwrap();
+        fs::write(root.path().join("old/nested/b.rs"), "b").unwrap();
+        let mut index = IndexedInputs::new(root.path());
+        index.refresh(1).unwrap();
+
+        fs::rename(root.path().join("old"), root.path().join("new")).unwrap();
+        index.mark_renamed("old", "new");
+        let refresh = index.refresh(1).unwrap();
+        assert_eq!(refresh.kind, Some(IndexedRefreshKind::Incremental));
+        assert_eq!(refresh.hashed_files, 2);
+        assert_eq!(refresh.removed_files, 2);
+        assert_eq!(
+            index.entries().keys().cloned().collect::<Vec<_>>(),
+            vec!["new/nested/a.rs", "new/nested/b.rs",]
+        );
+
+        fs::rename(
+            root.path().join("new/nested/a.rs"),
+            root.path().join("new/nested/c.rs"),
+        )
+        .unwrap();
+        index.mark_renamed("new/nested/a.rs", "new/nested/c.rs");
+        let refresh = index.refresh(1).unwrap();
+        assert_eq!(refresh.hashed_files, 1);
+        assert_eq!(refresh.removed_files, 1);
+        assert!(!index.entries().contains_key("new/nested/a.rs"));
+        assert!(index.entries().contains_key("new/nested/c.rs"));
+        assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
+    }
+
+    #[test]
+    fn indexed_refresh_falls_back_after_overflow_and_dirty_queue_limit() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("main.rs"), "first").unwrap();
+        let mut index = IndexedInputs::new(root.path());
+        index.refresh(1).unwrap();
+
+        fs::write(root.path().join("main.rs"), "other").unwrap();
+        index.mark_overflow();
+        let overflow = index.refresh(1).unwrap();
+        assert_eq!(overflow.kind, Some(IndexedRefreshKind::FallbackFullScan));
+        assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
+
+        for path_index in 0..=MAX_INDEXED_DIRTY_PATHS {
+            index.mark_dirty(format!("source-{path_index}.rs"));
+        }
+        let bounded = index.refresh(1).unwrap();
+        assert_eq!(bounded.kind, Some(IndexedRefreshKind::FallbackFullScan));
+    }
+
+    #[test]
+    fn indexed_refresh_ignores_events_for_excluded_paths() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("target/debug")).unwrap();
+        fs::write(root.path().join("main.rs"), "source").unwrap();
+        let mut index = IndexedInputs::new(root.path());
+        index.refresh(1).unwrap();
+
+        index.mark_dirty("target/debug/app");
+        let refresh = index.refresh(1).unwrap();
+        assert_eq!(refresh.kind, Some(IndexedRefreshKind::Cached));
+    }
+
+    #[test]
+    fn indexed_refresh_can_disable_metadata_reuse_for_unreliable_filesystems() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("main.rs"), "source").unwrap();
+        let mut index = IndexedInputs::new(root.path());
+        index.refresh(1).unwrap();
+        index.disable_incremental();
+
+        let full = index.refresh(1).unwrap();
+        assert_eq!(full.kind, Some(IndexedRefreshKind::FallbackFullScan));
+        assert_eq!(full.hashed_files, 1);
+        assert!(index.is_index_disabled());
+
+        let next = index.refresh(1).unwrap();
+        assert_eq!(next.kind, Some(IndexedRefreshKind::FallbackFullScan));
+        assert_eq!(next.hashed_files, 1);
+    }
+
+    #[test]
+    fn indexed_refresh_rehashes_replaced_file_identity() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("main.rs"), "old").unwrap();
+        let mut index = IndexedInputs::new(root.path());
+        index.refresh(1).unwrap();
+        let old_identity = index.entries()["main.rs"].identity;
+
+        fs::write(root.path().join("replacement.rs"), "new").unwrap();
+        fs::rename(
+            root.path().join("replacement.rs"),
+            root.path().join("main.rs"),
+        )
+        .unwrap();
+        index.mark_dirty("main.rs");
+        let refresh = index.refresh(1).unwrap();
+        assert_eq!(refresh.hashed_files, 1);
+        assert_ne!(index.entries()["main.rs"].identity, old_identity);
+        assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
+    }
+
+    #[test]
+    fn indexed_refresh_hashes_direct_dirty_file_even_when_metadata_is_restored() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("main.rs");
+        fs::write(&path, "old").unwrap();
+        let mut index = IndexedInputs::new(root.path());
+        index.refresh(1).unwrap();
+        let previous_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        fs::write(&path, "new").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(previous_mtime))
+            .unwrap();
+        index.mark_dirty("main.rs");
+        let refresh = index.refresh(1).unwrap();
+
+        assert_eq!(refresh.hashed_files, 1);
+        assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
+        assert_ne!(
+            index.manifest().sources["main.rs"],
+            format!("{:x}", Sha256::digest("old"))
+        );
     }
 
     #[test]
