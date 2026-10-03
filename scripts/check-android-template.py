@@ -48,10 +48,37 @@ def check_android_build_cache(gpui, project, expected_abis, env):
     prepare_minimal_android_library(project)
     run("cargo", "generate-lockfile", cwd=project, env=env)
 
-    first = run_capture(str(gpui), "build", "android", cwd=project, env=env)
-    assert "Android cache miss:" in first, first
-    second = run_capture(str(gpui), "build", "android", cwd=project, env=env)
-    assert "Android BuildKey cache hit:" in second, second
+    with tempfile.TemporaryDirectory(prefix="gpui-gradle-cache-probe-") as temporary:
+        gradle_home = Path(temporary) / "gradle-home"
+        gradle_home.mkdir()
+        cached_home = Path(env["GRADLE_USER_HOME"]).resolve()
+        # Reuse downloaded distributions and dependencies, but exclude global
+        # gradle.properties/init scripts from this cache-reuse probe.
+        for name in ("caches", "wrapper"):
+            cached_entry = cached_home / name
+            if cached_entry.exists():
+                (gradle_home / name).symlink_to(
+                    cached_entry.resolve(), target_is_directory=True
+                )
+        cache_env = {**env, "GRADLE_USER_HOME": str(gradle_home)}
+        for name in (
+            "GRADLE_HOME",
+            "GRADLE_OPTS",
+            "JAVA_OPTS",
+            "JAVA_TOOL_OPTIONS",
+            "JAVACMD",
+            "JDK_JAVA_OPTIONS",
+            "_JAVA_OPTIONS",
+        ):
+            cache_env.pop(name, None)
+        for name in list(cache_env):
+            if name.upper().startswith("ORG_GRADLE_PROJECT_"):
+                cache_env.pop(name)
+
+        first = run_capture(str(gpui), "build", "android", cwd=project, env=cache_env)
+        assert "Android cache miss:" in first, first
+        second = run_capture(str(gpui), "build", "android", cwd=project, env=cache_env)
+        assert "Android BuildKey cache hit:" in second, second
 
     outputs = list(
         (project / ".gpui/builds/android").glob(
