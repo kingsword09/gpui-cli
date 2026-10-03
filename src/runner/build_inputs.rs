@@ -24,6 +24,7 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "CARGO_PROFILE_DEV_OPT_LEVEL",
     "CARGO_PROFILE_RELEASE_LTO",
     "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+    "RUSTC_WORKSPACE_WRAPPER",
     "CC",
     "CXX",
     "CODE_SIGNING_ALLOWED",
@@ -2496,12 +2497,7 @@ fn build_key_from_inputs(
     abi: Option<String>,
 ) -> Result<BuildKey> {
     let relevant_environment =
-        hash_relevant_environment(RELEVANT_ENVIRONMENT.iter().map(|name| {
-            (
-                (*name).to_string(),
-                env::var(name).unwrap_or_else(|_| "<unset>".into()),
-            )
-        }))?;
+        relevant_build_environment_hash(&target_triple, |name| env::var(name).ok())?;
     BuildKey::new(BuildKeyMaterial {
         source_manifest_hash,
         cargo_lock_hash: manifest
@@ -2518,6 +2514,33 @@ fn build_key_from_inputs(
         relevant_env_hash: relevant_environment,
         preview_registry_hash: "none".into(),
     })
+}
+
+fn relevant_build_environment_hash(
+    target_triple: &str,
+    mut read_environment: impl FnMut(&str) -> Option<String>,
+) -> Result<String> {
+    let mut names = RELEVANT_ENVIRONMENT
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    let target = target_triple
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    names.push(format!("CARGO_TARGET_{target}_LINKER"));
+    names.push(format!("CARGO_TARGET_{target}_RUSTFLAGS"));
+
+    hash_relevant_environment(names.into_iter().map(|name| {
+        let value = read_environment(&name).unwrap_or_else(|| "<unset>".into());
+        (name, value)
+    }))
 }
 
 fn android_rust_target(abi: &str) -> Result<&'static str> {
@@ -2607,6 +2630,52 @@ mod tests {
         .unwrap();
 
         assert_ne!(baseline, encoded_flags);
+    }
+
+    #[test]
+    fn target_specific_linker_and_flags_and_workspace_wrapper_change_the_key() {
+        assert!(RELEVANT_ENVIRONMENT.contains(&"RUSTC_WORKSPACE_WRAPPER"));
+
+        let values = BTreeMap::from([
+            (
+                "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER".to_string(),
+                "<unset>".to_string(),
+            ),
+            (
+                "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS".to_string(),
+                "<unset>".to_string(),
+            ),
+            ("RUSTC_WORKSPACE_WRAPPER".to_string(), "<unset>".to_string()),
+        ]);
+        let baseline = relevant_build_environment_hash("aarch64-apple-darwin", |name| {
+            values.get(name).cloned()
+        })
+        .unwrap();
+
+        for (name, changed_value) in [
+            ("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", "custom-linker"),
+            (
+                "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
+                "-Ctarget-feature=+neon",
+            ),
+            ("RUSTC_WORKSPACE_WRAPPER", "workspace-wrapper"),
+        ] {
+            let changed = relevant_build_environment_hash("aarch64-apple-darwin", |candidate| {
+                if candidate == name {
+                    Some(changed_value.to_string())
+                } else {
+                    values.get(candidate).cloned()
+                }
+            })
+            .unwrap();
+            assert_ne!(baseline, changed, "{name} must affect the build key");
+        }
+
+        let other_target = relevant_build_environment_hash("x86_64-apple-darwin", |name| {
+            values.get(name).cloned()
+        })
+        .unwrap();
+        assert_ne!(baseline, other_target);
     }
 
     #[test]
