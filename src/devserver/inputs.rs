@@ -3211,9 +3211,9 @@ mod tests {
                         .unwrap()
                         .to_string_lossy()
                         .into_owned(),
-                    package_ids: vec![format!(
-                        "path+file:///different/location#same-package@0.1.0"
-                    )],
+                    package_ids: vec![
+                        "path+file:///different/location#same-package@0.1.0".to_string(),
+                    ],
                 })
                 .collect(),
         };
