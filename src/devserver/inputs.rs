@@ -885,9 +885,12 @@ fn filesystem_incremental_policy(path: &Path) -> Option<String> {
             )
         } == 0
         {
-            return Some(
-                "filesystem volume could not be identified; metadata reuse disabled".into(),
-            );
+            let Some(fallback_root) = windows_drive_root(path) else {
+                return Some(
+                    "filesystem volume could not be identified; metadata reuse disabled".into(),
+                );
+            };
+            return windows_drive_policy(unsafe { GetDriveTypeW(fallback_root.as_ptr()) });
         }
         let drive_type = unsafe { GetDriveTypeW(volume_root.as_ptr()) };
         return windows_drive_policy(drive_type);
@@ -920,6 +923,27 @@ fn windows_drive_policy(drive_type: u32) -> Option<String> {
             "non-fixed or unknown drive type {drive_type}; metadata reuse disabled"
         )),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_drive_root(path: &Path) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+    let drive = match prefix.kind() {
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+        _ => return None,
+    };
+    let root = format!("{}:\\", char::from(drive));
+    Some(
+        std::ffi::OsStr::new(&root)
+            .encode_wide()
+            .chain([0])
+            .collect(),
+    )
 }
 
 #[cfg(target_os = "linux")]
