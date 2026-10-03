@@ -44,6 +44,8 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
 const ANDROID_KEYSTORE_PROPERTIES_RELATIVE: &str = "mobile/android/gradle/keystore.properties";
 const ANDROID_GRADLE_WRAPPER_PROPERTIES_RELATIVE: &str =
     "mobile/android/gradle/gradle/wrapper/gradle-wrapper.properties";
+const ANDROID_GRADLE_VERIFICATION_METADATA_RELATIVE: &str =
+    "mobile/android/gradle/gradle/verification-metadata.xml";
 const ANDROID_SIGNING_EXTERNAL_HASH: &str = "android.custom-signing";
 const ANDROID_SIGNING_MARKERS: &[&str] = &[
     "signingConfig",
@@ -879,6 +881,8 @@ pub fn android_preview_cache_policy(
     let mut native = NativeInputs::scan(&root)?;
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&root)?;
     let wrapper_disabled_reason = android_gradle_wrapper_cache_disabled_reason(&root, &native)?;
+    let verification_disabled_reason =
+        android_gradle_verification_cache_disabled_reason(&root, &native);
     let dynamic_dependency_disabled_reason =
         android_dynamic_dependency_cache_disabled_reason(&root, &native)?;
     let signing_policy = android_cache_signing_policy(&root, release, &mut native)?;
@@ -897,6 +901,7 @@ pub fn android_preview_cache_policy(
         disabled_reason: combine_cache_hit_disabled_reasons([
             toolchain_disabled_reason,
             wrapper_disabled_reason,
+            verification_disabled_reason,
             dynamic_dependency_disabled_reason,
             signing_disabled_reason,
             build_script_disabled_reason,
@@ -939,6 +944,8 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&snapshot.root)?;
     let wrapper_disabled_reason =
         android_gradle_wrapper_cache_disabled_reason(&snapshot.root, &native)?;
+    let verification_disabled_reason =
+        android_gradle_verification_cache_disabled_reason(&snapshot.root, &native);
     let dynamic_dependency_disabled_reason =
         android_dynamic_dependency_cache_disabled_reason(&snapshot.root, &native)?;
     native
@@ -958,6 +965,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
         toolchain_disabled_reason,
         wrapper_disabled_reason,
+        verification_disabled_reason,
         dynamic_dependency_disabled_reason,
         signing_policy.disabled_reason,
         build_script_disabled_reason,
@@ -1065,6 +1073,73 @@ fn android_gradle_wrapper_cache_disabled_reason(
             "Android Gradle wrapper distribution checksum is missing or invalid; cache reuse is disabled"
                 .into()
         }))
+}
+
+fn android_gradle_verification_cache_disabled_reason(
+    root: &Path,
+    native: &NativeInputs,
+) -> Option<String> {
+    let reason = "Android Gradle dependency verification metadata is missing or not strict; cache reuse is disabled";
+    let verified = (|| {
+        if !native
+            .files
+            .contains_key(ANDROID_GRADLE_VERIFICATION_METADATA_RELATIVE)
+        {
+            return Some(false);
+        }
+        let path = root.join(ANDROID_GRADLE_VERIFICATION_METADATA_RELATIVE);
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Some(false);
+        }
+        let contents = fs::read_to_string(path).ok()?;
+        let document = roxmltree::Document::parse(&contents).ok()?;
+        let root = document.root_element();
+        if root.tag_name().name() != "verification-metadata"
+            || root
+                .descendants()
+                .any(|node| node.is_element() && node.tag_name().name() == "trusted-artifacts")
+        {
+            return Some(false);
+        }
+        let configuration = root
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "configuration")?;
+        let strict_metadata = configuration
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "verify-metadata")
+            .and_then(|node| node.text())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"));
+        let components = root
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "components")?;
+        let component_nodes = components
+            .children()
+            .filter(|node| node.is_element())
+            .collect::<Vec<_>>();
+        let artifacts_are_hashed = !component_nodes.is_empty()
+            && component_nodes.iter().all(|component| {
+                let artifacts = component
+                    .children()
+                    .filter(|node| node.is_element() && node.tag_name().name() == "artifact")
+                    .collect::<Vec<_>>();
+                !artifacts.is_empty()
+                    && artifacts.iter().all(|artifact| {
+                        let sha256 = artifact
+                            .children()
+                            .filter(|node| node.is_element() && node.tag_name().name() == "sha256")
+                            .collect::<Vec<_>>();
+                        sha256.len() == 1
+                            && sha256[0].attribute("value").is_some_and(|value| {
+                                value.len() == 64
+                                    && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                    })
+            });
+        Some(strict_metadata && artifacts_are_hashed)
+    })()
+    .unwrap_or(false);
+    (!verified).then(|| reason.into())
 }
 
 fn android_dynamic_dependency_cache_disabled_reason(
@@ -2707,6 +2782,25 @@ mod tests {
         .unwrap();
     }
 
+    fn write_android_verification_metadata(root: &Path, verification_metadata: &str) {
+        let path = root.join(ANDROID_GRADLE_VERIFICATION_METADATA_RELATIVE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, verification_metadata).unwrap();
+    }
+
+    const STRICT_ANDROID_VERIFICATION_METADATA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<verification-metadata>
+  <configuration><verify-metadata>true</verify-metadata></configuration>
+  <components>
+    <component group="com.example" name="plugin" version="1.0">
+      <artifact name="plugin-1.0.jar">
+        <sha256 value="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" />
+      </artifact>
+    </component>
+  </components>
+</verification-metadata>
+"#;
+
     fn write_sdk_packages(sdk: &Path, compile_sdk: u32, build_tools: &str, marker: &[u8]) {
         for (relative, contents) in [
             (
@@ -3053,6 +3147,51 @@ mod tests {
             android_gradle_wrapper_cache_disabled_reason(root.path(), &native)
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn android_gradle_dependency_verification_requires_strict_sha256_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let mut native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_verification_cache_disabled_reason(root.path(), &native)
+                .is_some_and(|reason| reason.contains("metadata is missing or not strict"))
+        );
+
+        write_android_verification_metadata(root.path(), STRICT_ANDROID_VERIFICATION_METADATA);
+        native = NativeInputs::scan(root.path()).unwrap();
+        assert!(android_gradle_verification_cache_disabled_reason(root.path(), &native).is_none());
+
+        for invalid in [
+            STRICT_ANDROID_VERIFICATION_METADATA.replace("<verify-metadata>true", "<verify-metadata>false"),
+            STRICT_ANDROID_VERIFICATION_METADATA.replace(
+                "value=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+                "value=\"bad\"",
+            ),
+            STRICT_ANDROID_VERIFICATION_METADATA.replace(
+                "<components>",
+                "<configuration><trusted-artifacts><trust group=\"*\" name=\"*\" /></trusted-artifacts></configuration><components>",
+            ),
+            "<verification-metadata><components>malformed</verification-metadata>".into(),
+        ] {
+            write_android_verification_metadata(root.path(), &invalid);
+            let native = NativeInputs::scan(root.path()).unwrap();
+            assert!(android_gradle_verification_cache_disabled_reason(root.path(), &native)
+                .is_some());
+        }
+
+        let template_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("templates/android/gradle/gradle/verification-metadata.xml");
+        let project = tempfile::tempdir().unwrap();
+        let destination = project
+            .path()
+            .join(ANDROID_GRADLE_VERIFICATION_METADATA_RELATIVE);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(template_root, &destination).unwrap();
+        let native = NativeInputs::scan(project.path()).unwrap();
+        assert!(
+            android_gradle_verification_cache_disabled_reason(project.path(), &native).is_none()
         );
     }
 
@@ -3746,6 +3885,7 @@ mod tests {
         )
         .unwrap();
         fs::write(app.join("debug.jks"), b"private-debug-keystore").unwrap();
+        write_android_verification_metadata(root.path(), STRICT_ANDROID_VERIFICATION_METADATA);
 
         let policy = android_preview_cache_policy(root.path(), false).unwrap();
         assert!(
@@ -3756,6 +3896,12 @@ mod tests {
         );
         assert!(policy.android_signing_fingerprint.is_some());
         assert!(policy.debug_keystore_hash.is_none());
+        assert!(
+            !policy
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("dependency verification metadata"))
+        );
     }
 
     #[test]
