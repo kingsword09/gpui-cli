@@ -24,7 +24,7 @@ use crate::runner::android::AndroidRunner;
 use crate::runner::build_inputs::{
     DesktopBuildPlan, FrozenCheckInputs, android_build_key, android_preview_cache_policy,
     desktop_build_key, desktop_build_plan, frozen_check_inputs, ios_build_key,
-    prepare_android_signing_snapshot,
+    prepare_android_signing_snapshot, rustc_wrapper_cache_disabled_reason,
 };
 use crate::runner::ios::IosSimulatorRunner;
 use crate::runner::lease::{DeviceLeaseDelegation, DeviceLeaseSession};
@@ -355,14 +355,14 @@ fn matrix_target_build(
         MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux => (
             desktop_build_key(snapshot_root, false)?,
             BuildPlatform::Desktop,
-            None,
+            rustc_wrapper_cache_disabled_reason(snapshot_root),
             None,
             None,
         ),
         MatrixPlatform::Ios => (
             ios_build_key(snapshot_root, false, "aarch64-apple-ios-sim")?,
             BuildPlatform::Ios,
-            None,
+            rustc_wrapper_cache_disabled_reason(snapshot_root),
             None,
             None,
         ),
