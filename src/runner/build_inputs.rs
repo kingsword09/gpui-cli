@@ -851,7 +851,7 @@ pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<
     let (toolchain_fingerprint, _) = bind_android_toolchain_identity(
         &mut native,
         &rustc_fingerprint,
-        android_toolchain_fingerprint(),
+        android_toolchain_fingerprint(&root),
     );
     build_key_from_inputs(
         &manifest,
@@ -886,7 +886,7 @@ pub fn android_preview_cache_policy(
     let (_, toolchain_disabled_reason) = bind_android_toolchain_identity(
         &mut native,
         &rustc_fingerprint,
-        android_toolchain_fingerprint(),
+        android_toolchain_fingerprint(&root),
     );
     let signing_disabled_reason = if release && signing_policy.signing_identity.is_some() {
         Some("Android release signing is not a live preview cache target".into())
@@ -953,7 +953,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     let (toolchain_fingerprint, toolchain_disabled_reason) = bind_android_toolchain_identity(
         &mut native,
         &rustc_fingerprint,
-        android_toolchain_fingerprint(),
+        android_toolchain_fingerprint(&snapshot.root),
     );
     let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
         toolchain_disabled_reason,
@@ -1199,7 +1199,7 @@ fn quoted_value_contains_dynamic_range(source: &str) -> bool {
     false
 }
 
-fn android_toolchain_fingerprint() -> Option<String> {
+fn android_toolchain_fingerprint(project_root: &Path) -> Option<String> {
     let sdk_root = consistent_environment_directory(&["ANDROID_HOME", "ANDROID_SDK_ROOT"])?;
     let ndk_home = consistent_environment_directory(&["ANDROID_NDK_HOME"])?;
     if env::var_os("NDK_HOME").is_some()
@@ -1207,7 +1207,7 @@ fn android_toolchain_fingerprint() -> Option<String> {
     {
         return None;
     }
-    let sdk_packages = android_sdk_package_fingerprint(&sdk_root)?;
+    let sdk_packages = android_sdk_package_fingerprint(&sdk_root, project_root)?;
     let ndk_revision = android_package_revision(&ndk_home.join("source.properties"))?;
     let ndk_compiler_tools = android_ndk_compiler_tool_fingerprint(&ndk_home)?;
     let ndk_compiler_resources =
@@ -1318,10 +1318,50 @@ fn android_ndk_compiler_resource_fingerprint(host_root: &Path) -> Option<String>
     ))
 }
 
-fn android_ndk_directory_fingerprint(root: &Path) -> Option<String> {
-    const MAX_FILES: usize = 100_000;
-    const MAX_BYTES: u64 = 512 * 1024 * 1024;
+#[derive(Clone, Copy)]
+struct DirectoryFingerprintBudget {
+    entries: usize,
+    bytes: u64,
+    max_entries: usize,
+    max_bytes: u64,
+}
 
+impl DirectoryFingerprintBudget {
+    fn new(max_entries: usize, max_bytes: u64) -> Self {
+        Self {
+            entries: 0,
+            bytes: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    fn record(&mut self, bytes: u64) -> Option<()> {
+        self.entries = self.entries.checked_add(1)?;
+        self.bytes = self.bytes.checked_add(bytes)?;
+        (self.entries <= self.max_entries && self.bytes <= self.max_bytes).then_some(())
+    }
+}
+
+impl Default for DirectoryFingerprintBudget {
+    fn default() -> Self {
+        Self::new(100_000, 512 * 1024 * 1024)
+    }
+}
+
+fn android_ndk_directory_fingerprint(root: &Path) -> Option<String> {
+    bounded_directory_fingerprint(
+        root,
+        b"gpui-android-ndk-directory-v1\0",
+        &mut DirectoryFingerprintBudget::default(),
+    )
+}
+
+fn bounded_directory_fingerprint(
+    root: &Path,
+    domain: &[u8],
+    budget: &mut DirectoryFingerprintBudget,
+) -> Option<String> {
     let metadata = fs::symlink_metadata(root).ok()?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return None;
@@ -1329,7 +1369,6 @@ fn android_ndk_directory_fingerprint(root: &Path) -> Option<String> {
     let canonical_root = fs::canonicalize(root).ok()?;
     let mut pending = vec![canonical_root.clone()];
     let mut entries = Vec::new();
-    let mut total_bytes = 0_u64;
     while let Some(directory) = pending.pop() {
         let mut children = fs::read_dir(&directory)
             .ok()?
@@ -1346,32 +1385,21 @@ fn android_ndk_directory_fingerprint(root: &Path) -> Option<String> {
                 return None;
             }
             if metadata.is_dir() {
+                budget.record(0)?;
                 entries.push((relative, path.clone(), b'd'));
-                if entries.len() > MAX_FILES {
-                    return None;
-                }
                 pending.push(path);
             } else if metadata.is_file() {
-                total_bytes = total_bytes.checked_add(metadata.len())?;
-                if total_bytes > MAX_BYTES {
-                    return None;
-                }
+                budget.record(metadata.len())?;
                 entries.push((relative, path, b'f'));
-                if entries.len() > MAX_FILES {
-                    return None;
-                }
             } else {
                 return None;
             }
         }
     }
-    if entries.len() > MAX_FILES {
-        return None;
-    }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut digest = Sha256::new();
-    digest.update(b"gpui-android-ndk-directory-v1\0");
+    digest.update(domain);
     for (relative, path, kind) in entries {
         digest.update([kind]);
         digest.update((relative.len() as u64).to_be_bytes());
@@ -1463,35 +1491,112 @@ fn consistent_directories(paths: impl IntoIterator<Item = Option<PathBuf>>) -> O
     selected
 }
 
-fn android_sdk_package_fingerprint(sdk_root: &Path) -> Option<String> {
+fn android_sdk_package_fingerprint(sdk_root: &Path, project_root: &Path) -> Option<String> {
     let mut packages = Vec::new();
-    for category in ["platforms", "build-tools"] {
+    let mut budget = DirectoryFingerprintBudget::default();
+    let (platforms, build_tools) = android_required_sdk_packages(sdk_root, project_root)?;
+    for (category, required) in [("platforms", platforms), ("build-tools", build_tools)] {
         let category_path = sdk_root.join(category);
         let category_metadata = fs::symlink_metadata(&category_path).ok()?;
         if category_metadata.file_type().is_symlink() || !category_metadata.is_dir() {
             return None;
         }
-        let mut category_count = 0usize;
-        for entry in fs::read_dir(&category_path).ok()? {
-            let entry = entry.ok()?;
-            let name = entry.file_name().into_string().ok()?;
-            if name.starts_with('.') {
-                continue;
-            }
-            let metadata = fs::symlink_metadata(entry.path()).ok()?;
+        for name in required {
+            let package_path = category_path.join(&name);
+            let metadata = fs::symlink_metadata(&package_path).ok()?;
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return None;
             }
-            let revision = android_package_revision(&entry.path().join("source.properties"))?;
-            packages.push(format!("{category}/{name}={revision}"));
-            category_count += 1;
-        }
-        if category_count == 0 {
-            return None;
+            let revision = android_package_revision(&package_path.join("source.properties"))?;
+            let contents = bounded_directory_fingerprint(
+                &package_path,
+                b"gpui-android-sdk-package-v1\0",
+                &mut budget,
+            )?;
+            packages.push(format!("{category}/{name}={revision};contents={contents}"));
         }
     }
     packages.sort();
     Some(packages.join("\n"))
+}
+
+fn android_required_sdk_packages(
+    sdk_root: &Path,
+    project_root: &Path,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let manifest = [
+        project_root.join("mobile/android/gradle/app/build.gradle.kts"),
+        project_root.join("gradle/app/build.gradle.kts"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())?;
+    let metadata = fs::symlink_metadata(&manifest).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let source = fs::read_to_string(manifest).ok()?;
+    let compile_sdk = android_gradle_integer_setting(&source, "compileSdk")?;
+    let build_tools = match android_gradle_setting_value(&source, "buildToolsVersion")? {
+        Some(value) => vec![android_gradle_string_literal(value)?],
+        None => vec![android_latest_build_tools_package(sdk_root)?],
+    };
+    Some((vec![format!("android-{compile_sdk}")], build_tools))
+}
+
+fn android_gradle_integer_setting(source: &str, setting: &str) -> Option<u32> {
+    android_gradle_setting_value(source, setting)?.and_then(|value| value.parse::<u32>().ok())
+}
+
+fn android_gradle_setting_value<'a>(source: &'a str, setting: &str) -> Option<Option<&'a str>> {
+    let mut values = source.lines().filter_map(|line| {
+        let line = line
+            .split_once("//")
+            .map_or(line, |(before, _)| before)
+            .trim();
+        if let Some((name, value)) = line.split_once('=') {
+            return (name.trim() == setting).then_some(value.trim());
+        }
+        let value = line.strip_prefix(setting)?;
+        value
+            .starts_with(char::is_whitespace)
+            .then_some(value.trim())
+    });
+    let Some(value) = values.next() else {
+        return Some(None);
+    };
+    values.next().is_none().then_some(Some(value))
+}
+
+fn android_gradle_string_literal(value: &str) -> Option<String> {
+    let value = value.trim().strip_prefix('"')?.strip_suffix('"')?;
+    android_sdk_version_is_numeric(value).then(|| value.to_owned())
+}
+
+fn android_sdk_version_is_numeric(version: &str) -> bool {
+    !version.is_empty()
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn android_latest_build_tools_package(sdk_root: &Path) -> Option<String> {
+    let directory = sdk_root.join("build-tools");
+    let metadata = fs::symlink_metadata(&directory).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    let mut versions = fs::read_dir(directory)
+        .ok()?
+        .map(|entry| entry.ok()?.file_name().into_string().ok())
+        .collect::<Option<Vec<_>>>()?;
+    versions.retain(|version| android_sdk_version_is_numeric(version));
+    versions.sort_by_cached_key(|version| {
+        version
+            .split('.')
+            .filter_map(|part| part.parse::<u32>().ok())
+            .collect::<Vec<_>>()
+    });
+    versions.pop()
 }
 
 fn android_package_revision(source_properties: &Path) -> Option<String> {
@@ -2589,49 +2694,150 @@ mod tests {
         assert!(android_ndk_compiler_resource_fingerprint(&host_root).is_none());
     }
 
+    fn write_sdk_project(root: &Path, compile_sdk: u32, build_tools: Option<&str>) {
+        let manifest = root.join("mobile/android/gradle/app/build.gradle.kts");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        let build_tools = build_tools
+            .map(|version| format!("    buildToolsVersion = \"{version}\"\n"))
+            .unwrap_or_default();
+        fs::write(
+            manifest,
+            format!("android {{\n    compileSdk = {compile_sdk}\n{build_tools}}}\n"),
+        )
+        .unwrap();
+    }
+
+    fn write_sdk_packages(sdk: &Path, compile_sdk: u32, build_tools: &str, marker: &[u8]) {
+        for (relative, contents) in [
+            (
+                format!("platforms/android-{compile_sdk}/source.properties"),
+                format!("Pkg.Revision={compile_sdk}\n").into_bytes(),
+            ),
+            (
+                format!("platforms/android-{compile_sdk}/android.jar"),
+                marker.to_vec(),
+            ),
+            (
+                format!("build-tools/{build_tools}/source.properties"),
+                format!("Pkg.Revision={build_tools}\n").into_bytes(),
+            ),
+            (format!("build-tools/{build_tools}/aapt2"), marker.to_vec()),
+        ] {
+            let path = sdk.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+    }
+
+    #[test]
+    fn bounded_directory_fingerprint_rejects_trees_over_the_shared_budget() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("one"), b"1").unwrap();
+        fs::write(root.path().join("two"), b"2").unwrap();
+        let mut budget = DirectoryFingerprintBudget::new(1, 8);
+
+        assert!(
+            bounded_directory_fingerprint(root.path(), b"test-directory-v1\0", &mut budget)
+                .is_none()
+        );
+    }
+
     #[test]
     fn android_sdk_fingerprint_tracks_installed_platform_and_build_tools_revisions() {
         let sdk = tempfile::tempdir().unwrap();
-        let platform = sdk.path().join("platforms/android-34");
-        let build_tools = sdk.path().join("build-tools/34.0.0");
-        fs::create_dir_all(&platform).unwrap();
-        fs::create_dir_all(&build_tools).unwrap();
-        fs::write(platform.join("source.properties"), "Pkg.Revision=3\n").unwrap();
-        fs::write(
-            build_tools.join("source.properties"),
-            "Pkg.Revision=34.0.0\n",
-        )
-        .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_sdk_project(project.path(), 34, None);
+        write_sdk_packages(sdk.path(), 34, "34.0.0", b"SDK package v1");
 
-        let first = android_sdk_package_fingerprint(sdk.path()).unwrap();
+        let first = android_sdk_package_fingerprint(sdk.path(), project.path()).unwrap();
         assert!(first.contains("platforms/android-34=3"));
         assert!(first.contains("build-tools/34.0.0=34.0.0"));
         assert!(!first.contains(&sdk.path().display().to_string()));
 
+        write_sdk_packages(sdk.path(), 33, "33.0.0", b"inactive SDK package");
+        assert_eq!(
+            first,
+            android_sdk_package_fingerprint(sdk.path(), project.path()).unwrap()
+        );
+
         fs::write(
-            build_tools.join("source.properties"),
+            sdk.path().join("build-tools/34.0.0/aapt2"),
+            b"replacement build tool",
+        )
+        .unwrap();
+        let replaced_content = android_sdk_package_fingerprint(sdk.path(), project.path()).unwrap();
+        assert_ne!(first, replaced_content);
+
+        fs::write(
+            sdk.path().join("build-tools/34.0.0/source.properties"),
             "Pkg.Revision=34.0.1\n",
         )
         .unwrap();
-        let second = android_sdk_package_fingerprint(sdk.path()).unwrap();
-        assert_ne!(first, second);
+        let second = android_sdk_package_fingerprint(sdk.path(), project.path()).unwrap();
+        assert_ne!(replaced_content, second);
+
+        let other_sdk = tempfile::tempdir().unwrap();
+        write_sdk_packages(other_sdk.path(), 34, "34.0.0", b"SDK package v1");
+        assert_eq!(
+            first,
+            android_sdk_package_fingerprint(other_sdk.path(), project.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn android_sdk_fingerprint_requires_a_literal_project_sdk_selection() {
+        let sdk = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_sdk_packages(sdk.path(), 34, "34.0.0", b"SDK package");
+        let manifest = project
+            .path()
+            .join("mobile/android/gradle/app/build.gradle.kts");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(
+            manifest,
+            "android { compileSdk = libs.versions.compileSdk.get() }\n",
+        )
+        .unwrap();
+
+        assert!(android_sdk_package_fingerprint(sdk.path(), project.path()).is_none());
+    }
+
+    #[test]
+    fn android_sdk_fingerprint_uses_explicit_build_tools_and_numeric_latest_default() {
+        let sdk = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_sdk_packages(sdk.path(), 34, "34.0.0", b"selected");
+        write_sdk_packages(sdk.path(), 34, "35.0.0", b"newer");
+
+        write_sdk_project(project.path(), 34, None);
+        let default_fingerprint = android_sdk_package_fingerprint(sdk.path(), project.path())
+            .expect("latest installed numeric build-tools package should be selected");
+        assert!(default_fingerprint.contains("build-tools/35.0.0="));
+        assert!(!default_fingerprint.contains("build-tools/34.0.0="));
+
+        write_sdk_project(project.path(), 34, Some("34.0.0"));
+        let explicit_fingerprint = android_sdk_package_fingerprint(sdk.path(), project.path())
+            .expect("explicit build-tools package should be selected");
+        assert!(explicit_fingerprint.contains("build-tools/34.0.0="));
+        assert!(!explicit_fingerprint.contains("build-tools/35.0.0="));
+
+        fs::write(
+            sdk.path().join("build-tools/35.0.0/aapt2"),
+            b"changed but inactive",
+        )
+        .unwrap();
+        assert_eq!(
+            explicit_fingerprint,
+            android_sdk_package_fingerprint(sdk.path(), project.path()).unwrap()
+        );
     }
 
     #[test]
     fn android_sdk_fingerprint_rejects_incomplete_or_symlinked_packages() {
         let sdk = tempfile::tempdir().unwrap();
-        let platform = sdk.path().join("platforms/android-34");
-        let build_tools = sdk.path().join("build-tools/34.0.0");
-        fs::create_dir_all(&platform).unwrap();
-        fs::create_dir_all(&build_tools).unwrap();
-        fs::write(platform.join("source.properties"), "Pkg.Revision=3\n").unwrap();
-        assert!(android_sdk_package_fingerprint(sdk.path()).is_none());
-
-        fs::write(
-            build_tools.join("source.properties"),
-            "Pkg.Revision=34.0.0\n",
-        )
-        .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_sdk_project(project.path(), 34, None);
+        write_sdk_packages(sdk.path(), 34, "34.0.0", b"SDK package");
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
@@ -2643,7 +2849,32 @@ mod tests {
             )
             .unwrap();
             fs::create_dir_all(linked_sdk.path().join("build-tools")).unwrap();
-            assert!(android_sdk_package_fingerprint(linked_sdk.path()).is_none());
+            assert!(android_sdk_package_fingerprint(linked_sdk.path(), project.path()).is_none());
+
+            let linked_package_sdk = tempfile::tempdir().unwrap();
+            let linked_platform = linked_package_sdk.path().join("platforms/android-34");
+            let linked_build_tools = linked_package_sdk.path().join("build-tools/34.0.0");
+            fs::create_dir_all(&linked_platform).unwrap();
+            fs::create_dir_all(&linked_build_tools).unwrap();
+            fs::write(
+                linked_platform.join("source.properties"),
+                "Pkg.Revision=3\n",
+            )
+            .unwrap();
+            fs::write(
+                linked_build_tools.join("source.properties"),
+                "Pkg.Revision=34.0.0\n",
+            )
+            .unwrap();
+            symlink(
+                sdk.path().join("platforms/android-34/source.properties"),
+                linked_platform.join("android.jar"),
+            )
+            .unwrap();
+            assert!(
+                android_sdk_package_fingerprint(linked_package_sdk.path(), project.path())
+                    .is_none()
+            );
         }
     }
 
@@ -2666,7 +2897,8 @@ mod tests {
 
     #[test]
     fn android_toolchain_fingerprint_reads_a_complete_active_environment() {
-        let fingerprint = android_toolchain_fingerprint();
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/android");
+        let fingerprint = android_toolchain_fingerprint(&project_root);
         let sdk_root = consistent_environment_directory(&["ANDROID_HOME", "ANDROID_SDK_ROOT"]);
         let ndk_home = consistent_environment_directory(&["ANDROID_NDK_HOME"]);
         let ndk_alias_matches = env::var_os("NDK_HOME").is_none()
@@ -2675,7 +2907,7 @@ mod tests {
             && java_version().is_some();
         let package_metadata_available = sdk_root
             .as_deref()
-            .and_then(android_sdk_package_fingerprint)
+            .and_then(|root| android_sdk_package_fingerprint(root, &project_root))
             .is_some()
             && ndk_home
                 .as_deref()
