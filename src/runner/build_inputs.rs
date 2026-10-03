@@ -2762,6 +2762,8 @@ fn fingerprint_build_tool_file(path: &Path, remaining: &mut u64) -> Result<Strin
     *remaining -= reserved_bytes;
     let mut file =
         open_build_tool_for_fingerprinting(path).context("opening configured build tool")?;
+    let opened_identity =
+        build_tool_file_identity(&file).context("identifying configured build tool")?;
     let opened_metadata = file.metadata().context("checking configured build tool")?;
     if !opened_metadata.is_file()
         || !same_build_tool_file(&metadata, &opened_metadata)
@@ -2777,13 +2779,22 @@ fn fingerprint_build_tool_file(path: &Path, remaining: &mut u64) -> Result<Strin
     let final_metadata = file
         .metadata()
         .context("rechecking configured build tool")?;
+    let final_identity =
+        build_tool_file_identity(&file).context("reidentifying configured build tool")?;
     if bytes.len() as u64 != opened_metadata.len()
         || !same_build_tool_file(&opened_metadata, &final_metadata)
+        || opened_identity != final_identity
     {
         bail!("configured build tool changed while fingerprinting");
     }
-    let path_metadata = fs::metadata(path).context("rechecking configured build tool path")?;
-    if !same_build_tool_file(&opened_metadata, &path_metadata) {
+    let path_file =
+        open_build_tool_for_fingerprinting(path).context("reopening configured build tool")?;
+    let path_metadata = path_file
+        .metadata()
+        .context("checking reopened configured build tool")?;
+    let path_identity = build_tool_file_identity(&path_file)
+        .context("identifying reopened configured build tool")?;
+    if !same_build_tool_file(&opened_metadata, &path_metadata) || opened_identity != path_identity {
         bail!("configured build tool path changed while fingerprinting");
     }
     Ok(format!(
@@ -2806,6 +2817,31 @@ fn open_build_tool_for_fingerprinting(path: &Path) -> std::io::Result<fs::File> 
 #[cfg(not(windows))]
 fn open_build_tool_for_fingerprinting(path: &Path) -> std::io::Result<fs::File> {
     fs::File::open(path)
+}
+
+fn build_tool_file_identity(file: &fs::File) -> std::io::Result<Option<(u32, u64)>> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        let success = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+        if success == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Some((
+            information.dwVolumeSerialNumber,
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        )))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = file;
+        Ok(None)
+    }
 }
 
 fn is_executable_build_tool(path: &Path, metadata: &fs::Metadata) -> bool {
@@ -2855,17 +2891,8 @@ fn same_build_tool_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        matches!(
-            (
-                left.volume_serial_number(),
-                left.file_index(),
-                right.volume_serial_number(),
-                right.file_index()
-            ),
-            (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
-                if left_volume == right_volume && left_index == right_index
-        )
+        let _ = (left, right);
+        true
     }
     #[cfg(not(any(unix, windows)))]
     {
