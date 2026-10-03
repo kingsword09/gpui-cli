@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-03，主分支 `2a713da`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-03，主分支 `bdfd717`。35 项中 1 done、21 in_progress、13 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -455,6 +455,14 @@ PR #265 又将项目实际选定的 Android SDK platform 与 build-tools package
 软链接、special entry、读取失败或超预算只关闭 cache reuse，不阻止普通构建，也不扫描未使用的已安装
 package。该切片仍不闭合 AGP/plugin resolved artifacts 或任意 build-script I/O；记录见
 [T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
+PR #267 再为 Android Gradle plugin 及已解析传递制品加入 Gradle 原生
+`verification-metadata.xml`，固定 SHA-256；metadata 文件随模板 native inputs 进入 BuildKey，构建计划与
+live preview 仅在 `verify-metadata=true`、每个组件制品都有单一有效 SHA-256 且不存在
+`trusted-artifacts` 放行项时允许 cache reuse。缺失、畸形或宽松 metadata 只关闭 cache reuse，不阻止
+Gradle 正常构建。metadata 覆盖基于 Gradle 9.4.1 debug/release 任务图生成并实测，包含 host-specific
+AAPT2 classifiers。当前锁定模板依赖的图和验证时观测到的 debug/release artifacts；升级 Gradle/AGP
+或构建图需要重新生成清单。远端仓库状态、签名校验、自动更新流程和任意 build-script I/O 仍未闭合，记录见
+[T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
 iOS key 另纳入当前 Xcode build 与目标 SDK version/build 指纹；身份不可读时关闭 simulator
 cache hit，记录见
 [M04 iOS Xcode/SDK fingerprint](../experiments/M04-ios-xcode-sdk-fingerprint-2026-09-28.md)。
@@ -890,8 +898,9 @@ coordinator；有界预热仍拟议。遵循 M04 BuildKey；现有切片与输�
 
 Android toolchain identity 目前还会对项目选定的 SDK platform/build-tools package 做有界内容摘要；
 同一 package revision 下替换文件会导致 cache miss，无法安全解析项目选择或完整读取 package 时只
-禁用 cache reuse。该内容闭包不包括所有已安装 SDK package、AGP/plugin resolved artifacts 或任意
-build-script I/O；有界预热仍未实现。
+禁用 cache reuse。Gradle plugin/dependency artifacts 另由模板内 Gradle verification metadata 固定
+SHA-256；metadata 缺失、不严格或未完整哈希时 cache bypass。该内容闭包不包括所有已安装 SDK
+package、远端仓库可用性/状态、未触发的可选制品或任意 build-script I/O；有界预热仍未实现。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。

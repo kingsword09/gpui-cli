@@ -4,7 +4,8 @@
 才允许复用 artifact cache；PR #259 又将动态/changing Gradle dependency 作为 cache bypass 条件；
 PR #261 将当前 host NDK 编译器和链接器内容纳入 Android toolchain fingerprint；PR #263 再纳入
 host sysroot 和 Clang builtin headers 内容；PR #265 又纳入项目实际选定的 SDK platform 与
-build-tools package 内容。
+build-tools package 内容；PR #267 为 Gradle Android plugin/dependency artifacts 加入 SHA-256
+dependency verification metadata，并把严格校验状态作为 cache reuse 前置条件。
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -30,6 +31,12 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   `buildToolsVersion` 选择对应 build-tools，否则选择 SDK 中最新的数值版本。只对这些实际选定
   package 做相对路径、entry type 和内容摘要，并与 NDK 资源扫描共享 100,000 entries/512 MiB 预算；
   动态/无法解析的选择、缺包、软链接、special entry、读取失败或超预算只关闭 cache reuse。
+- 模板携带 `gradle/verification-metadata.xml`，按 Gradle 9.4.1 的真实 debug/release 任务图生成，
+  为组件及其解析制品固定 SHA-256（346 components / 607 artifacts），并覆盖 AGP 在 macOS/Linux/Windows
+  上按需选择的 AAPT2 classifier。Gradle 自身负责下载/使用制品时逐字节验证；CLI 只在 XML 有效、
+  `verify-metadata=true`、每个 component 至少一个 artifact 且每个 artifact 恰有一个 64 位 SHA-256、
+  没有 `trusted-artifacts` 规则时允许缓存命中；metadata 文件自身也进入 BuildKey 输入摘要。metadata
+  缺失、畸形或宽松时不阻止 Gradle 构建，只禁用 artifact cache reuse。
 
 ## 证据
 
@@ -54,6 +61,15 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   package 忽略、显式/默认 build-tools、动态选择拒绝、软链接和有界预算回归。最终 PR 与 push 两套
   Linux/macOS/Windows、Android/desktop template、baseline-driver CI 全绿，Android 生成/打包验证
   通过；#265 squash 为 `2a713da`，无版本发布或 tag。
+- PR #267 首轮 Android 构建在 `compileDebugNavigationResources` 失败，报告指出 AGP 动态解析的
+  host AAPT2 classifier 不在 help/configuration 阶段生成的 metadata 中；补入 Linux/macOS/Windows
+  Google Maven JAR 的独立 SHA-256 后，Gradle 从真实 debug/release 任务图重生成的 2,534 行 metadata
+  与模板文件逐字节一致。验证清单固定 Gradle 9.1.0 AGP graph 中 346 个 component / 607 个 artifact；
+  Gradle `verify-signatures` 保持 false，只声明 SHA-256 内容完整性，不宣称 Maven 签名验证。407 个
+  workspace 单测及全部集成/协议测试、clippy、fmt、design docs、
+  package list、diff check 通过；本地 Android debug/release APK、ABI 检查和 CLI 二次 cache hit 通过；
+  最终 PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver CI 全绿；
+  #267 squash 为 `bdfd717`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -79,3 +95,8 @@ special file、读取失败或超过上限会禁用 cache reuse，但普通构�
   同一 package revision 下的文件替换会改变 fingerprint。Gradle SDK 选择必须是可安全解析的字面量，
   动态/无法解析时保持 cache bypass；该切片仍不验证 AGP/plugin resolved artifacts、远端仓库状态或
   任意 build-script I/O。
+- PR #267 的 verification metadata 锁定模板 Gradle 9.1.0 AGP dependency graph 和验证时观察到的
+  debug/release artifacts；升级 Gradle、AGP 或任务图后必须重新生成并复核元数据。静态列表不锁定远端
+  仓库可用性、仓库状态、构建脚本任意网络 I/O 或未被任务图触发的可选制品，也不验证 Maven 签名；Gradle
+  verification metadata 当前使用 SHA-256 内容校验且 `verify-signatures=false`。用户修改依赖或版本但
+  未更新校验元数据时构建会由 Gradle 拒绝，不能靠 cache bypass 静默接收新制品。
