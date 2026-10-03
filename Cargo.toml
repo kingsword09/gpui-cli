@@ -38,6 +38,7 @@ png = "0.17"
 ctrlc = { version = "3.5", features = ["termination"] }
 toml = "1.1"
 gpui-dev-protocol = { version = "0.1.0", path = "crates/gpui-dev-protocol" }
+roxmltree = "0.21"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -52,5 +53,4 @@ sha2 = "0.10"
 process-wrap = { version = "10.0", default-features = false, features = ["std", "job-object"] }
 
 [dev-dependencies]
-roxmltree = "0.21"
 syn = { version = "2.0", features = ["full"] }
