@@ -24,6 +24,8 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "CARGO_PROFILE_DEV_OPT_LEVEL",
     "CARGO_PROFILE_RELEASE_LTO",
     "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+    "RUSTC",
+    "RUSTC_BOOTSTRAP",
     "RUSTC_WORKSPACE_WRAPPER",
     "CC",
     "CXX",
@@ -41,10 +43,12 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "PROVISIONING_PROFILE_SPECIFIER",
     "RUSTC_WRAPPER",
     "RUSTFLAGS",
+    "RUSTUP_TOOLCHAIN",
     "SDKROOT",
     "JAVA_HOME",
 ];
 const FINGERPRINTED_BUILD_TOOLS: &[&str] = &[
+    "RUSTC",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
     "CC",
@@ -3159,6 +3163,69 @@ mod tests {
     }
 
     #[test]
+    fn rustc_selector_content_changes_the_build_environment_hash() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let rustc = bin.join(if cfg!(windows) {
+            "selected-rustc.exe"
+        } else {
+            "selected-rustc"
+        });
+        let rustc_name = rustc.file_name().unwrap().to_string_lossy().to_string();
+        write_test_build_tool(&rustc, b"rustc-v1");
+        let values = BTreeMap::from([
+            ("PATH".to_string(), bin.display().to_string()),
+            ("RUSTC".to_string(), rustc_name),
+        ]);
+
+        let first = relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
+            values.get(name).cloned()
+        })
+        .unwrap();
+        write_test_build_tool(&rustc, b"rustc-v2");
+        let second = relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
+            values.get(name).cloned()
+        })
+        .unwrap();
+
+        assert_ne!(first.0, second.0);
+        assert_eq!(first.1, None);
+        assert_eq!(second.1, None);
+    }
+
+    #[test]
+    fn rust_toolchain_selector_environment_changes_the_build_environment_hash() {
+        for name in ["RUSTC", "RUSTC_BOOTSTRAP", "RUSTUP_TOOLCHAIN"] {
+            assert!(RELEVANT_ENVIRONMENT.contains(&name));
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let values = BTreeMap::from([
+            ("RUSTC_BOOTSTRAP".to_string(), "0".to_string()),
+            ("RUSTUP_TOOLCHAIN".to_string(), "stable".to_string()),
+        ]);
+        let baseline =
+            relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
+                values.get(name).cloned()
+            })
+            .unwrap();
+
+        for (name, changed_value) in [("RUSTC_BOOTSTRAP", "1"), ("RUSTUP_TOOLCHAIN", "nightly")] {
+            let changed =
+                relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |candidate| {
+                    if candidate == name {
+                        Some(changed_value.to_string())
+                    } else {
+                        values.get(candidate).cloned()
+                    }
+                })
+                .unwrap();
+            assert_ne!(baseline.0, changed.0, "{name} must affect the build key");
+        }
+    }
+
+    #[test]
     fn target_linker_content_changes_the_build_environment_hash() {
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");
@@ -3292,6 +3359,17 @@ mod tests {
                 .expect("unfingerprintable tools must not block BuildKey creation");
             assert!(result.1.is_some(), "{unsafe_command}");
         }
+
+        let rustc_result = relevant_build_environment_hash(
+            root.path(),
+            "aarch64-apple-darwin",
+            |name| match name {
+                "RUSTC" => Some("missing-rustc".into()),
+                _ => None,
+            },
+        )
+        .expect("an unavailable selected rustc must not block BuildKey creation");
+        assert!(rustc_result.1.is_some());
 
         #[cfg(unix)]
         {
