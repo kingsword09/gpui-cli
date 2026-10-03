@@ -2687,6 +2687,29 @@ mod tests {
     }
 
     #[test]
+    fn frozen_desktop_plan_keeps_cache_eligible_when_build_script_is_disabled() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname='app'\nversion='0.1.0'\nedition='2024'\nbuild=false\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("src/lib.rs"), "pub fn value() {}\n").unwrap();
+        fs::write(root.path().join("build.rs"), "fn main() {}\n").unwrap();
+        let status = Command::new("cargo")
+            .current_dir(root.path())
+            .args(["generate-lockfile", "--offline"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let plan = desktop_build_plan(root.path(), false).unwrap();
+        assert!(plan.cache_hit_disabled_reason.is_none());
+        assert!(plan.snapshot.root.join("build.rs").is_file());
+    }
+
+    #[test]
     fn external_path_package_build_script_disables_frozen_desktop_cache_reuse() {
         let root = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
