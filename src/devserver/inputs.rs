@@ -196,6 +196,7 @@ pub struct IndexedInputs {
     initialized: bool,
     force_full_scan: bool,
     index_disabled: bool,
+    incremental_enabled: bool,
 }
 
 impl IndexedInputs {
@@ -210,6 +211,7 @@ impl IndexedInputs {
             initialized: false,
             force_full_scan: false,
             index_disabled: false,
+            incremental_enabled: true,
         }
     }
 
@@ -222,7 +224,15 @@ impl IndexedInputs {
     }
 
     pub fn is_index_disabled(&self) -> bool {
-        self.index_disabled
+        self.index_disabled || !self.incremental_enabled
+    }
+
+    /// Permanently disables metadata reuse for this index instance. Use this
+    /// for filesystems whose timestamps or identities are not trustworthy;
+    /// every refresh then uses the stable full content scanner.
+    pub fn disable_incremental(&mut self) {
+        self.incremental_enabled = false;
+        self.force_full_scan = true;
     }
 
     /// Records a watcher path without touching the filesystem.
@@ -258,7 +268,11 @@ impl IndexedInputs {
     }
 
     pub fn refresh(&mut self, max_rescans: usize) -> Result<IndexedRefresh> {
-        if !self.initialized || self.force_full_scan || self.index_disabled {
+        if !self.initialized
+            || self.force_full_scan
+            || self.index_disabled
+            || !self.incremental_enabled
+        {
             let kind = if self.initialized {
                 IndexedRefreshKind::FallbackFullScan
             } else {
@@ -366,6 +380,7 @@ impl IndexedInputs {
         if kind.is_dir() {
             let mut pending = vec![path.to_owned()];
             while let Some(dir) = pending.pop() {
+                let directory_before = read_directory_stamp(&dir)?;
                 let entries = fs::read_dir(&dir)
                     .with_context(|| format!("reading dirty inputs in {}", dir.display()))?;
                 for entry in entries {
@@ -382,14 +397,14 @@ impl IndexedInputs {
                     } else if child_kind.is_symlink() && child.is_dir() {
                         self.untracked_directory_links.insert(child_name);
                     } else if child_kind.is_file() || child_kind.is_symlink() {
-                        self.scan_dirty_file(
-                            &child_name,
-                            &child,
-                            &mut old_entries,
-                            false,
-                            refresh,
-                        )?;
+                        self.scan_dirty_file(&child_name, &child, &mut old_entries, true, refresh)?;
                     }
+                }
+                if directory_before != read_directory_stamp(&dir)? {
+                    bail!(
+                        "directory changed while refreshing inputs: {}",
+                        dir.display()
+                    );
                 }
             }
         } else if kind.is_symlink() && path.is_dir() {
@@ -539,6 +554,31 @@ struct FileStamp {
     modified: SystemTime,
     size: u64,
     identity: file_id::FileId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirectoryStamp {
+    modified: SystemTime,
+    size: u64,
+    identity: file_id::FileId,
+}
+
+fn read_directory_stamp(path: &Path) -> Result<DirectoryStamp> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("reading input directory metadata: {}", path.display()))?;
+    if !metadata.is_dir() {
+        bail!("input directory changed type: {}", path.display());
+    }
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("reading input directory mtime: {}", path.display()))?;
+    let identity = file_id::get_file_id(path)
+        .with_context(|| format!("reading input directory identity: {}", path.display()))?;
+    Ok(DirectoryStamp {
+        modified,
+        size: metadata.len(),
+        identity,
+    })
 }
 
 struct ScannedIndex {
@@ -1560,8 +1600,8 @@ mod tests {
 
         index.mark_dirty("assets");
         let directory_refresh = index.refresh(1).unwrap();
-        assert_eq!(directory_refresh.hashed_files, 0);
-        assert_eq!(directory_refresh.reused_files, 1);
+        assert_eq!(directory_refresh.hashed_files, 1);
+        assert_eq!(directory_refresh.reused_files, 0);
         assert_eq!(index.manifest(), &Inputs::scan(root.path()).unwrap());
     }
 
@@ -1630,6 +1670,24 @@ mod tests {
         index.mark_dirty("target/debug/app");
         let refresh = index.refresh(1).unwrap();
         assert_eq!(refresh.kind, Some(IndexedRefreshKind::Cached));
+    }
+
+    #[test]
+    fn indexed_refresh_can_disable_metadata_reuse_for_unreliable_filesystems() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("main.rs"), "source").unwrap();
+        let mut index = IndexedInputs::new(root.path());
+        index.refresh(1).unwrap();
+        index.disable_incremental();
+
+        let full = index.refresh(1).unwrap();
+        assert_eq!(full.kind, Some(IndexedRefreshKind::FallbackFullScan));
+        assert_eq!(full.hashed_files, 1);
+        assert!(index.is_index_disabled());
+
+        let next = index.refresh(1).unwrap();
+        assert_eq!(next.kind, Some(IndexedRefreshKind::FallbackFullScan));
+        assert_eq!(next.hashed_files, 1);
     }
 
     #[test]
