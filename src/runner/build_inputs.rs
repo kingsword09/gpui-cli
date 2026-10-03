@@ -1288,9 +1288,10 @@ fn android_toolchain_fingerprint(project_root: &Path) -> Option<String> {
     let ndk_compiler_resources =
         android_ndk_compiler_resource_fingerprint(&android_ndk_host_root(&ndk_home)?)?;
     let cargo_ndk = command_version("cargo", &["ndk", "--version"], false)?;
-    let java = java_version()?;
+    let (java, java_home) = java_runtime_details()?;
+    let java_runtime = java_runtime_fingerprint(&java_home)?;
     let identity = format!(
-        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\nndk-compiler-resources={ndk_compiler_resources}\ncargo-ndk={cargo_ndk}\njava={java}"
+        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\nndk-compiler-resources={ndk_compiler_resources}\ncargo-ndk={cargo_ndk}\njava={java}\njava-runtime={java_runtime}"
     );
     Some(format!("{:x}", Sha256::digest(identity.as_bytes())))
 }
@@ -1686,19 +1687,159 @@ fn android_package_revision(source_properties: &Path) -> Option<String> {
     })
 }
 
-fn java_version() -> Option<String> {
-    match env::var_os("JAVA_HOME") {
-        Some(home) if !home.is_empty() => {
-            let executable = PathBuf::from(home).join("bin").join(if cfg!(windows) {
-                "java.exe"
-            } else {
-                "java"
-            });
-            command_version(executable.as_os_str(), &["-version"], true)
-        }
-        Some(_) => None,
-        None => command_version(OsStr::new("java"), &["-version"], true),
+fn java_runtime_details() -> Option<(String, PathBuf)> {
+    let (program, args) = match env::var_os("JAVA_HOME") {
+        Some(home) if !home.is_empty() => (
+            PathBuf::from(home)
+                .join("bin")
+                .join(if cfg!(windows) { "java.exe" } else { "java" }),
+            vec!["-XshowSettings:properties", "-version"],
+        ),
+        Some(_) => return None,
+        None => (
+            PathBuf::from("java"),
+            vec!["-XshowSettings:properties", "-version"],
+        ),
+    };
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
     }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut version = None;
+    let mut home = None;
+    for line in stdout.lines().chain(stderr.lines()) {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "java.version" => version = Some(value.trim().to_owned()),
+            "java.home" => home = Some(PathBuf::from(value.trim())),
+            _ => {}
+        }
+    }
+    let version = version.filter(|value| !value.is_empty())?;
+    let home = home.filter(|path| !path.as_os_str().is_empty())?;
+    Some((version, home))
+}
+
+fn java_runtime_fingerprint(java_home: &Path) -> Option<String> {
+    bounded_java_directory_fingerprint(
+        java_home,
+        b"gpui-android-java-runtime-v1\0",
+        &mut DirectoryFingerprintBudget::default(),
+    )
+}
+
+fn bounded_java_directory_fingerprint(
+    root: &Path,
+    domain: &[u8],
+    budget: &mut DirectoryFingerprintBudget,
+) -> Option<String> {
+    let metadata = fs::symlink_metadata(root).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let mut pending = vec![(
+        PathBuf::new(),
+        canonical_root.clone(),
+        vec![canonical_root.clone()],
+    )];
+    let mut entries = Vec::new();
+    let mut file_hashes = BTreeMap::<PathBuf, String>::new();
+    while let Some((logical_directory, directory, ancestors)) = pending.pop() {
+        let mut children = fs::read_dir(&directory)
+            .ok()?
+            .map(|entry| entry.ok())
+            .collect::<Option<Vec<_>>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for entry in children {
+            let path = entry.path();
+            let name = entry.file_name();
+            let logical_path = logical_directory.join(name);
+            let relative = logical_path.to_str()?.replace('\\', "/");
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                let resolved = fs::canonicalize(&path).ok()?;
+                let resolved_metadata = fs::symlink_metadata(&resolved).ok()?;
+                if !resolved_metadata.is_dir() && !resolved_metadata.is_file() {
+                    return None;
+                }
+                let target = if resolved.starts_with(&canonical_root) {
+                    "internal-link"
+                } else if resolved_metadata.is_dir() {
+                    "external-directory-link"
+                } else if resolved_metadata.is_file() {
+                    "external-file-link"
+                } else {
+                    return None;
+                };
+                budget.record(0)?;
+                entries.push((relative.clone(), b'l', Some(target), None));
+                if resolved_metadata.is_dir() {
+                    if ancestors.contains(&resolved) {
+                        return None;
+                    }
+                    let mut child_ancestors = ancestors.clone();
+                    child_ancestors.push(resolved.clone());
+                    pending.push((logical_path, resolved, child_ancestors));
+                } else if resolved_metadata.is_file() {
+                    let content_hash = if let Some(hash) = file_hashes.get(&resolved) {
+                        hash.clone()
+                    } else {
+                        budget.record(resolved_metadata.len())?;
+                        let hash = hash_file_contents(&resolved).ok()?;
+                        file_hashes.insert(resolved, hash.clone());
+                        hash
+                    };
+                    entries.push((relative, b'h', None, Some(content_hash)));
+                }
+            } else if metadata.is_dir() {
+                budget.record(0)?;
+                entries.push((relative, b'd', None, None));
+                let canonical = fs::canonicalize(&path).ok()?;
+                if ancestors.contains(&canonical) {
+                    return None;
+                }
+                let mut child_ancestors = ancestors.clone();
+                child_ancestors.push(canonical.clone());
+                pending.push((logical_path, canonical, child_ancestors));
+            } else if metadata.is_file() {
+                let resolved = fs::canonicalize(&path).ok()?;
+                let content_hash = if let Some(hash) = file_hashes.get(&resolved) {
+                    hash.clone()
+                } else {
+                    budget.record(metadata.len())?;
+                    let hash = hash_file_contents(&resolved).ok()?;
+                    file_hashes.insert(resolved, hash.clone());
+                    hash
+                };
+                entries.push((relative, b'f', None, Some(content_hash)));
+            } else {
+                return None;
+            }
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    for (relative, kind, target, content_hash) in entries {
+        digest.update([kind]);
+        digest.update((relative.len() as u64).to_be_bytes());
+        digest.update(relative.as_bytes());
+        if let Some(target) = target {
+            digest.update((target.len() as u64).to_be_bytes());
+            digest.update(target.as_bytes());
+        }
+        if let Some(content_hash) = content_hash {
+            digest.update(content_hash.as_bytes());
+        }
+    }
+    Some(format!("{:x}", digest.finalize()))
 }
 
 fn command_version(
@@ -2837,6 +2978,116 @@ mod tests {
     }
 
     #[test]
+    fn android_java_runtime_fingerprint_tracks_content_and_ignores_install_root() {
+        let first_root = tempfile::tempdir().unwrap();
+        let first_java = first_root.path().join("Contents/Home");
+        fs::create_dir_all(first_java.join("bin")).unwrap();
+        fs::create_dir_all(first_java.join("lib/server")).unwrap();
+        fs::write(first_java.join("release"), "JAVA_VERSION=\"21.0.1\"\n").unwrap();
+        fs::write(first_java.join("bin/java"), b"java launcher").unwrap();
+        fs::write(
+            first_java.join("lib/server/libjvm.dylib"),
+            b"JVM runtime v1",
+        )
+        .unwrap();
+
+        let first = java_runtime_fingerprint(&first_java).unwrap();
+        assert!(!first.contains(&first_root.path().display().to_string()));
+
+        let second_root = tempfile::tempdir().unwrap();
+        let second_java = second_root.path().join("Contents/Home");
+        fs::create_dir_all(second_java.join("bin")).unwrap();
+        fs::create_dir_all(second_java.join("lib/server")).unwrap();
+        fs::write(second_java.join("release"), "JAVA_VERSION=\"21.0.1\"\n").unwrap();
+        fs::write(second_java.join("bin/java"), b"java launcher").unwrap();
+        fs::write(
+            second_java.join("lib/server/libjvm.dylib"),
+            b"JVM runtime v1",
+        )
+        .unwrap();
+        assert_eq!(first, java_runtime_fingerprint(&second_java).unwrap());
+
+        fs::write(
+            second_java.join("lib/server/libjvm.dylib"),
+            b"JVM runtime v2",
+        )
+        .unwrap();
+        assert_ne!(first, java_runtime_fingerprint(&second_java).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_java_runtime_fingerprint_tracks_internal_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let java_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(java_root.path().join("lib/modules")).unwrap();
+        fs::create_dir_all(java_root.path().join("jmods")).unwrap();
+        fs::write(java_root.path().join("lib/runtime.bin"), b"JVM runtime v1").unwrap();
+        fs::write(java_root.path().join("jmods/java.base.jmod"), b"module v1").unwrap();
+        symlink("runtime.bin", java_root.path().join("lib/runtime-link.bin")).unwrap();
+        symlink(
+            "../../jmods",
+            java_root.path().join("lib/modules/jmods-alias"),
+        )
+        .unwrap();
+
+        let first = java_runtime_fingerprint(java_root.path())
+            .expect("internal JDK symlinks should be fingerprinted");
+        fs::write(java_root.path().join("lib/runtime.bin"), b"JVM runtime v2").unwrap();
+        assert_ne!(first, java_runtime_fingerprint(java_root.path()).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_java_runtime_fingerprint_allows_external_file_links_without_paths() {
+        use std::os::unix::fs::symlink;
+
+        let java_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(java_root.path().join("lib")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("libjvm.dylib"), b"JVM runtime").unwrap();
+        symlink(
+            outside.path().join("libjvm.dylib"),
+            java_root.path().join("lib/libjvm.dylib"),
+        )
+        .unwrap();
+
+        let fingerprint = java_runtime_fingerprint(java_root.path()).unwrap();
+        assert!(!fingerprint.contains(&outside.path().display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_java_runtime_fingerprint_tracks_external_directory_links() {
+        use std::os::unix::fs::symlink;
+
+        let java_root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(java_root.path().join("lib")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("nested")).unwrap();
+        fs::write(
+            outside.path().join("nested/runtime.properties"),
+            b"runtime-v1",
+        )
+        .unwrap();
+        symlink(
+            outside.path().join("nested"),
+            java_root.path().join("lib/nested"),
+        )
+        .unwrap();
+
+        let first = java_runtime_fingerprint(java_root.path()).unwrap();
+        assert!(!first.contains(&outside.path().display().to_string()));
+        fs::write(
+            outside.path().join("nested/runtime.properties"),
+            b"runtime-v2",
+        )
+        .unwrap();
+        assert_ne!(first, java_runtime_fingerprint(java_root.path()).unwrap());
+    }
+
+    #[test]
     fn android_sdk_fingerprint_tracks_installed_platform_and_build_tools_revisions() {
         let sdk = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
@@ -2998,7 +3249,7 @@ mod tests {
         let ndk_alias_matches = env::var_os("NDK_HOME").is_none()
             || consistent_environment_directory(&["NDK_HOME"]).as_ref() == ndk_home.as_ref();
         let probes_available = command_version("cargo", &["ndk", "--version"], false).is_some()
-            && java_version().is_some();
+            && java_runtime_details().is_some();
         let package_metadata_available = sdk_root
             .as_deref()
             .and_then(|root| android_sdk_package_fingerprint(root, &project_root))
