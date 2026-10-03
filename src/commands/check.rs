@@ -23,8 +23,8 @@ use crate::devserver::events::{Event, Kind, Page};
 use crate::runner::android::AndroidRunner;
 use crate::runner::build_inputs::{
     DesktopBuildPlan, FrozenCheckInputs, android_build_key, android_preview_cache_policy,
-    desktop_build_key, desktop_build_plan, frozen_check_inputs, ios_build_key,
-    prepare_android_signing_snapshot, rustc_wrapper_cache_disabled_reason,
+    compiler_tool_cache_disabled_reason, desktop_build_key, desktop_build_plan,
+    frozen_check_inputs, ios_build_key, prepare_android_signing_snapshot,
 };
 use crate::runner::ios::IosSimulatorRunner;
 use crate::runner::lease::{DeviceLeaseDelegation, DeviceLeaseSession};
@@ -352,23 +352,37 @@ fn matrix_target_build(
         android_debug_keystore_hash,
         android_signing_fingerprint,
     ) = match platform {
-        MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux => (
-            desktop_build_key(snapshot_root, false)?,
-            BuildPlatform::Desktop,
-            rustc_wrapper_cache_disabled_reason(snapshot_root),
-            None,
-            None,
-        ),
-        MatrixPlatform::Ios => (
-            ios_build_key(snapshot_root, false, "aarch64-apple-ios-sim")?,
-            BuildPlatform::Ios,
-            rustc_wrapper_cache_disabled_reason(snapshot_root),
-            None,
-            None,
-        ),
+        MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux => {
+            let key = desktop_build_key(snapshot_root, false)?;
+            let cache_hit_disabled_reason = compiler_tool_cache_disabled_reason(
+                snapshot_root,
+                Some(&key.material().target_triple),
+            );
+            (
+                key,
+                BuildPlatform::Desktop,
+                cache_hit_disabled_reason,
+                None,
+                None,
+            )
+        }
+        MatrixPlatform::Ios => {
+            let key = ios_build_key(snapshot_root, false, "aarch64-apple-ios-sim")?;
+            let cache_hit_disabled_reason = compiler_tool_cache_disabled_reason(
+                snapshot_root,
+                Some(&key.material().target_triple),
+            );
+            (
+                key,
+                BuildPlatform::Ios,
+                cache_hit_disabled_reason,
+                None,
+                None,
+            )
+        }
         MatrixPlatform::Android => {
             let abi = abi.context("Android matrix target has no ABI for BuildKey")?;
-            let policy = android_preview_cache_policy(snapshot_root, false)?;
+            let policy = android_preview_cache_policy(snapshot_root, false, abi)?;
             (
                 android_build_key(snapshot_root, false, &[abi.to_owned()])?,
                 BuildPlatform::Android,

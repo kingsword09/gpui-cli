@@ -44,10 +44,16 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "SDKROOT",
     "JAVA_HOME",
 ];
-const WRAPPER_ENVIRONMENT: &[&str] = &["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"];
-const MAX_WRAPPER_FINGERPRINT_BYTES: u64 = 64 * 1024 * 1024;
-const WRAPPER_CACHE_DISABLED_REASON: &str =
-    "Rust compiler wrapper could not be safely fingerprinted; cache reuse is disabled";
+const FINGERPRINTED_BUILD_TOOLS: &[&str] = &[
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CC",
+    "CXX",
+    "AR",
+];
+const MAX_BUILD_TOOL_FINGERPRINT_BYTES: u64 = 64 * 1024 * 1024;
+const BUILD_TOOL_CACHE_DISABLED_REASON: &str =
+    "configured compiler/linker tool could not be safely fingerprinted; cache reuse is disabled";
 
 const ANDROID_KEYSTORE_PROPERTIES_RELATIVE: &str = "mobile/android/gradle/keystore.properties";
 const ANDROID_GRADLE_WRAPPER_PROPERTIES_RELATIVE: &str =
@@ -910,9 +916,11 @@ pub fn android_build_key(root: &Path, release: bool, abis: &[String]) -> Result<
 pub fn android_preview_cache_policy(
     root: &Path,
     release: bool,
+    abi: &str,
 ) -> Result<AndroidPreviewCachePolicy> {
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving Android preview root: {}", root.display()))?;
+    let target_triple = android_rust_target(abi)?;
     let mut native = NativeInputs::scan(&root)?;
     let build_script_disabled_reason = local_build_script_cache_disabled_reason(&root)?;
     let wrapper_disabled_reason = android_gradle_wrapper_cache_disabled_reason(&root, &native)?;
@@ -934,7 +942,7 @@ pub fn android_preview_cache_policy(
     };
     Ok(AndroidPreviewCachePolicy {
         disabled_reason: combine_cache_hit_disabled_reasons([
-            rustc_wrapper_cache_disabled_reason(&root),
+            compiler_tool_cache_disabled_reason(&root, Some(target_triple)),
             toolchain_disabled_reason,
             wrapper_disabled_reason,
             verification_disabled_reason,
@@ -953,23 +961,40 @@ pub fn android_preview_cache_policy(
 
 /// Returns a conservative cache gate for consumers that derive a BuildKey
 /// without a full desktop/iOS build plan, such as matrix preview planning.
-pub fn rustc_wrapper_cache_disabled_reason(project_root: &Path) -> Option<String> {
-    if non_unicode_wrapper_cache_disabled_reason().is_some() {
-        return Some(WRAPPER_CACHE_DISABLED_REASON.to_owned());
-    }
+pub fn compiler_tool_cache_disabled_reason(
+    project_root: &Path,
+    target_triple: Option<&str>,
+) -> Option<String> {
     let path_environment = env::var("PATH").ok();
     let path_extensions = env::var("PATHEXT").ok();
-    WRAPPER_ENVIRONMENT.iter().find_map(|name| {
-        let value = env::var(name).ok()?;
-        wrapper_fingerprint(
-            project_root,
-            &value,
-            path_environment.as_deref(),
-            path_extensions.as_deref(),
-        )
-        .err()
-        .map(|_| WRAPPER_CACHE_DISABLED_REASON.to_owned())
-    })
+    let mut remaining = MAX_BUILD_TOOL_FINGERPRINT_BYTES;
+    let mut names = FINGERPRINTED_BUILD_TOOLS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    if let Some(target_triple) = target_triple {
+        names.extend(
+            target_triple
+                .split('+')
+                .map(normalize_target_environment_name)
+                .map(|target| format!("CARGO_TARGET_{target}_LINKER")),
+        );
+    }
+    names
+        .into_iter()
+        .find_map(|name| {
+            let value = env::var(&name).ok()?;
+            build_tool_command_fingerprint(
+                project_root,
+                &value,
+                path_environment.as_deref(),
+                path_extensions.as_deref(),
+                &mut remaining,
+            )
+            .err()
+            .map(|_| BUILD_TOOL_CACHE_DISABLED_REASON.to_owned())
+        })
+        .or_else(|| non_unicode_build_tool_cache_disabled_reason(target_triple))
 }
 
 /// Reads the current default Android debug-keystore content hash without
@@ -2564,6 +2589,8 @@ fn build_key_from_inputs(
         relevant_build_environment_hash(inputs.project_root, &target_triple, |name| {
             env::var(name).ok()
         })?;
+    let non_unicode_disabled_reason =
+        non_unicode_build_tool_cache_disabled_reason(Some(&target_triple));
     let key = BuildKey::new(BuildKeyMaterial {
         source_manifest_hash: inputs.source_manifest_hash,
         cargo_lock_hash: inputs
@@ -2583,18 +2610,36 @@ fn build_key_from_inputs(
     })?;
     Ok((
         key,
-        combine_cache_hit_disabled_reasons([
-            wrapper_disabled_reason,
-            non_unicode_wrapper_cache_disabled_reason(),
-        ]),
+        combine_cache_hit_disabled_reasons([wrapper_disabled_reason, non_unicode_disabled_reason]),
     ))
 }
 
-fn non_unicode_wrapper_cache_disabled_reason() -> Option<String> {
-    WRAPPER_ENVIRONMENT
+fn non_unicode_build_tool_cache_disabled_reason(target_triple: Option<&str>) -> Option<String> {
+    if FINGERPRINTED_BUILD_TOOLS
         .iter()
         .any(|name| env::var_os(name).is_some() && env::var(name).is_err())
-        .then(|| WRAPPER_CACHE_DISABLED_REASON.to_owned())
+    {
+        return Some(BUILD_TOOL_CACHE_DISABLED_REASON.to_owned());
+    }
+    target_triple.and_then(|targets| {
+        targets
+            .split('+')
+            .map(normalize_target_environment_name)
+            .any(|target| {
+                [
+                    format!("CARGO_TARGET_{target}_LINKER"),
+                    format!("CARGO_TARGET_{target}_RUSTFLAGS"),
+                ]
+                .iter()
+                .any(|name| env::var_os(name).is_some() && env::var(name).is_err())
+            })
+            .then(|| BUILD_TOOL_CACHE_DISABLED_REASON.to_owned())
+    })
+}
+
+fn is_fingerprinted_build_tool(name: &str) -> bool {
+    FINGERPRINTED_BUILD_TOOLS.contains(&name)
+        || (name.starts_with("CARGO_TARGET_") && name.ends_with("_LINKER"))
 }
 
 fn relevant_build_environment_hash(
@@ -2604,12 +2649,46 @@ fn relevant_build_environment_hash(
 ) -> Result<(String, Option<String>)> {
     let path_environment = read_environment("PATH");
     let path_extensions = read_environment("PATHEXT");
-    let mut wrapper_disabled_reason = None;
+    let mut tool_disabled_reason = None;
+    let mut remaining = MAX_BUILD_TOOL_FINGERPRINT_BYTES;
     let mut names = RELEVANT_ENVIRONMENT
         .iter()
         .map(|name| (*name).to_string())
         .collect::<Vec<_>>();
-    let target = target_triple
+    for target in target_triple
+        .split('+')
+        .map(normalize_target_environment_name)
+    {
+        names.push(format!("CARGO_TARGET_{target}_LINKER"));
+        names.push(format!("CARGO_TARGET_{target}_RUSTFLAGS"));
+    }
+
+    hash_relevant_environment(names.into_iter().map(|name| {
+        let value = read_environment(&name).unwrap_or_else(|| "<unset>".into());
+        let value = if is_fingerprinted_build_tool(&name) && value != "<unset>" {
+            match build_tool_command_fingerprint(
+                project_root,
+                &value,
+                path_environment.as_deref(),
+                path_extensions.as_deref(),
+                &mut remaining,
+            ) {
+                Ok(fingerprint) => format!("{value}\ntool-fingerprint={fingerprint}"),
+                Err(_) => {
+                    tool_disabled_reason = Some(BUILD_TOOL_CACHE_DISABLED_REASON.into());
+                    format!("{value}\ntool-fingerprint=unavailable")
+                }
+            }
+        } else {
+            value
+        };
+        (name, value)
+    }))
+    .map(|hash| (hash, tool_disabled_reason))
+}
+
+fn normalize_target_environment_name(target_triple: &str) -> String {
+    target_triple
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() {
@@ -2618,69 +2697,94 @@ fn relevant_build_environment_hash(
                 '_'
             }
         })
-        .collect::<String>();
-    names.push(format!("CARGO_TARGET_{target}_LINKER"));
-    names.push(format!("CARGO_TARGET_{target}_RUSTFLAGS"));
-
-    hash_relevant_environment(names.into_iter().map(|name| {
-        let value = read_environment(&name).unwrap_or_else(|| "<unset>".into());
-        let value = if WRAPPER_ENVIRONMENT.contains(&name.as_str()) && value != "<unset>" {
-            match wrapper_fingerprint(
-                project_root,
-                &value,
-                path_environment.as_deref(),
-                path_extensions.as_deref(),
-            ) {
-                Ok(fingerprint) => format!("{value}\nwrapper-fingerprint={fingerprint}"),
-                Err(_) => {
-                    wrapper_disabled_reason = Some(WRAPPER_CACHE_DISABLED_REASON.into());
-                    format!("{value}\nwrapper-fingerprint=unavailable")
-                }
-            }
-        } else {
-            value
-        };
-        (name, value)
-    }))
-    .map(|hash| (hash, wrapper_disabled_reason))
+        .collect()
 }
 
-fn wrapper_fingerprint(
+fn build_tool_command_fingerprint(
     project_root: &Path,
     value: &str,
     path_environment: Option<&str>,
     path_extensions: Option<&str>,
+    remaining: &mut u64,
 ) -> Result<String> {
-    let path = resolve_wrapper_path(project_root, value, path_environment, path_extensions)
-        .context("resolving compiler wrapper executable")?;
-    let metadata = match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => metadata,
-        Ok(_) => bail!("compiler wrapper is not a regular file"),
-        Err(error) => return Err(error).context("inspecting compiler wrapper executable"),
-    };
-    if metadata.len() > MAX_WRAPPER_FINGERPRINT_BYTES {
-        bail!("compiler wrapper executable exceeds the fingerprint budget");
+    if value.is_empty()
+        || value.starts_with('-')
+        || value.chars().any(|character| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '\'' | '"'
+                        | '|'
+                        | ';'
+                        | '&'
+                        | '>'
+                        | '<'
+                        | '$'
+                        | '`'
+                        | '('
+                        | ')'
+                        | '%'
+                        | '!'
+                        | '^'
+                        | '*'
+                        | '?'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '#'
+                        | '~'
+                )
+        })
+    {
+        bail!("configured compiler/linker command is not a single executable path");
     }
-    let mut file = fs::File::open(&path).context("opening compiler wrapper executable")?;
-    let opened_metadata = file
-        .metadata()
-        .context("checking compiler wrapper executable")?;
-    if !opened_metadata.is_file() || opened_metadata.len() > MAX_WRAPPER_FINGERPRINT_BYTES {
-        bail!("compiler wrapper executable changed while fingerprinting");
+    let path = resolve_build_tool_path(project_root, value, path_environment, path_extensions)
+        .context("resolving configured compiler/linker tool")?;
+    let canonical_path = fs::canonicalize(&path).context("canonicalizing configured build tool")?;
+    let digest = fingerprint_build_tool_file(&canonical_path, remaining)?;
+    Ok(format!("{}:{digest}", canonical_path.display()))
+}
+
+fn fingerprint_build_tool_file(path: &Path, remaining: &mut u64) -> Result<String> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => bail!("configured build tool is not a regular file"),
+        Err(error) => return Err(error).context("inspecting configured build tool"),
+    };
+    if !is_executable_build_tool(path, &metadata) {
+        bail!("configured build tool is not executable");
+    }
+    if metadata.len() > *remaining {
+        bail!("configured build tool exceeds the fingerprint budget");
+    }
+    let reserved_bytes = metadata.len();
+    *remaining -= reserved_bytes;
+    let mut file =
+        open_build_tool_for_fingerprinting(path).context("opening configured build tool")?;
+    let opened_metadata = file.metadata().context("checking configured build tool")?;
+    if !opened_metadata.is_file()
+        || !same_build_tool_file(&metadata, &opened_metadata)
+        || opened_metadata.len() != reserved_bytes
+    {
+        bail!("configured build tool changed while fingerprinting");
     }
     let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
     file.by_ref()
-        .take(MAX_WRAPPER_FINGERPRINT_BYTES + 1)
+        .take(reserved_bytes)
         .read_to_end(&mut bytes)
-        .context("reading compiler wrapper executable")?;
+        .context("reading configured build tool")?;
     let final_metadata = file
         .metadata()
-        .context("rechecking compiler wrapper executable")?;
+        .context("rechecking configured build tool")?;
     if bytes.len() as u64 != opened_metadata.len()
-        || final_metadata.len() != opened_metadata.len()
-        || final_metadata.modified().ok() != opened_metadata.modified().ok()
+        || !same_build_tool_file(&opened_metadata, &final_metadata)
     {
-        bail!("compiler wrapper executable changed while fingerprinting");
+        bail!("configured build tool changed while fingerprinting");
+    }
+    let path_metadata = fs::metadata(path).context("rechecking configured build tool path")?;
+    if !same_build_tool_file(&opened_metadata, &path_metadata) {
+        bail!("configured build tool path changed while fingerprinting");
     }
     Ok(format!(
         "sha256={:x};bytes={}",
@@ -2689,7 +2793,87 @@ fn wrapper_fingerprint(
     ))
 }
 
-fn resolve_wrapper_path(
+#[cfg(windows)]
+fn open_build_tool_for_fingerprinting(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_build_tool_for_fingerprinting(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+fn is_executable_build_tool(path: &Path, metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = path;
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        #[cfg(windows)]
+        {
+            let extension = path.extension().and_then(OsStr::to_str);
+            let allowed_extensions =
+                env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+            extension.is_some_and(|extension| {
+                allowed_extensions
+                    .split(';')
+                    .map(|extension| extension.trim_start_matches('.'))
+                    .any(|allowed| allowed.eq_ignore_ascii_case(extension))
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    }
+}
+
+fn same_build_tool_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    if left.len() != right.len()
+        || left.modified().ok() != right.modified().ok()
+        || left.created().ok() != right.created().ok()
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        left.dev() == right.dev()
+            && left.ino() == right.ino()
+            && left.mode() == right.mode()
+            && left.ctime() == right.ctime()
+            && left.ctime_nsec() == right.ctime_nsec()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        matches!(
+            (
+                left.volume_serial_number(),
+                left.file_index(),
+                right.volume_serial_number(),
+                right.file_index()
+            ),
+            (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
+                if left_volume == right_volume && left_index == right_index
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        true
+    }
+}
+
+fn resolve_build_tool_path(
     project_root: &Path,
     value: &str,
     path_environment: Option<&str>,
@@ -2768,6 +2952,15 @@ fn rustc_identity() -> Result<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_test_build_tool(path: &Path, contents: &[u8]) {
+        fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
 
     #[test]
     fn desktop_key_uses_native_and_source_manifests_and_is_key_isolated() {
@@ -2917,7 +3110,7 @@ mod tests {
             "rust-wrapper"
         });
         let wrapper_name = wrapper.file_name().unwrap().to_string_lossy().to_string();
-        fs::write(&wrapper, b"wrapper-v1").unwrap();
+        write_test_build_tool(&wrapper, b"wrapper-v1");
         let values = BTreeMap::from([
             ("PATH".to_string(), bin.display().to_string()),
             ("RUSTC_WRAPPER".to_string(), wrapper_name),
@@ -2927,7 +3120,7 @@ mod tests {
             values.get(name).cloned()
         })
         .unwrap();
-        fs::write(&wrapper, b"wrapper-v2").unwrap();
+        write_test_build_tool(&wrapper, b"wrapper-v2");
         let second = relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
             values.get(name).cloned()
         })
@@ -2939,34 +3132,180 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_or_over_budget_wrapper_disables_cache_reuse() {
+    fn target_linker_content_changes_the_build_environment_hash() {
         let root = tempfile::tempdir().unwrap();
-        let unavailable = relevant_build_environment_hash(
-            root.path(),
-            "aarch64-apple-darwin",
-            |name| match name {
-                "RUSTC_WRAPPER" => Some("missing-wrapper".into()),
-                _ => None,
-            },
-        )
-        .unwrap();
-        assert!(unavailable.1.is_some());
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let linker = bin.join(if cfg!(windows) {
+            "test-linker.exe"
+        } else {
+            "test-linker"
+        });
+        write_test_build_tool(&linker, b"linker-v1");
+        let target_name = "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER";
+        let values = BTreeMap::from([
+            ("PATH".to_string(), bin.display().to_string()),
+            (
+                target_name.to_string(),
+                linker.file_name().unwrap().to_string_lossy().into(),
+            ),
+        ]);
+        let target = "x86_64-linux-android";
+        let first =
+            relevant_build_environment_hash(root.path(), target, |name| values.get(name).cloned())
+                .unwrap();
+        write_test_build_tool(&linker, b"linker-v2");
+        let second =
+            relevant_build_environment_hash(root.path(), target, |name| values.get(name).cloned())
+                .unwrap();
 
-        let wrapper = root.path().join("large-wrapper");
-        fs::File::create(&wrapper)
-            .unwrap()
-            .set_len(MAX_WRAPPER_FINGERPRINT_BYTES + 1)
-            .unwrap();
-        let oversized = relevant_build_environment_hash(
+        assert_ne!(first.0, second.0);
+        assert_eq!(first.1, None);
+        assert_eq!(second.1, None);
+    }
+
+    #[test]
+    fn native_compiler_and_archiver_content_changes_the_build_environment_hash() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for (name, filename) in [("CC", "test-cc"), ("CXX", "test-cxx"), ("AR", "test-ar")] {
+            let filename = if cfg!(windows) {
+                format!("{filename}.exe")
+            } else {
+                filename.to_owned()
+            };
+            let tool = bin.join(&filename);
+            write_test_build_tool(&tool, b"tool-v1");
+            let values = BTreeMap::from([
+                ("PATH".to_string(), bin.display().to_string()),
+                (name.to_string(), filename),
+            ]);
+            let first =
+                relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |candidate| {
+                    values.get(candidate).cloned()
+                })
+                .unwrap();
+            write_test_build_tool(&tool, b"tool-v2");
+            let second =
+                relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |candidate| {
+                    values.get(candidate).cloned()
+                })
+                .unwrap();
+
+            assert_ne!(first.0, second.0, "{name} content must affect the key");
+            assert_eq!(first.1, None, "{name}");
+            assert_eq!(second.1, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn combined_target_triples_fingerprint_each_target_linker() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let linker = bin.join(if cfg!(windows) {
+            "android-linker.exe"
+        } else {
+            "android-linker"
+        });
+        write_test_build_tool(&linker, b"linker-v1");
+        let values = BTreeMap::from([
+            ("PATH".to_string(), bin.display().to_string()),
+            (
+                "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER".to_string(),
+                linker.file_name().unwrap().to_string_lossy().into(),
+            ),
+        ]);
+        let first = relevant_build_environment_hash(
             root.path(),
-            "aarch64-apple-darwin",
-            |name| match name {
-                "RUSTC_WRAPPER" => Some(wrapper.display().to_string()),
-                _ => None,
-            },
+            "aarch64-linux-android+x86_64-linux-android",
+            |name| values.get(name).cloned(),
         )
         .unwrap();
-        assert!(oversized.1.is_some());
+        write_test_build_tool(&linker, b"linker-v2");
+        let second = relevant_build_environment_hash(
+            root.path(),
+            "aarch64-linux-android+x86_64-linux-android",
+            |name| values.get(name).cloned(),
+        )
+        .unwrap();
+
+        assert_ne!(first.0, second.0);
+        assert_eq!(first.1, None);
+        assert_eq!(second.1, None);
+    }
+
+    #[test]
+    fn unsafe_or_unavailable_build_tools_disable_only_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join(if cfg!(windows) {
+            "test-compiler.exe"
+        } else {
+            "test-compiler"
+        });
+        write_test_build_tool(&executable, b"compiler");
+        let command = executable.display().to_string();
+
+        for unsafe_command in [
+            "missing-compiler".to_string(),
+            format!("{command} --target=example"),
+            format!("{command} | other-tool"),
+        ] {
+            let result =
+                relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
+                    match name {
+                        "CC" => Some(unsafe_command.clone()),
+                        "PATH" => Some(bin.display().to_string()),
+                        _ => None,
+                    }
+                })
+                .expect("unfingerprintable tools must not block BuildKey creation");
+            assert!(result.1.is_some(), "{unsafe_command}");
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let non_executable = bin.join("non-executable");
+            fs::write(&non_executable, b"compiler").unwrap();
+            fs::set_permissions(&non_executable, fs::Permissions::from_mode(0o644)).unwrap();
+            let result =
+                relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
+                    match name {
+                        "CC" => Some(non_executable.display().to_string()),
+                        _ => None,
+                    }
+                })
+                .expect("non-executable tools must not block BuildKey creation");
+            assert!(result.1.is_some());
+        }
+
+        let oversized = root.path().join(if cfg!(windows) {
+            "large-compiler.exe"
+        } else {
+            "large-compiler"
+        });
+        write_test_build_tool(&oversized, b"x");
+        fs::File::options()
+            .write(true)
+            .open(&oversized)
+            .unwrap()
+            .set_len(MAX_BUILD_TOOL_FINGERPRINT_BYTES + 1)
+            .unwrap();
+        let result =
+            relevant_build_environment_hash(
+                root.path(),
+                "aarch64-apple-darwin",
+                |name| match name {
+                    "CC" => Some(oversized.display().to_string()),
+                    _ => None,
+                },
+            )
+            .expect("over-budget tools must not block BuildKey creation");
+        assert!(result.1.is_some());
     }
 
     #[test]
@@ -4544,7 +4883,7 @@ mod tests {
         .unwrap();
         fs::write(app.join("release.jks"), b"private-keystore").unwrap();
 
-        let policy = android_preview_cache_policy(root.path(), false).unwrap();
+        let policy = android_preview_cache_policy(root.path(), false, "arm64-v8a").unwrap();
         assert!(
             policy
                 .disabled_reason
@@ -4653,7 +4992,7 @@ mod tests {
         fs::write(app.join("debug.jks"), b"private-debug-keystore").unwrap();
         write_android_verification_metadata(root.path(), STRICT_ANDROID_VERIFICATION_METADATA);
 
-        let policy = android_preview_cache_policy(root.path(), false).unwrap();
+        let policy = android_preview_cache_policy(root.path(), false, "arm64-v8a").unwrap();
         assert!(
             !policy
                 .disabled_reason
