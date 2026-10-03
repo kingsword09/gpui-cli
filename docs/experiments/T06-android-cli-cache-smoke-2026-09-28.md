@@ -60,6 +60,17 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 这只修复已确认的 BuildKey allowlist 遗漏；不发现 wrapper 实际内容、build.rs/Gradle/NDK/Xcode
   任意隐藏 I/O 或远端状态，不能据此宣称完整输入闭包。
 
+## T06 compiler wrapper 内容指纹证据（2026-10-03）
+
+- PR #285（`f911394`）对 `RUSTC_WRAPPER` 与 `RUSTC_WORKSPACE_WRAPPER` 解析到的可执行文件做有界
+  内容摘要：读取前后检查 regular-file、大小和修改时间，最多读取 64 MiB，BuildKey 纳入 SHA-256
+  与字节数；相同路径替换内容会导致 cache miss。
+- wrapper 缺失、非普通文件、解析失败、读取期间变化、超过预算或非 Unicode 环境值会保留构建路径，
+  但返回 cache-disabled reason；普通 build/run 仍可执行。desktop/iOS/Android frozen plan 与
+  matrix desktop/iOS/Android preview policy 共用该 gate。
+- 该保护只覆盖 wrapper 文件本身，不发现 wrapper 启动的子进程、额外文件/环境/网络读取，也不闭合
+  build.rs/Gradle/NDK/Xcode 任意隐藏输入。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
