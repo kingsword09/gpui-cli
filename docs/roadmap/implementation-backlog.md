@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-03，主分支 `c2ddaa3`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-03，主分支 `c5003b0`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -590,7 +590,10 @@ Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次
 [T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。真实在途
 preview/check 任务共享仍未接入；#177 已将普通 build/run 接入共享 coordinator，但取消引用/终止、
 queued 状态和预热仍未实现；coordinator `Partial` 仅作为不可复用的诊断终态；本地 `build.rs` 项目已保守 bypass artifact cache reuse，记录见
-[T06 build-script cache bypass](../experiments/T06-build-script-cache-bypass-2026-09-28.md)。
+[T06 build-script cache bypass](../experiments/T06-build-script-cache-bypass-2026-09-28.md)。#279 按 Cargo
+`[package].build` 语义区分默认脚本、`build=false` 和自定义脚本；#281 增加冻结 desktop plan
+对 `build=false` 残留 `build.rs` 仍保持 cache eligible 的回归。两者都不发现 build.rs 实际读集，记录见
+[T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
 `gpui cache clean --max-bytes` 已提供按 BuildKey 大小预算的显式清理，
 活动锁和不安全目录会跳过，记录见
 [T06 cache cleanup](../experiments/T06-cache-cleanup-2026-09-28.md)。
@@ -891,7 +894,7 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 1. 已合并路径/hash/mtime/大小/file identity 索引；watcher 只记 dirty，rename/delete 两边失效，overflow/incomplete rename 和目录/文件读取竞态回退全量扫描。
 2. live watcher/session 已消费索引；Cargo metadata 发现的外部 path-package roots 使用稳定 package identity slot，Cargo.toml 改动刷新 scope 并增删 watcher roots。外部 build.rs package 的变化会触发该 root 的稳定全量扫描；build/observe/显式 sync 仍完整稳定核验。
 3. T06 cache policy 按 Cargo package manifest 解释 workspace 和 frozen external package 的 build script：默认 `build.rs`、`build=true` 或自定义脚本路径禁用 artifact cache reuse，`build=false` 不误触发；正常冻结/构建仍可继续；不声称自动发现 build script 实际读集。
-4. metadata 复用仅对平台 allow-list 类型开启：macOS/Linux 识别未知、网络/用户态类型后全量扫描；Windows 使用 volume path/drive type，并区分 UNC 与 verbatim disk path。PR #275/#277 的 Linux/macOS/Windows CI 全绿；策略逻辑和单机数据不等于已在实际网络/用户态挂载上完成性能/事件可靠性对照。
+4. metadata 复用仅对平台 allow-list 类型开启：macOS/Linux 识别未知、网络/用户态类型后全量扫描；Windows 使用 volume path/drive type，并区分 UNC 与 verbatim disk path。PR #275/#277/#279/#281 的 Linux/macOS/Windows CI 全绿；策略逻辑和单机数据不等于已在实际网络/用户态挂载上完成性能/事件可靠性对照。
 5. 已有忽略手动基准：Apple M2/macOS release，4096×8192-byte inputs、10 warmup + 30 alternating pairs；wrong_revision_acceptance=0，oracle mismatch=0；索引单文件更新 P95 1.280 ms wall/1.242 ms CPU，稳定全量 oracle 170.913/170.458 ms；单文件更新 hash I/O 16 KiB，oracle 64 MiB。未完成：build.rs 声明及实际目录外读集/环境/网络输入闭包、网络/用户态文件系统实挂载对照和 Linux/Windows 性能对照。上列单机热缓存合成集数据不可外推为产品性能承诺；非构建文件仍不能按扩展名武断忽略。
 
 验收 T-08/T-09/P-02。回退：自动恢复全量扫描，优先保证 wrong_revision_acceptance=0。

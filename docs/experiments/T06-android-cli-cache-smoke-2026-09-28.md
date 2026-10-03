@@ -38,6 +38,18 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 原基准数据仍是热文件系统缓存下的 Apple M2/macOS 单机合成集，不能外推到 Linux/Windows 性能、网络/
   用户态挂载、冷缓存或完整 Android/Gradle 输入闭包；外部 Cargo build-script 读集和实挂载对照仍是
   T05 未收口项。原始 JSON 保留在本机 `/tmp`，不作为仓库发布产物。
+
+## T06 Cargo build-script 声明边界证据（2026-10-03）
+
+- PR #279（`2629f82`）将 cache policy 固定为 Cargo `[package].build` 语义：无显式声明时，只有
+  package 内存在默认 `build.rs` 才 bypass；`build=false` 不触发；字符串自定义脚本仍触发；workspace
+  与冻结 external path package 共用该规则。
+- PR #281（`c5003b0`）增加 frozen desktop plan 回归：package 设置 `build=false` 但源码树仍留有
+  `build.rs` 时，`build.rs` 会进入冻结快照，`cache_hit_disabled_reason` 保持为空，因而不误关闭 cache
+  eligibility。默认/自定义脚本和 external package 的保守 bypass 仍由既有回归覆盖。
+- 该边界只表示已声明的 Cargo build-script policy；build.rs 的实际文件/环境/网络读集仍未建模，正常
+  冻结和构建可继续，但不能据此宣称完整输入闭包或真实 Android 设备验收。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
