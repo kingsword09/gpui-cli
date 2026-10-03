@@ -994,32 +994,41 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
 
 fn local_build_script_cache_disabled_reason(root: &Path) -> Result<Option<String>> {
     let manifest = Inputs::scan(root)?;
-    let has_default_build_script = manifest
+    let source_paths = manifest
         .sources
         .keys()
-        .any(|path| Path::new(path).file_name() == Some(std::ffi::OsStr::new("build.rs")));
-    let has_declared_build_script = manifest
+        .chain(manifest.external_sources.keys())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let has_build_script = manifest
         .sources
         .keys()
+        .chain(manifest.external_sources.keys())
         .filter(|path| Path::new(path).file_name() == Some(std::ffi::OsStr::new("Cargo.toml")))
-        .any(|path| {
-            let Ok(contents) = fs::read_to_string(root.join(path)) else {
+        .any(|manifest_path| {
+            let Ok(contents) = fs::read_to_string(root.join(manifest_path)) else {
                 return true;
             };
             let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
                 return true;
             };
-            match value
-                .get("package")
-                .and_then(|package| package.get("build"))
-            {
+            let Some(package) = value.get("package") else {
+                return false;
+            };
+            match package.get("build") {
                 Some(toml::Value::Boolean(enabled)) => *enabled,
-                Some(toml::Value::String(path)) => !path.is_empty(),
+                Some(toml::Value::String(_)) => true,
                 Some(_) => true,
-                None => false,
+                None => {
+                    let default_script = Path::new(manifest_path)
+                        .parent()
+                        .map(|parent| parent.join("build.rs"))
+                        .unwrap_or_else(|| PathBuf::from("build.rs"));
+                    source_paths.contains(&default_script.to_string_lossy().into_owned())
+                }
             }
         });
-    if has_default_build_script || has_declared_build_script {
+    if has_build_script {
         Ok(Some(
             "local Cargo build.rs hidden inputs/build-script declarations are not modeled; BuildKey cache reuse is disabled".into(),
         ))
@@ -2633,6 +2642,47 @@ mod tests {
             plan.cache_hit_disabled_reason
                 .as_deref()
                 .is_some_and(|value| value.contains("build.rs hidden inputs"))
+        );
+    }
+
+    #[test]
+    fn build_script_cache_bypass_follows_cargo_package_build_declaration() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname='app'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("build.rs"), "fn main() {}\n").unwrap();
+
+        assert!(
+            local_build_script_cache_disabled_reason(root.path())
+                .unwrap()
+                .is_some()
+        );
+
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname='app'\nversion='0.1.0'\nbuild=false\n",
+        )
+        .unwrap();
+        assert!(
+            local_build_script_cache_disabled_reason(root.path())
+                .unwrap()
+                .is_none()
+        );
+
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname='app'\nversion='0.1.0'\nbuild='scripts/codegen.rs'\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join("scripts")).unwrap();
+        fs::write(root.path().join("scripts/codegen.rs"), "fn main() {}\n").unwrap();
+        assert!(
+            local_build_script_cache_disabled_reason(root.path())
+                .unwrap()
+                .is_some()
         );
     }
 
