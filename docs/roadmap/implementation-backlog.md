@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-03，主分支 `c5003b0`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-03，主分支 `d132fe9`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -416,7 +416,7 @@ custom/release signing 增加独立的项目内 keystore 扩展名过滤和短�
 `src/runner/build_key.rs` 已补齐 BuildKey 维度/规范化/摘要，并已接入普通构建路径与 T06
 产物缓存。当前 desktop `build`/`run` 已通过
 `src/runner/build_inputs.rs` 组合稳定源码 manifest、Cargo.lock、NativeInputs、
-`rustc -vV` 和显式环境 allowlist，使用真实 BuildKey 生成
+`rustc -vV` 和显式环境 allowlist（含 workspace wrapper、所选 target 的 linker/Rust flags），使用真实 BuildKey 生成
 `.gpui/builds/desktop/<key>/cargo-target` 并设置 `CARGO_TARGET_DIR`；见
 [M04 desktop BuildKey](../experiments/M04-desktop-build-key-2026-09-27.md)。
 当前 desktop build plan 还会先创建临时 `FrozenInputs` 副本，将 Cargo workspace 和允许的
@@ -567,7 +567,8 @@ build/run 的 coordinator 记录、subscriber 锁和 manifest 复核见
 [S04 preview last-reference wiring](../experiments/S04-preview-last-reference-wiring-2026-09-30.md)。
 local `build.rs`
 等未建模输入会让严格路径直接不可用，不回退到可变目录。`CARGO_ENCODED_RUSTFLAGS` 的已确认
-allowlist 遗漏已由 #149 修复，但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
+allowlist 遗漏已由 #149 修复；#283 又补齐 workspace wrapper 与所选 target 的 linker/Rust flags，
+但其他输入遗漏、跨命令共享构建和冻结执行边界仍有效，
 见[当前审计](current-status.md)。
 
 T06 的 desktop 首个缓存切片以 BuildKey 级 OS 文件锁串行请求，manifest 完整校验后跳过
