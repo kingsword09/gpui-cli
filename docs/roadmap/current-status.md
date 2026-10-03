@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-03（Asia/Shanghai）。核查代码：`2629f82`（PR #279 squash merge）。
+更新日期：2026-10-03（Asia/Shanghai）。核查代码：`c5003b0`（PR #281 squash merge）。
 本轮核查时 `origin/main` 指向该提交；后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -162,6 +162,7 @@ build-script 声明/实际读集和网络/用户态文件系统跨平台对照�
 | `de97a17`（#275） | Cargo path-package roots 纳入 live session 输入索引与 watcher，按稳定 package identity 分配逻辑 slot；Cargo.toml 改动刷新 scope 并增删 watcher roots；外部 build.rs 变化触发该 package root 稳定全量重扫；filesystem metadata policy 在 macOS/Linux/Windows 上对未知/网络类型降级；manifest、冻结 relocation 与诊断不包含外部源绝对路径 | 不解析 build.rs 声明/实际目录外读集；文件系统类型 allow-list 与 fallback 已实现，但网络/用户态文件系统和跨平台性能对照仍需持续证据 |
 | `657fd93`（#277） | frozen desktop/iOS/Android build plan 的 cache policy 识别 workspace 与 external path package 的 `build.rs` 和 Cargo `[package].build` 自定义脚本，明确禁用 artifact cache reuse；保留冻结副本和正常构建路径，补充外部 custom build-script 端到端回归且诊断不泄露绝对路径 | 这是保守 bypass，不是 build-script 实际文件/环境/网络读集发现；Gradle/NDK/Xcode hidden I/O、远端状态和 cache hit 仍未闭合 |
 | `2629f82`（#279） | cache policy 按 Cargo package manifest 解释 build-script 声明：无显式 `build` 时仅 package 内存在默认 `build.rs` 才 bypass，`build=false` 不触发，字符串自定义脚本仍 bypass；workspace/external path package 共用该规则并有回归 | 仍是保守 bypass；不发现脚本实际文件/环境/网络读集，也不闭合 Gradle/NDK/Xcode hidden I/O、远端状态或 cache hit |
+| `c5003b0`（#281） | 增加冻结 desktop build plan 回归：Cargo package 设置 `build=false`、源码树仍有 `build.rs` 时，脚本文件会进入冻结快照但不关闭 cache eligibility；默认/自定义脚本和 external package 的 bypass 语义保持 | 仍只验证 Cargo manifest 声明边界；不发现 build.rs 实际文件/环境/网络读集，也不把正常冻结/构建宣称为完整输入闭包 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -374,6 +375,7 @@ build-script 声明/实际读集和网络/用户态文件系统跨平台对照�
 | PR #275 合并 | 外部 Cargo path package watcher/index、build-script package root rescan、稳定 slot/路径脱敏及三平台 filesystem fallback squash 为 `de97a17`；CI 首轮发现 Windows verbatim disk path 被当作 UNC，修复后 PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；workspace 429 passed、1 个手动 benchmark ignored；无发布/tag |
 | PR #277 合并 | frozen build plan 的 build-script cache bypass 扩展到 external path package 与 `[package].build` 自定义脚本；workspace 与 custom external build-script 回归通过；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；workspace 430 passed、1 个手动 benchmark ignored；无发布/tag |
 | PR #279 合并 | cache bypass 改按 Cargo `[package].build` 语义判定，覆盖默认脚本、自定义脚本和 `build=false`；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；workspace 431 passed、1 个手动 benchmark ignored；无发布/tag |
+| PR #281 合并 | 增加 `build=false` 且残留 `build.rs` 的冻结 desktop plan cache-eligibility 回归；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 最终全绿；workspace 432 passed、1 个手动 benchmark ignored；无发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
