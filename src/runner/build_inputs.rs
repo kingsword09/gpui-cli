@@ -18,12 +18,31 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "ANDROID_HOME",
     "ANDROID_NDK_HOME",
     "ANDROID_SDK_ROOT",
+    "CARGO_BUILD_RUSTFLAGS",
     "CARGO_BUILD_TARGET",
     "CARGO_ENCODED_RUSTFLAGS",
     "CARGO_INCREMENTAL",
+    "CARGO_PROFILE_DEV_CODEGEN_UNITS",
+    "CARGO_PROFILE_DEV_DEBUG",
+    "CARGO_PROFILE_DEV_DEBUG_ASSERTIONS",
+    "CARGO_PROFILE_DEV_INCREMENTAL",
     "CARGO_PROFILE_DEV_OPT_LEVEL",
+    "CARGO_PROFILE_DEV_OVERFLOW_CHECKS",
+    "CARGO_PROFILE_DEV_PANIC",
+    "CARGO_PROFILE_DEV_RPATH",
+    "CARGO_PROFILE_DEV_SPLIT_DEBUGINFO",
+    "CARGO_PROFILE_DEV_STRIP",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+    "CARGO_PROFILE_RELEASE_DEBUG",
+    "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS",
+    "CARGO_PROFILE_RELEASE_INCREMENTAL",
     "CARGO_PROFILE_RELEASE_LTO",
     "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+    "CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS",
+    "CARGO_PROFILE_RELEASE_PANIC",
+    "CARGO_PROFILE_RELEASE_RPATH",
+    "CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO",
+    "CARGO_PROFILE_RELEASE_STRIP",
     "RUSTC",
     "RUSTC_BOOTSTRAP",
     "RUSTC_WORKSPACE_WRAPPER",
@@ -3046,6 +3065,66 @@ mod tests {
         .unwrap();
 
         assert_ne!(baseline, encoded_flags);
+    }
+
+    #[test]
+    fn cargo_build_flags_and_profile_overrides_change_the_build_environment_hash() {
+        let names = [
+            "CARGO_BUILD_RUSTFLAGS",
+            "CARGO_PROFILE_DEV_CODEGEN_UNITS",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "CARGO_PROFILE_DEV_DEBUG_ASSERTIONS",
+            "CARGO_PROFILE_DEV_INCREMENTAL",
+            "CARGO_PROFILE_DEV_OPT_LEVEL",
+            "CARGO_PROFILE_DEV_OVERFLOW_CHECKS",
+            "CARGO_PROFILE_DEV_PANIC",
+            "CARGO_PROFILE_DEV_RPATH",
+            "CARGO_PROFILE_DEV_SPLIT_DEBUGINFO",
+            "CARGO_PROFILE_DEV_STRIP",
+            "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
+            "CARGO_PROFILE_RELEASE_DEBUG",
+            "CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS",
+            "CARGO_PROFILE_RELEASE_INCREMENTAL",
+            "CARGO_PROFILE_RELEASE_LTO",
+            "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+            "CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS",
+            "CARGO_PROFILE_RELEASE_PANIC",
+            "CARGO_PROFILE_RELEASE_RPATH",
+            "CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO",
+            "CARGO_PROFILE_RELEASE_STRIP",
+        ];
+        for name in names {
+            assert!(
+                RELEVANT_ENVIRONMENT.contains(&name),
+                "{name} must be allowlisted"
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let baseline =
+            relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
+                if name == "PATH" {
+                    None
+                } else {
+                    Some("<unset>".into())
+                }
+            })
+            .unwrap();
+
+        for name in names {
+            let changed =
+                relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |candidate| {
+                    if candidate == name {
+                        Some("changed-profile-input".into())
+                    } else if candidate == "PATH" {
+                        None
+                    } else {
+                        Some("<unset>".into())
+                    }
+                })
+                .unwrap();
+            assert_ne!(baseline.0, changed.0, "{name} must affect the build key");
+        }
     }
 
     #[test]
