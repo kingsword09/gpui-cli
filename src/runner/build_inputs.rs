@@ -27,6 +27,9 @@ const RELEVANT_ENVIRONMENT: &[&str] = &[
     "RUSTC_WORKSPACE_WRAPPER",
     "CC",
     "CXX",
+    "AR",
+    "CFLAGS",
+    "CXXFLAGS",
     "CODE_SIGNING_ALLOWED",
     "CODE_SIGN_IDENTITY",
     "CODE_SIGNING_REQUIRED",
@@ -2819,6 +2822,38 @@ mod tests {
         .unwrap();
 
         assert_ne!(baseline, encoded_flags);
+    }
+
+    #[test]
+    fn native_compiler_environment_changes_the_build_environment_hash() {
+        for name in ["CC", "CXX", "AR", "CFLAGS", "CXXFLAGS"] {
+            assert!(RELEVANT_ENVIRONMENT.contains(&name));
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let baseline =
+            relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |name| {
+                if name == "PATH" {
+                    None
+                } else {
+                    Some("<unset>".into())
+                }
+            })
+            .unwrap();
+        for name in ["CC", "CXX", "AR", "CFLAGS", "CXXFLAGS"] {
+            let changed =
+                relevant_build_environment_hash(root.path(), "aarch64-apple-darwin", |candidate| {
+                    if candidate == name {
+                        Some("changed-native-input".into())
+                    } else if candidate == "PATH" {
+                        None
+                    } else {
+                        Some("<unset>".into())
+                    }
+                })
+                .unwrap();
+            assert_ne!(baseline.0, changed.0, "{name} must affect the build key");
+        }
     }
 
     #[test]
