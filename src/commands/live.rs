@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
+use notify_debouncer_full::notify::event::{ModifyKind, RenameMode};
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use std::collections::BTreeMap;
@@ -68,6 +69,10 @@ const DEBOUNCE_MS: u64 = 400;
 
 enum Event {
     Change,
+    /// Debounced paths have been marked dirty in the session's input index.
+    Dirty {
+        code_change: bool,
+    },
     /// Exact asset-only changes derived from the input content manifest.
     Assets(AssetDelta),
     Force,
@@ -1750,7 +1755,7 @@ fn run_cycles(
             match event {
                 Event::Quit => quit = true,
                 Event::Force => again = true,
-                Event::Change | Event::Assets(_) => {}
+                Event::Change | Event::Dirty { .. } | Event::Assets(_) => {}
             }
         }
         again |= channel.live.take_build_request().is_some();
@@ -2450,6 +2455,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
 
     let watch_root = session.root.clone();
     let watch_session = session.clone();
+    let watch_overflow = overflow.clone();
     let mut debouncer = new_debouncer(
         Duration::from_millis(DEBOUNCE_MS),
         None,
@@ -2457,6 +2463,8 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
             let events = match result {
                 Ok(events) => events,
                 Err(errors) => {
+                    watch_session.mark_input_overflow();
+                    watch_overflow.store(true, Ordering::SeqCst);
                     watch_session.emit(
                         Kind::WatchError,
                         &Scope::default(),
@@ -2467,9 +2475,19 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
             };
             let mut saw_asset_path = false;
             let mut code_change = false;
+            let mut dirty_paths = Vec::new();
+            let mut incomplete_rename = false;
             for event in events {
                 if matches!(event.kind, EventKind::Access(_)) {
                     continue;
+                }
+                if matches!(
+                    event.kind,
+                    EventKind::Modify(ModifyKind::Name(RenameMode::Any | RenameMode::Other))
+                ) || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                    && event.paths.len() != 2)
+                {
+                    incomplete_rename = true;
                 }
                 for path in &event.paths {
                     let Ok(relative) = path.strip_prefix(&watch_root) else {
@@ -2478,6 +2496,7 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
                     if !should_trigger(relative) {
                         continue;
                     }
+                    dirty_paths.push(path.clone());
                     if asset_rel_path(&watch_root, path).is_some() {
                         saw_asset_path = true;
                     } else {
@@ -2488,26 +2507,15 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
             if !code_change && !saw_asset_path {
                 return;
             }
-            let previous = watch_session.store.state().desired;
-            let delta = match watch_session.sync_inputs_with_delta() {
-                Ok((revision, _)) if revision == previous => return,
-                Ok((_, delta)) => delta,
-                Err(error) => {
-                    watch_session.emit(
-                        Kind::WatchError,
-                        &Scope::default(),
-                        json!({"message": format!("{error:#}")}),
-                    );
-                    return;
-                }
-            };
-            let event = if code_change {
-                Event::Change
-            } else {
-                Event::Assets(delta)
-            };
+            watch_session.mark_inputs_dirty(&dirty_paths);
+            if incomplete_rename {
+                watch_session.mark_input_overflow();
+                watch_overflow.store(true, Ordering::SeqCst);
+            }
+            let event = Event::Dirty { code_change };
             if tx.try_send(event).is_err() {
-                overflow.store(true, Ordering::SeqCst);
+                watch_session.mark_input_overflow();
+                watch_overflow.store(true, Ordering::SeqCst);
             }
         },
     )?;
@@ -2583,7 +2591,27 @@ pub fn handle_live(project: &Project, target: &str, flags: &DeviceFlags) -> Resu
             )?;
             continue;
         }
+        let event = match event {
+            Ok(Event::Dirty { code_change }) => {
+                let previous = session.store.state().desired;
+                match session.sync_watcher_inputs_with_delta() {
+                    Ok((revision, _)) if revision == previous => continue,
+                    Ok((_, _)) if code_change => Ok(Event::Change),
+                    Ok((_, delta)) => Ok(Event::Assets(delta)),
+                    Err(error) => {
+                        session.emit(
+                            Kind::WatchError,
+                            &Scope::default(),
+                            json!({"message": format!("{error:#}")}),
+                        );
+                        continue;
+                    }
+                }
+            }
+            other => other,
+        };
         match event {
+            Ok(Event::Dirty { .. }) => unreachable!("dirty events are normalized before dispatch"),
             Ok(Event::Quit) => break,
             Ok(Event::Change) | Ok(Event::Force) => {
                 quit = run_cycles(

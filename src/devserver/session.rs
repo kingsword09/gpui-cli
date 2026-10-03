@@ -4,7 +4,7 @@ use super::actions::{Action, ActionRequest};
 use super::artifacts::{ArtifactInfo, ArtifactLimits, ArtifactStore};
 use super::capture;
 use super::events::{self, EventStore, Kind, LogRef, Revision, RollingFile, Scope, State};
-use super::inputs::{AssetDelta, Inputs};
+use super::inputs::{AssetDelta, IndexedInputs};
 use super::operations::{
     MAX_ACTIVE_OPERATIONS, MAX_DEADLINE_MS, OperationError, OperationSnapshot, OperationState,
     OperationStore, SubmitResult, Transition,
@@ -33,7 +33,7 @@ pub struct Session {
     pub dir: PathBuf,
     pub store: EventStore,
     pub stopping: AtomicBool,
-    inputs: Mutex<Inputs>,
+    inputs: Mutex<IndexedInputs>,
     output: Mutex<RollingFile>,
     pub timing: Arc<Timing>,
     pub windows: Arc<WindowRegistry>,
@@ -242,6 +242,7 @@ impl Session {
         };
         let timing = Arc::new(Timing::new(&dir, &id)?);
         let artifacts = Arc::new(ArtifactStore::new(&root, &id, ArtifactLimits::default())?);
+        let inputs = IndexedInputs::new(&root);
         let session = Arc::new(Self {
             id,
             root,
@@ -264,7 +265,7 @@ impl Session {
             semantics_results: Mutex::new(HashMap::new()),
             dir,
             stopping: AtomicBool::new(false),
-            inputs: Mutex::new(Inputs::default()),
+            inputs: Mutex::new(inputs),
             next_build: AtomicU64::new(1),
             next_run: AtomicU64::new(1),
         });
@@ -2029,6 +2030,35 @@ impl Session {
     }
 
     pub fn sync_inputs_with_delta_and_hash(&self) -> Result<(Revision, AssetDelta, String)> {
+        self.sync_inputs_with_mode(false)
+    }
+
+    /// Records watcher paths without filesystem access. The live watcher
+    /// callback uses this before queueing a lightweight change signal.
+    pub fn mark_inputs_dirty(&self, paths: &[PathBuf]) {
+        let mut inputs = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
+        for path in paths {
+            inputs.mark_dirty(path);
+        }
+    }
+
+    /// Marks watcher evidence unreliable, forcing the next sync to perform a
+    /// stable full scan.
+    pub fn mark_input_overflow(&self) {
+        self.inputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_overflow();
+    }
+
+    /// Refreshes only watcher-dirtied paths. Explicit build/observe
+    /// synchronization continues to use the full verifier above.
+    pub fn sync_watcher_inputs_with_delta(&self) -> Result<(Revision, AssetDelta)> {
+        self.sync_inputs_with_mode(true)
+            .map(|(revision, delta, _)| (revision, delta))
+    }
+
+    fn sync_inputs_with_mode(&self, incremental: bool) -> Result<(Revision, AssetDelta, String)> {
         let scan_scope = Scope {
             revision: self.store.state().desired,
             ..Scope::default()
@@ -2037,23 +2067,30 @@ impl Session {
             "inputs.scan",
             &scan_scope,
             None,
-            json!({"max_stability_rescans": MAX_INPUT_STABILITY_RESCANS}),
+            json!({"max_stability_rescans": MAX_INPUT_STABILITY_RESCANS,
+                "mode": if incremental { "watcher_index" } else { "full_verification" }}),
         );
         // Serialize scans without holding the event/state mutex. Queries stay
         // responsive even with a large workspace or a running compiler.
-        let mut previous = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
-        let inputs = match Inputs::scan_stable(&self.root, MAX_INPUT_STABILITY_RESCANS) {
-            Ok(inputs) => inputs,
+        let mut indexed = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = indexed.manifest().clone();
+        let _refresh = match if incremental {
+            indexed.refresh(MAX_INPUT_STABILITY_RESCANS)
+        } else {
+            indexed.verify_full(MAX_INPUT_STABILITY_RESCANS)
+        } {
+            Ok(refresh) => refresh,
             Err(error) => {
                 let message = error.to_string();
                 scan.finish("failed", Some(&message));
                 return Err(error);
             }
         };
+        let inputs = indexed.manifest().clone();
         let asset_delta = AssetDelta::between(&previous.assets, &inputs.assets);
         let input_hash = inputs.digest();
         let mut revision = self.store.state().desired;
-        if revision.source_revision == 0 || inputs != *previous {
+        if revision.source_revision == 0 || inputs != previous {
             if revision.source_revision == 0
                 || inputs.sources != previous.sources
                 || inputs.untracked_directory_links != previous.untracked_directory_links
@@ -2066,7 +2103,6 @@ impl Session {
             self.emit(Kind::SourceChanged, &Scope { revision: revision.clone(), ..Scope::default() },
                 json!({"input_hash": inputs.digest(), "sources": inputs.sources.len(), "assets": inputs.assets.len(),
                     "untracked_directory_links": inputs.untracked_directory_links}));
-            *previous = inputs;
         }
         scan.finish("ok", None);
         Ok((revision, asset_delta, input_hash))
@@ -2076,6 +2112,7 @@ impl Session {
         self.inputs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .manifest()
             .assets
             .iter()
             .map(|(path, hash)| AssetManifestEntry {
@@ -2087,7 +2124,12 @@ impl Session {
 
     pub fn begin_build(self: &Arc<Self>) -> Result<Build> {
         self.sync_inputs()?;
-        let inputs = self.inputs.lock().unwrap_or_else(|e| e.into_inner());
+        let inputs = self
+            .inputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .manifest()
+            .clone();
         let scope = Scope {
             build_id: Some(format!(
                 "b{}",
