@@ -93,6 +93,17 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   该切片仍不发现工具启动的子进程、额外环境/文件/网络读取，也不闭合 build.rs/Gradle/NDK/Xcode
   任意隐藏 I/O 或远端状态。
 
+## T06 Rust compiler selector 输入证据（2026-10-04）
+
+- PR #291（`5c0cbde`）将 `RUSTUP_TOOLCHAIN` 与 `RUSTC_BOOTSTRAP` 纳入显式 BuildKey 环境摘要，并对
+  `RUSTC` 指向的显式 compiler executable 复用同一有界内容指纹；相同路径替换内容会改变摘要。
+  `RUSTC` 未设置时仍由已有 `rustc -vV` toolchain identity 表示默认 compiler。
+- 选定 `RUSTC` 缺失、非普通文件、不可执行、包含参数或 shell 语法、读取竞态、非 Unicode 环境值或
+  超出 64 MiB 预算时只返回 cache-disabled reason，不阻止普通构建；回归确认 `RUSTUP_TOOLCHAIN`/
+  `RUSTC_BOOTSTRAP` 变化和显式 compiler 内容变化都会改变环境摘要。
+- 该切片只闭合显式 Rust compiler selector 环境，不闭合 Cargo 可执行文件/global Cargo 配置、默认
+  `rustc` 之外的工具链隐式读取、编译器子进程或 build.rs/Gradle/NDK/Xcode 隐藏 I/O 与远端状态。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
