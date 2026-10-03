@@ -994,13 +994,34 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
 
 fn local_build_script_cache_disabled_reason(root: &Path) -> Result<Option<String>> {
     let manifest = Inputs::scan(root)?;
-    if manifest
+    let has_default_build_script = manifest
         .sources
         .keys()
-        .any(|path| Path::new(path).file_name() == Some(std::ffi::OsStr::new("build.rs")))
-    {
+        .any(|path| Path::new(path).file_name() == Some(std::ffi::OsStr::new("build.rs")));
+    let has_declared_build_script = manifest
+        .sources
+        .keys()
+        .filter(|path| Path::new(path).file_name() == Some(std::ffi::OsStr::new("Cargo.toml")))
+        .any(|path| {
+            let Ok(contents) = fs::read_to_string(root.join(path)) else {
+                return true;
+            };
+            let Ok(value) = toml::from_str::<toml::Value>(&contents) else {
+                return true;
+            };
+            match value
+                .get("package")
+                .and_then(|package| package.get("build"))
+            {
+                Some(toml::Value::Boolean(enabled)) => *enabled,
+                Some(toml::Value::String(path)) => !path.is_empty(),
+                Some(_) => true,
+                None => false,
+            }
+        });
+    if has_default_build_script || has_declared_build_script {
         Ok(Some(
-            "local build.rs hidden inputs are not modeled; BuildKey cache reuse is disabled".into(),
+            "local Cargo build.rs hidden inputs/build-script declarations are not modeled; BuildKey cache reuse is disabled".into(),
         ))
     } else {
         Ok(None)
@@ -2612,6 +2633,67 @@ mod tests {
             plan.cache_hit_disabled_reason
                 .as_deref()
                 .is_some_and(|value| value.contains("build.rs hidden inputs"))
+        );
+    }
+
+    #[test]
+    fn external_path_package_build_script_disables_frozen_desktop_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/src")).unwrap();
+        fs::create_dir_all(external.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("app/Cargo.toml"),
+            format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nexternal = {{ path = {:?} }}\n",
+                external.path()
+            ),
+        )
+        .unwrap();
+        fs::write(root.path().join("app/src/lib.rs"), "pub fn value() {}\n").unwrap();
+        fs::write(
+            external.path().join("Cargo.toml"),
+            "[package]\nname = \"external\"\nversion = \"0.1.0\"\nedition = \"2024\"\nbuild = \"scripts/build-helper.rs\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(external.path().join("scripts")).unwrap();
+        fs::write(
+            external.path().join("scripts/build-helper.rs"),
+            "fn main() {}\n",
+        )
+        .unwrap();
+        fs::write(external.path().join("src/lib.rs"), "pub fn external() {}\n").unwrap();
+
+        let status = Command::new("cargo")
+            .current_dir(root.path())
+            .args(["generate-lockfile", "--offline"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let plan = desktop_build_plan(root.path(), false).unwrap();
+        assert!(
+            plan.cache_hit_disabled_reason
+                .as_deref()
+                .is_some_and(|value| value.contains("build.rs hidden inputs"))
+        );
+        assert!(
+            plan.snapshot
+                .root
+                .join("external/0000/scripts/build-helper.rs")
+                .is_file()
+        );
+        assert!(
+            !plan
+                .cache_hit_disabled_reason
+                .as_deref()
+                .unwrap()
+                .contains(external.path().to_str().unwrap())
         );
     }
 
