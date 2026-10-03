@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-03（Asia/Shanghai）。核查代码：`4aa6ed3`（PR #269 squash merge）。
+更新日期：2026-10-03（Asia/Shanghai）。核查代码：`c2ddaa3`（PR #273 squash merge）。
 本轮 fetch 后，本地 `main` 与 `origin/main` 均指向该提交。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -68,10 +68,15 @@ evidence，使 pre-ready、cleanup failure 和 capture-only 路径即使没有�
 preview/移动 capture-only 路径的完整 scenario 语义/输入验收、MCP、
 复现包或性能验证闭环。
 
-35 项工作包更新为 **1 done、21 in_progress、13 planned、0 in_review**。
+35 项工作包更新为 **1 done、22 in_progress、12 planned、0 in_review**。
 O03 保留已有 `done`；S01/M01/M03/T06 从过时的 `planned` 改为 `in_progress`；
 F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review` 校正为 `in_progress`。
 这不是完成百分比，也不表示这些任务的已有实现被撤回。
+
+T05 已合并输入索引、live watcher/session 接入和大型输入 CPU/I/O 对照。显式 build/observe
+同步继续全量稳定核验；目前证据为本机 Apple M2/macOS 单环境、一个固定合成输入集。外部 Cargo
+path dependency/build-script 声明输入范围和自动识别不可靠网络文件系统尚未闭合，因此 T05 保持
+`in_progress`，不能把单机基准外推为跨平台性能承诺。
 
 | 门槛 | 已有进展 | 未收口部分 |
 | --- | --- | --- |
@@ -79,7 +84,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | G1 | 窗口/心跳、资源 ACK、产物库、macOS best-effort observe | v1 兼容、真实历史升级、窗口实际环境、same-scene/present 与完整故障验收 |
 | G2 | schema、三个 preview、query/diff、动作、check/baseline、租约/构建键、单场景及 matrix frozen inputs、per-cell context/target BuildKey、target-specific output layout/preview output-root lock、matrix cell CheckReport、cleanup-finalized matrix context/capture-only lifecycle evidence、mobile runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、移动 semantics 默认 admission 收紧、Android plugin/included-build signing cache bypass hardening、Android wrapper checksum 与依赖 artifact verification、Android 动态依赖 cache gate、Android NDK compiler-tool/sysroot/header 与选定 SDK package、Java runtime content fingerprint、普通 build/run 与 desktop/iOS simulator/Android default-debug/显式 debug custom-signing/Android release-only signing debug preview 的 BuildKey coordinator、Windows coordinator state publish transient permission-denied bounded retry、reference-aware caller-cancel 与 owned process termination、显式 coordinator `Cancelled`/`Partial` 终态、owner heartbeat/fencing、iOS physical signing BuildKey 边界、受控 Android local custom/release signing build/run、受控 Android signing-sensitive frozen preview build、移动 preview delegated lease/same-run evidence、pre-ready mobile launch failure evidence、mobile cleanup error evidence、action 失败 operation ID evidence、follower 取消和 superseded leader process-tree 终止、cleanup/fixture identity hardening、early mobile scenario failure finalization | partial artifact 的消费/恢复契约、Android 复杂/远端 signing cache hit 与完整输入闭包、真实环境适配、移动 semantics provider 与完整 scenario steps/cleanup、真实连续验收及 MCP |
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture、同一 delegated lease 下的 run/capture/log/cleanup evidence、cleanup-finalized matrix evidence、capture-only cell 的非伪造报告边界、runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、pre-ready launch failure evidence、cleanup error evidence、action failure operation ID evidence、Android capture 的 best-effort viewport/scale/orientation/foreground metadata、移动 semantics 默认 admission 不再误报支持 | 完整三端同快照矩阵、真实设备环境元数据与故障/重连、移动 semantics provider/完整语义与输入证据、repro 和 L2/L3 CI |
-| G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug live preview verified cache hit、Android 固定 Gradle wrapper checksum、Gradle dependency verification SHA-256 metadata、动态/changing dependency cache bypass、NDK compiler-tool/sysroot/header、选定 SDK package 与 Java runtime content fingerprint、显式清理 | 缓存输入遗漏、iOS physical live preview、Android release APK/复杂或远端 signing cache hit、远端仓库状态和任意 build-script I/O、增量索引、共享构建/预热、性能指标/预算和 Agent 基准 |
+| G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug live preview verified cache hit、Android 固定 Gradle wrapper checksum、Gradle dependency verification SHA-256 metadata、动态/changing dependency cache bypass、NDK compiler-tool/sysroot/header、选定 SDK package 与 Java runtime content fingerprint、显式清理；T05 watcher 索引已接入并完成一个大型输入集本机对照 | 缓存输入遗漏、iOS physical live preview、Android release APK/复杂或远端 signing cache hit、远端仓库状态和任意 build-script I/O、T05 外部依赖/网络盘范围与跨平台性能证据、共享构建/预热、性能指标/预算和 Agent 基准 |
 
 ## 2. 相对上次审计的新合并
 
@@ -148,6 +153,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `2a713da`（#265） | Android toolchain fingerprint 按项目字面量 `compileSdk` 选择对应 platform，并按显式 `buildToolsVersion` 或 SDK 中最新数值版本选择 build-tools；将选定 package 的相对路径、entry type 和内容摘要纳入同一 100,000 项/512 MiB 有界预算 | 同 revision 下替换选定 SDK package 文件会改变 BuildKey；动态/无法解析的 SDK 选择、缺包、软链接、special entry、读取失败或超预算只关闭 cache reuse；不扫描未使用的已安装包，不闭合 AGP/plugin resolved artifacts 或任意 build-script I/O |
 | `bdfd717`（#267） | Android 模板新增 Gradle dependency verification metadata，为 Android plugin/传递依赖、debug/release 使用的制品及 macOS/Linux/Windows AAPT2 classifier 固定 SHA-256；Android build plan 和 preview 只在 metadata 严格且每个 artifact 都有 hash 时允许 cache reuse | metadata 自身随 native input 进入 BuildKey，缺失/畸形/非严格/存在 trusted-artifacts 放行项时 cache bypass，Gradle 构建仍执行；不闭合远端仓库状态或任意 build-script I/O |
 | `4aa6ed3`（#269） | Android toolchain identity 读取实际 Java `java.home`/`java.version`，将活动 JDK 树内容纳入有界 fingerprint；JDK 内部目录链接递归纳入，外部目录链接以逻辑路径纳入，外部文件链接只纳入文件内容 hash，不写绝对路径 | JDK 内容不可读、断链、循环、特殊文件或超过 100,000 entries/512 MiB 时只关闭 cache reuse；未改变 NDK/SDK 的严格 symlink 规则，不闭合远端仓库或任意 build-script I/O |
+| `17b369d`（#271） | 路径/hash/mtime/大小/file identity 输入索引，支持 dirty path、rename/delete 双向失效、有界事件队列、overflow 与读取竞态全量回退 | 首个实现切片；watcher 接入和大项目对照由后续切片完成 |
+| `a995989`（#272） | live watcher 回调只标 dirty 并排队，session 主循环增量刷新；build/observe/sync 继续完整稳定核验；目录变动、incomplete rename、watcher overflow 回退 | 外部 Cargo path dependency/build-script 自声明读集和自动网络盘判别尚未纳入 |
+| `c2ddaa3`（#273） | 增加忽略的手动大型输入 benchmark 和扫描 pass/hash 字节统计；Apple M2 release、4096×8 KiB、10 warmup + 30 paired runs，wrong_revision_acceptance=0 | 单机、热文件系统缓存、单文件变更的合成基准；不等于跨 OS/网络盘性能结论或完整 T-09 输入范围 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -189,7 +197,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | Q01 | planned | 已有三 OS CLI/macOS 模板/Android 宿主 CI；尚无该工作包的完整真实 GUI/设备 L2/L3 门禁 |
 | G01 | planned | supervisor 计时已有；无应用 layout/paint/frame/CPU/GPU 指标与开销验收 |
 | G02 | planned | 无 perf 执行器、统计/可比性和性能预算判定 |
-| T05 | planned | watcher/全量内容扫描已有；无增量输入索引及大项目对照 |
+| T05 | in_progress | `src/devserver/inputs.rs` 有路径/hash/mtime/大小/file identity 索引；watcher 回调只标 dirty，rename/delete 双向失效，overflow/incomplete rename/目录与文件读取竞态回退；live session watcher 增量刷新，build/observe 全量稳定核验；4096×8 KiB 合成集 release 对照 10 warmup + 30 runs，wrong_revision_acceptance=0。剩余：外部 Cargo path dependency/build-script 声明读集、自动网络文件系统降级，以及非 macOS/其他文件系统对照 |
 | T06 | in_progress | desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug preview 缓存与 cache clean，普通 build/run 及受支持的 live preview 已接入同 key coordinator、verified manifest、caller-cancel、显式 Cancelled/Partial 状态和 owner heartbeat/fencing；physical iOS build/run 与受控 Android local custom/release build/run 已按签名输入决定 manifest 复用；Android wrapper checksum 与 Gradle dependency verification metadata 纳入 BuildKey/cache policy，缺失/无效/不严格时 cache bypass，动态/changing Gradle dependency 也只绕过 cache reuse、不阻止构建；NDK host compiler/linker/tool、sysroot 与 Clang builtin headers、选定 SDK package content 纳入 Android toolchain fingerprint；Android release APK/复杂/远端 signing 仍 bypass，BuildKey output ownership record 已落地；Partial 仅为不可复用的诊断终态；远端仓库状态和任意 build-script I/O 仍未建模，预热未实现 |
 | Q02 | planned | 仅有 12 项任务设计；无可执行评分器和固定预算对照实验 |
 | G03 | planned | 无 GPU capture/analysis provider 闭环；可选 |
@@ -244,7 +252,7 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | `cargo test --workspace --locked` | 348 个单元测试及全部集成/协议测试通过，0 failed |
 | `cargo build --locked` | 通过 |
 | `cargo x check-design-docs`、`git diff --check` | 通过；仅验证文档/示例一致性 |
-| 两份 35 项状态表逐项比对 | 相同；1 done、21 in_progress、13 planned |
+| 两份 35 项状态表逐项比对 | 相同；1 done、22 in_progress、12 planned |
 | PR #151 CI | required checks 全部通过；首次 Windows 并发测试波动重跑后通过，三 OS check、desktop-template、android-template、baseline-driver 均通过 |
 | PR #155 CI | required checks 全部通过；三 OS check、两组 desktop-template、两组 android-template、baseline-driver 均通过；无 release/tag | [PR #155](https://github.com/kingsword09/gpui-cli/pull/155) |
 | PR #157 CI | required checks 全部通过；三 OS check、两组 desktop-template、两组 android-template、baseline-driver 均通过；无 release/tag | [PR #157](https://github.com/kingsword09/gpui-cli/pull/157) |
@@ -355,6 +363,9 @@ F01/T01/P01/T02/T03 因仍缺工作包要求的实现或验收，从 `in_review`
 | 本地运行时验证（PR #269） | Java runtime 版本/home 解析、JDK 内容替换、跨安装路径稳定性、内部/外部文件与目录链接、越界规则和活动 Android toolchain probe 回归通过；411 个 workspace 单测及全部集成/协议测试、clippy、fmt、design docs、package list 和 diff check 通过；Android debug/release APK、两 ABI 与 CLI 第二次 cache hit 通过 |
 | PR #269 CI | 前两轮 Android probe 暴露 Temurin JDK 内部/外部 truststore 与目录链接布局；最终按逻辑路径递归纳入外部目录、仅 hash 外部文件且不泄露绝对路径后，PR 与 push 两套 required CI 的 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
 | PR #269 合并 | squash merge `4aa6ed3`；无发布/tag |
+| PR #271–#272 合并 | 输入索引类型、watcher/session 增量接入分别 squash 为 `17b369d`、`a995989`；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；无发布/tag |
+| PR #273 合并 | 大型输入扫描指标/手动基准 squash 为 `c2ddaa3`；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、baseline-driver 全绿；workspace 419 passed、1 个手动 benchmark ignored；无发布/tag |
+| T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
 
