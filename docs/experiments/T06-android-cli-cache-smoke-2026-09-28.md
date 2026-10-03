@@ -7,6 +7,22 @@ host sysroot 和 Clang builtin headers 内容；PR #265 又纳入项目实际选
 build-tools package 内容；PR #267 为 Gradle Android plugin/dependency artifacts 加入 SHA-256
 dependency verification metadata，并把严格校验状态作为 cache reuse 前置条件；PR #269 又纳入
 实际 Java runtime 内容。
+
+## 后续 T05 输入索引证据（2026-10-03）
+
+该实验文件继续作为本轮三文件文档切片的证据索引；T05 代码并不改变 Android smoke 的设备范围。
+
+- `17b369d`（PR #271）加入路径/hash/mtime/大小/file identity 索引，dirty、rename/delete 双向失效，
+  overflow、incomplete rename 和读取竞态回退；`a995989`（PR #272）将其接入 live watcher/session。
+- build/observe/显式 sync 仍执行稳定全量核验；索引只优化 watcher 增量刷新，不改变
+  `wrong_revision_acceptance` 边界。
+- `c2ddaa3`（PR #273）加入 ignored 手动 benchmark。Apple M2/macOS/aarch64、release profile、
+  4096 个 8192-byte 文件（32 MiB）、10 次 warmup + 30 次交替测量：oracle mismatch=0、
+  `wrong_revision_acceptance=0`；索引更新 P95 约 1.280 ms wall/1.242 ms process CPU，全量稳定
+  oracle P95 约 170.913/170.458 ms；单文件更新 hash 读取 16 KiB，oracle 稳定双扫描读取 64 MiB。
+- 该数据是热文件系统缓存下的单机合成集，不能外推到 Linux/Windows、网络文件系统、冷缓存或完整
+  Android/Gradle 输入闭包；外部 Cargo path dependency、build-script 声明读集和自动网络盘识别仍是
+  T05 未收口项。原始 JSON 保留在本机 `/tmp`，不作为仓库发布产物。
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 

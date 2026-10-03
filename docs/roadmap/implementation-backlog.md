@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-03，主分支 `4aa6ed3`。35 项中 1 done、21 in_progress、13 planned；
+状态核查：2026-10-03，主分支 `c2ddaa3`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -886,12 +886,12 @@ cell；semantics-required 移动场景必须继续按 runtime capability 返回 
 
 ### T05 · 输入索引优化
 
-代码落点：`src/devserver/inputs.rs`、watcher loop，复用 M04 输入边界；拟议 indexed scan 状态。
+代码落点：`src/devserver/inputs.rs`、watcher loop、`src/devserver/session.rs`；复用 M04 输入边界。
 
-1. 建立路径/hash/mtime/大小/文件身份索引，事件只标 dirty；rename/delete/目录移动双向失效。
-2. 正常保存增量哈希；observe --sync 第一版仍完整核验，watcher overflow/网络盘/读取竞态回退。
-3. 外部 path dependency 和 build 脚本声明的输入纳入范围；非构建文件是否忽略不能按扩展名武断决定。
-4. 在原 F01 基线和大型输入集比较扫描 CPU/I/O，列出实际提速与未优化阶段。
+1. 已合并路径/hash/mtime/大小/file identity 索引；watcher 只记 dirty，rename/delete 两边失效，overflow/incomplete rename 和目录/文件读取竞态回退全量扫描。
+2. live watcher/session 已消费索引；build/observe/显式 sync 仍完整稳定核验，未知或不可读 metadata 不复用旧 hash。
+3. 已有忽略手动基准：Apple M2/macOS release，4096×8192-byte inputs、10 warmup + 30 alternating pairs；wrong_revision_acceptance=0，oracle mismatch=0；索引单文件更新 P95 1.280 ms wall/1.242 ms CPU，稳定全量 oracle 170.913/170.458 ms；单文件更新 hash I/O 16 KiB，oracle 64 MiB。
+4. 未完成：外部 Cargo path dependency/build-script 声明读集、自动网络盘识别/降级、Linux/Windows/网络文件系统对照。上列单机热缓存合成集数据不可外推为产品性能承诺；非构建文件仍不能按扩展名武断忽略。
 
 验收 T-08/T-09/P-02。回退：自动恢复全量扫描，优先保证 wrong_revision_acceptance=0。
 
