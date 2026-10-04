@@ -176,6 +176,19 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 这只缩小了已知本地 plugin 输入面；普通 `build.gradle(.kts)`、AGP/plugin implementation 的任意 I/O、远端
   repository metadata/state 和真实设备验收仍未闭合。
 
+## T06 Ordinary Gradle app-script I/O cache bypass（2026-10-04）
+
+- PR #306（`16083d0`）对 `mobile/android/gradle/` 下非 `buildSrc`/`build-logic` 的 `.gradle` 与
+  `.gradle.kts` 脚本增加保守静态 marker gate。未建模的 Gradle provider/environment 读取、文件读取、
+  网络/进程访问、`apply from` 和 `includeBuild` marker 会关闭 artifact cache reuse；普通 build/preview
+  仍继续执行。
+- gate 不读取或指纹化脚本引用的外部内容，也不把脚本路径或 marker 写入 BuildKey。已建模的
+  `gpui.abis`/`gpui.buildDir`/`gpui.jniLibsDir`、`GPUI_ANDROID_ABIS`/`ANDROID_NDK_HOME`、NDK
+  `source.properties` 和受控 `keystore.properties` 读取保持可复用；注释、字符串和普通
+  `app/src/main` source 不触发该 gate。
+- 该切片是有界静态扫描，不是 Gradle DSL 解析器或运行时读集追踪；未识别的 plugin/script I/O、远端
+  repository metadata/state、复杂 signing 和真实设备验收仍保持未闭合。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -279,6 +292,10 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   ignored，focused gate test、clippy/build/Windows target check/fmt/design docs/package list 通过。本机 Android
   debug/release APK 与 CLI miss→hit smoke 通过；PR 与 push 两套 CI 全绿（push macOS failed job rerun 后通过），
   squash 为 `ccdecf5`，无版本发布或 tag。
+- PR #306 的 ordinary app Gradle I/O marker、已建模 GPUI/NDK/签名读取、注释/字符串与普通 app source 排除
+  回归通过；workspace 451 passed、1 个手动 benchmark ignored，clippy/build/Windows target check/fmt/design
+  docs/package list 通过。本机 Android debug/release APK、ABI 检查与 CLI miss→hit smoke 通过；PR 与 push
+  两套 CI 全绿，squash 为 `16083d0`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -287,15 +304,17 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   Gradle APK 打包、manifest 校验和第二次 cache hit；
 - Android emulator/device 安装启动、release/custom signing、cache 并发订阅/取消引用和容量
   清理仍未覆盖。
-- #295/#298/#300/#302/#304 的 gate 在 build plan 检查已知 user-home 配置/环境入口、`init.d`，对标准 wrapper
+- #295/#298/#300/#302/#304/#306 的 gate 在 build plan 检查已知 user-home 配置/环境入口、`init.d`，对标准 wrapper
   layout 中已安装 distribution 内容做有界 fingerprint，在复用前/Gradle 后重核验当前 identity，并对本地
-  buildSrc/build-logic 直接 bypass；它不锁定或复制 user home，检查后的并发修改仍可能竞态。非标准 wrapper
-  layout 和相对 preview user home 只 bypass；未识别环境变量、普通 app build-script/plugin I/O 仍未建模。
+  buildSrc/build-logic 直接 bypass；#306 又对普通 Gradle app script 的一组已知 I/O marker 直接 bypass；它
+  不锁定或复制 user home，检查后的并发修改仍可能竞态。非标准 wrapper layout 和相对 preview user home
+  只 bypass；未识别环境变量、未被 marker 识别的 app build-script/plugin I/O 仍未建模。
 - cache-hit CI 子流程主动排除了 root user-home 配置，因此它验证干净配置下的 cache hit；存在上述 global
   配置时预期是普通构建成功但 cache reuse bypass，不把该情形算作设备或完整 Gradle 输入验收。
 - wrapper checksum 校验 Gradle distribution ZIP；#300 另对当前已安装 wrapper distributions 做有界内容摘要，
   #302 在执行前后重核验该摘要并抑制变化后的 reusable manifest，但不覆盖 AGP/plugins 的任意运行时 I/O、远端
-  仓库状态、普通 app build-script/AGP plugin I/O、NDK/build-script I/O，也不替代完整 Android 构建输入闭包或设备验收。
+  仓库状态、未被 #306 marker 识别的普通 app build-script/AGP plugin I/O、NDK/build-script I/O，也不替代
+  完整 Android 构建输入闭包或设备验收。
 - 动态依赖扫描是保守的静态字符串检查；它能把已知不稳定声明降级为正常 cache miss，但不解析完整
   Gradle DSL，也不证明 AGP/plugin 仓库制品、远端元数据或 build-script I/O 已纳入输入闭包。
 - NDK fingerprint 现在包含当前 host prebuilt 的 clang/clang++、lld/ld.lld、LLVM archiver/inspection
