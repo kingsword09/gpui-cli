@@ -583,6 +583,9 @@ distribution 内容纳入 Android toolchain fingerprint，并对非标准布局/
 #310 对 Android Gradle `repositories {}` 做保守静态 gate：仅允许 `google()`、`mavenCentral()`、`gradlePluginPortal()`，自定义 `maven`、`mavenLocal`、`flatDir`、`exclusiveContent` 和其他 repository entry 只关闭 cache reuse，普通 build/preview 继续；标准远端 repository runtime/state 仍未 fingerprint。
 #312 对 Android Gradle `buildscript` 的 `classpath` 做保守插件 gate：固定版本的已知
 `com.android.tools.build:gradle:<version>` 保持 cache eligibility；未知坐标、动态版本、version-catalog 或非字面量输入只关闭 cache reuse，普通构建继续。
+#314 对 Android Gradle app script 的 provider/project file I/O marker 增加保守 bypass：`providers.fileContents`、
+`projectDirectory`/`projectDir`/`rootDir`、`gradleLocalProperties`、archive-entry provider 和 provider file
+materialization 只关闭 cache reuse，普通构建继续。
 Android app Gradle script 的已知文件/环境/网络/进程 I/O marker 直接 bypass cache reuse，保留已建模
 GPUI/NDK/签名读取与普通构建路径；#308 又允许无 signing 配置的 unsigned release APK 在非 live
 build/run 中复用 verified artifact，并对未知 Gradle plugin/alias/plugin-owned signing behavior 保守 bypass。
@@ -982,6 +985,11 @@ bypass。真实 smoke 已覆盖 debug 与 unsigned release 两种 miss→hit 及
 `com.android.tools.build:gradle:<version>` 坐标保持 cache eligibility；未知坐标、动态版本、version-catalog
 或非字面量 classpath 只关闭 cache reuse，普通构建继续。该切片不读取或 fingerprint plugin 实现的运行时
 I/O，不闭合标准远端 repository runtime/state、复杂/远端 signing 或 release preview。
+
+#314 对 Android Gradle app script 增加 provider/project file I/O marker：`providers.fileContents`、
+`projectDirectory`/`projectDir`/`rootDir`、`gradleLocalProperties`、archive-entry provider 和 provider
+file materialization 命中时只关闭 cache reuse，普通构建继续。该切片是已知 marker 的保守静态扫描，不是
+Gradle DSL/runtime read-set 追踪；标准远端 repository runtime/state、复杂 signing 和 release preview 仍需后续闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
