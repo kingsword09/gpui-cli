@@ -510,12 +510,12 @@ fn verify_preview_android_output(
 fn verify_android_preview_output_or_unshared(
     layout: &BuildOutputLayout,
     key_hash: &str,
-    identity: &AndroidGradleDistributionIdentity,
+    distribution_unchanged: bool,
     jni_libs_dir: &Path,
     apk_output_dir: &Path,
     apk_path: &Path,
 ) -> Result<()> {
-    if identity.matches_current() {
+    if distribution_unchanged {
         verify_preview_android_output(layout, key_hash, jni_libs_dir, apk_output_dir)
     } else if apk_path.is_file() {
         Ok(())
@@ -1524,9 +1524,7 @@ fn build_android_apk_live(
                 outputs
                     .android_gradle_distribution_identity
                     .as_ref()
-                    .context(
-                        "Android preview coordinator requires a Gradle distribution identity",
-                    )?,
+                    .is_some_and(AndroidGradleDistributionIdentity::matches_current),
                 jni_libs_dir,
                 &apk_output_dir,
                 &apk,
@@ -3277,7 +3275,7 @@ mod tests {
             verify_android_preview_output_or_unshared(
                 &layout,
                 &layout.key_hash,
-                &identity,
+                identity.matches_fingerprint(),
                 &jni,
                 &apk_output,
                 &apk,
@@ -3294,7 +3292,7 @@ mod tests {
             verify_android_preview_output_or_unshared(
                 &layout,
                 &layout.key_hash,
-                &identity,
+                identity.matches_fingerprint(),
                 &jni,
                 &apk_output,
                 &apk,

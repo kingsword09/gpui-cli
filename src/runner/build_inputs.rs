@@ -255,15 +255,19 @@ impl AndroidGradleDistributionIdentity {
         &self.fingerprint
     }
 
+    pub fn matches_fingerprint(&self) -> bool {
+        !android_gradle_user_configuration_is_present(&self.gradle_user_home)
+            && android_gradle_distribution_fingerprint_for(&self.gradle_user_home).as_deref()
+                == Some(self.fingerprint.as_str())
+    }
+
     pub fn matches_current(&self) -> bool {
         let Some(current_home) = android_gradle_absolute_user_home_from_environment() else {
             return false;
         };
         current_home == self.gradle_user_home
-            && !android_gradle_user_configuration_is_present(&current_home)
             && !has_unmodeled_android_gradle_environment(env::vars_os())
-            && android_gradle_distribution_fingerprint_for(&current_home).as_deref()
-                == Some(self.fingerprint.as_str())
+            && self.matches_fingerprint()
     }
 }
 
@@ -4987,18 +4991,18 @@ mod tests {
         let identity = android_gradle_distribution_identity_for(home.path()).unwrap();
         assert_eq!(first.len(), 64);
         assert!(!first.contains(home.path().to_string_lossy().as_ref()));
-        assert!(identity.matches_current());
+        assert!(identity.matches_fingerprint());
 
         let user_config = home.path().join("gradle.properties");
         fs::write(&user_config, "org.gradle.jvmargs=-Xmx2g\n").unwrap();
-        assert!(!identity.matches_current());
+        assert!(!identity.matches_fingerprint());
         fs::remove_file(user_config).unwrap();
-        assert!(identity.matches_current());
+        assert!(identity.matches_fingerprint());
 
         fs::write(installation.join("lib/gradle-core.jar"), b"modified bytes").unwrap();
         let modified = android_gradle_distribution_fingerprint_for(home.path()).unwrap();
         assert_ne!(first, modified);
-        assert!(!identity.matches_current());
+        assert!(!identity.matches_fingerprint());
 
         fs::write(&install_marker, b"changed distribution marker").unwrap();
         let changed_marker = android_gradle_distribution_fingerprint_for(home.path()).unwrap();
