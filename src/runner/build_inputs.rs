@@ -1808,6 +1808,10 @@ fn android_gradle_repository_block_has_custom_entry(source: &str) -> bool {
 }
 
 fn android_gradle_script_has_unknown_plugin(source: &str) -> bool {
+    if android_gradle_buildscript_has_unknown_classpath(source) {
+        return true;
+    }
+
     if let Some(plugins) = gradle_named_block(source, "plugins")
         && android_gradle_plugins_block_has_unknown_plugin(plugins)
     {
@@ -1838,6 +1842,45 @@ fn android_gradle_script_has_unknown_plugin(source: &str) -> bool {
             && !line.contains("com.android.application")
             && !line.contains("com.android.library")
     })
+}
+
+fn android_gradle_buildscript_has_unknown_classpath(source: &str) -> bool {
+    let Some(buildscript) = gradle_named_block(source, "buildscript") else {
+        return false;
+    };
+
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(buildscript, cursor) {
+        let bytes = buildscript.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &buildscript[position..end] == "classpath" {
+                let Some(coordinate) = gradle_first_string_argument(buildscript, end) else {
+                    return true;
+                };
+                if !android_gradle_buildscript_classpath_is_known(&coordinate) {
+                    return true;
+                }
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn android_gradle_buildscript_classpath_is_known(coordinate: &str) -> bool {
+    let Some(version) = coordinate.strip_prefix("com.android.tools.build:gradle:") else {
+        return false;
+    };
+    !version.is_empty()
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
 fn android_gradle_plugins_block_has_unknown_plugin(source: &str) -> bool {
@@ -6052,6 +6095,40 @@ mod tests {
                         .is_some_and(|value| value
                             .contains(ANDROID_GRADLE_UNKNOWN_PLUGIN_CACHE_DISABLED_REASON)),
                     "unknown plugin was not rejected: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_android_gradle_buildscript_classpath_disables_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        let script = app.join("build.gradle.kts");
+
+        for source in [
+            "buildscript { dependencies { classpath(\"com.android.tools.build:gradle:9.1.0\") } }",
+            "buildscript { dependencies { classpath(\"com.example.convention:plugin:1.0\") } }",
+            "buildscript { dependencies { classpath(libs.plugins.convention) } }",
+            "buildscript { dependencies { classpath(\"com.android.tools.build:gradle:$agpVersion\") } }",
+        ] {
+            fs::write(&script, source).unwrap();
+            let native = NativeInputs::scan(root.path()).unwrap();
+            let reason =
+                android_gradle_unknown_plugin_cache_disabled_reason(root.path(), &native).unwrap();
+            if source.contains("com.android.tools.build:gradle:9.1.0") {
+                assert!(
+                    reason.is_none(),
+                    "known AGP classpath was rejected: {source}"
+                );
+            } else {
+                assert!(
+                    reason
+                        .as_deref()
+                        .is_some_and(|value| value
+                            .contains(ANDROID_GRADLE_UNKNOWN_PLUGIN_CACHE_DISABLED_REASON)),
+                    "unknown buildscript classpath was not rejected: {source}"
                 );
             }
         }
