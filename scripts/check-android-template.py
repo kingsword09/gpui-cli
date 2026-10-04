@@ -80,6 +80,15 @@ def check_android_build_cache(gpui, project, expected_abis, env):
         second = run_capture(str(gpui), "build", "android", cwd=project, env=cache_env)
         assert "Android BuildKey cache hit:" in second, second
 
+        release_first = run_capture(
+            str(gpui), "build", "android", "--release", cwd=project, env=cache_env
+        )
+        assert "Android cache miss:" in release_first, release_first
+        release_second = run_capture(
+            str(gpui), "build", "android", "--release", cwd=project, env=cache_env
+        )
+        assert "Android BuildKey cache hit:" in release_second, release_second
+
     outputs = list(
         (project / ".gpui/builds/android").glob(
             "*/gradle-build/outputs/apk/debug/*.apk"
@@ -87,6 +96,13 @@ def check_android_build_cache(gpui, project, expected_abis, env):
     )
     assert len(outputs) == 1, outputs
     check_apk_file(outputs[0], expected_abis)
+    release_outputs = list(
+        (project / ".gpui/builds/android").glob(
+            "*/gradle-build/outputs/apk/release/*-unsigned.apk"
+        )
+    )
+    assert len(release_outputs) == 1, release_outputs
+    check_apk_file(release_outputs[0], expected_abis)
 
 
 def check_apk_file(apk, expected_abis):

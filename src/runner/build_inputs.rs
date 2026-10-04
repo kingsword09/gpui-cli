@@ -102,6 +102,8 @@ const ANDROID_GRADLE_RELATIVE_USER_HOME_CACHE_DISABLED_REASON: &str =
 const ANDROID_GRADLE_LOCAL_BUILD_LOGIC_CACHE_DISABLED_REASON: &str =
     "local Gradle build logic inputs are not modeled; cache reuse is disabled";
 const ANDROID_GRADLE_APP_SCRIPT_IO_CACHE_DISABLED_REASON: &str = "Android Gradle app script uses unmodeled file, environment, network, or process I/O; cache reuse is disabled";
+const ANDROID_GRADLE_UNKNOWN_PLUGIN_CACHE_DISABLED_REASON: &str =
+    "Android Gradle plugin signing behavior is not modeled; cache reuse is disabled";
 const ANDROID_GRADLE_GLOBAL_ENVIRONMENT_NAMES: &[&str] = &[
     "GRADLE_HOME",
     "GRADLE_OPTS",
@@ -1022,6 +1024,8 @@ pub fn android_preview_cache_policy(
         android_gradle_local_build_logic_cache_disabled_reason(&native);
     let app_script_io_disabled_reason =
         android_gradle_app_script_io_cache_disabled_reason(&root, &native)?;
+    let unknown_plugin_disabled_reason =
+        android_gradle_unknown_plugin_cache_disabled_reason(&root, &native)?;
     let global_configuration_disabled_reason =
         android_gradle_global_configuration_cache_disabled_reason(&root);
     let relative_user_home_disabled_reason =
@@ -1038,8 +1042,8 @@ pub fn android_preview_cache_policy(
             .as_ref()
             .map(|(fingerprint, _)| fingerprint.clone()),
     );
-    let signing_disabled_reason = if release && signing_policy.signing_identity.is_some() {
-        Some("Android release signing is not a live preview cache target".into())
+    let signing_disabled_reason = if release {
+        Some("Android release APK is not a live preview cache target".into())
     } else {
         signing_policy.disabled_reason
     };
@@ -1066,6 +1070,7 @@ pub fn android_preview_cache_policy(
             dynamic_dependency_disabled_reason,
             local_build_logic_disabled_reason,
             app_script_io_disabled_reason,
+            unknown_plugin_disabled_reason,
             global_configuration_disabled_reason,
             relative_user_home_disabled_reason,
             signing_disabled_reason,
@@ -1157,6 +1162,8 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         android_gradle_local_build_logic_cache_disabled_reason(&native);
     let app_script_io_disabled_reason =
         android_gradle_app_script_io_cache_disabled_reason(&snapshot.root, &native)?;
+    let unknown_plugin_disabled_reason =
+        android_gradle_unknown_plugin_cache_disabled_reason(&snapshot.root, &native)?;
     let global_configuration_disabled_reason =
         android_gradle_global_configuration_cache_disabled_reason(&snapshot.root);
     native
@@ -1183,6 +1190,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         dynamic_dependency_disabled_reason,
         local_build_logic_disabled_reason,
         app_script_io_disabled_reason,
+        unknown_plugin_disabled_reason,
         global_configuration_disabled_reason,
         signing_policy.disabled_reason,
         build_script_disabled_reason,
@@ -1693,6 +1701,148 @@ fn android_gradle_app_script_io_cache_disabled_reason(
         }
     }
     Ok(None)
+}
+
+fn android_gradle_unknown_plugin_cache_disabled_reason(
+    root: &Path,
+    native: &NativeInputs,
+) -> Result<Option<String>> {
+    for relative in native
+        .files
+        .keys()
+        .filter(|path| is_android_gradle_app_script_input(path))
+    {
+        let source = fs::read_to_string(root.join(relative))
+            .with_context(|| format!("reading Android Gradle plugin declarations {relative}"))?;
+        if android_gradle_script_has_unknown_plugin(&source) {
+            return Ok(Some(format!(
+                "{ANDROID_GRADLE_UNKNOWN_PLUGIN_CACHE_DISABLED_REASON}: '{relative}'"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn android_gradle_script_has_unknown_plugin(source: &str) -> bool {
+    if let Some(plugins) = gradle_named_block(source, "plugins")
+        && android_gradle_plugins_block_has_unknown_plugin(plugins)
+    {
+        return true;
+    }
+
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            if identifier == "apply" && gradle_call_has_unknown_android_plugin(source, end) {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+
+    source.lines().any(|line| {
+        let line = line.trim();
+        (line.starts_with("apply plugin:") || line.starts_with("apply plugin ="))
+            && !line.contains("com.android.application")
+            && !line.contains("com.android.library")
+    })
+}
+
+fn android_gradle_plugins_block_has_unknown_plugin(source: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            match identifier {
+                "id" => {
+                    if !gradle_first_string_argument(source, end)
+                        .is_some_and(|value| android_gradle_plugin_is_known(&value))
+                    {
+                        return true;
+                    }
+                }
+                "apply" => {
+                    if gradle_call_has_unknown_android_plugin(source, end) {
+                        return true;
+                    }
+                }
+                "version" | "false" | "true" => {}
+                // Version-catalog aliases and Kotlin/Groovy/Java plugin
+                // functions hide the resolved plugin identity.
+                _ => return true,
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn android_gradle_plugin_is_known(plugin: &str) -> bool {
+    matches!(plugin, "com.android.application" | "com.android.library")
+}
+
+fn gradle_call_has_unknown_android_plugin(source: &str, method_end: usize) -> bool {
+    let Some(opening) = gradle_skip_trivia(source, method_end) else {
+        return true;
+    };
+    if source.as_bytes().get(opening) != Some(&b'(') {
+        return false;
+    }
+    let Some(argument) = gradle_skip_trivia(source, opening + 1) else {
+        return true;
+    };
+    let Some(plugin) = gradle_named_string_argument(source, argument, "plugin") else {
+        return true;
+    };
+    !android_gradle_plugin_is_known(&plugin)
+}
+
+fn gradle_named_string_argument(source: &str, argument: usize, name: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut cursor = argument;
+    let mut end = cursor;
+    while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+        end += 1;
+    }
+    if &source[cursor..end] != name {
+        return None;
+    }
+    cursor = gradle_skip_trivia(source, end)?;
+    if bytes.get(cursor) != Some(&b'=') {
+        return None;
+    }
+    let value = gradle_skip_trivia(source, cursor + 1)?;
+    gradle_string_literal_at(source, value)
+}
+
+fn gradle_string_literal_at(source: &str, opening: usize) -> Option<String> {
+    let quote = *source.as_bytes().get(opening)?;
+    if !matches!(quote, b'"' | b'\'') {
+        return None;
+    }
+    let closing = gradle_skip_string(source, opening)?;
+    let width = if quote == b'"' && source.as_bytes().get(opening..opening + 3) == Some(b"\"\"\"") {
+        3
+    } else {
+        1
+    };
+    let value = &source[opening + width..closing - width];
+    (!value.contains('\\') && !value.contains("${")).then(|| value.to_owned())
 }
 
 fn is_android_gradle_app_script_input(path: &str) -> bool {
@@ -2972,12 +3122,6 @@ fn android_cache_hit_eligibility(
     has_custom_signing: bool,
     identity: Option<AndroidDebugKeystoreIdentity>,
 ) -> (Option<String>, Option<AndroidDebugKeystoreIdentity>) {
-    if release {
-        return (
-            Some("release APK cache reuse is disabled until signing inputs are modeled".into()),
-            None,
-        );
-    }
     if !native.excluded_sensitive_files.is_empty() {
         return (
             Some("local sensitive Android configuration disables cache reuse".into()),
@@ -2989,6 +3133,12 @@ fn android_cache_hit_eligibility(
             Some("custom Android signing configuration disables cache reuse".into()),
             None,
         );
+    }
+    if release {
+        // With no signing configuration or sensitive signing input, the
+        // release variant is the deterministic unsigned APK produced by
+        // Gradle. There is no keystore identity to add to the BuildKey.
+        return (None, None);
     }
 
     match identity {
@@ -5790,6 +5940,40 @@ mod tests {
     }
 
     #[test]
+    fn unknown_android_gradle_plugins_disable_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let gradle = root.path().join("mobile/android/gradle");
+        let app = gradle.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let script = app.join("build.gradle.kts");
+
+        for source in [
+            "plugins { id(\"com.android.application\") }",
+            "plugins { id(\"com.example.convention\") }",
+            "plugins { alias(libs.plugins.android.application) }",
+            "plugins { kotlin(\"android\") }",
+            "apply(plugin = \"com.example.convention\")",
+            "apply plugin: \"com.example.convention\"",
+        ] {
+            fs::write(&script, source).unwrap();
+            let native = NativeInputs::scan(root.path()).unwrap();
+            let reason =
+                android_gradle_unknown_plugin_cache_disabled_reason(root.path(), &native).unwrap();
+            if source.contains("com.android.application") {
+                assert!(reason.is_none(), "known AGP plugin was rejected: {source}");
+            } else {
+                assert!(
+                    reason
+                        .as_deref()
+                        .is_some_and(|value| value
+                            .contains(ANDROID_GRADLE_UNKNOWN_PLUGIN_CACHE_DISABLED_REASON)),
+                    "unknown plugin was not rejected: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn android_build_plan_uses_a_frozen_workspace_root_and_hash() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("app/src")).unwrap();
@@ -5918,15 +6102,11 @@ mod tests {
     }
 
     #[test]
-    fn android_cache_policy_bypasses_release_and_sensitive_signing_inputs() {
+    fn android_cache_policy_allows_unsigned_release_and_bypasses_sensitive_signing_inputs() {
         let mut release_native = NativeInputs::default();
         let (release_reason, release_identity) =
             android_cache_hit_eligibility(&mut release_native, true, false, None);
-        assert!(
-            release_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("release APK"))
-        );
+        assert!(release_reason.is_none());
         assert!(release_identity.is_none());
         assert!(release_native.external_hashes.is_empty());
 
@@ -5935,7 +6115,7 @@ mod tests {
             .excluded_sensitive_files
             .push("mobile/android/gradle/keystore.properties".into());
         let (sensitive_reason, sensitive_identity) =
-            android_cache_hit_eligibility(&mut sensitive_native, false, false, None);
+            android_cache_hit_eligibility(&mut sensitive_native, true, false, None);
         assert!(
             sensitive_reason
                 .as_deref()
@@ -5970,6 +6150,37 @@ mod tests {
                 .get("android.default-debug-keystore")
                 .map(String::as_str),
             Some("missing-or-non-regular")
+        );
+    }
+
+    #[test]
+    fn android_release_without_signing_configuration_keeps_cache_eligible() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("build.gradle.kts"), "plugins {}\n").unwrap();
+
+        let mut native = NativeInputs::scan(root.path()).unwrap();
+        let policy = android_cache_signing_policy(root.path(), true, &mut native).unwrap();
+
+        assert!(policy.disabled_reason.is_none());
+        assert!(policy.signing_identity.is_none());
+        assert!(policy.debug_keystore_identity.is_none());
+    }
+
+    #[test]
+    fn android_release_preview_remains_cache_disabled() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("build.gradle.kts"), "plugins {}\n").unwrap();
+
+        let policy = android_preview_cache_policy(root.path(), true, "arm64-v8a").unwrap();
+        assert!(
+            policy
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("release APK is not a live preview"))
         );
     }
 
