@@ -316,6 +316,20 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 该 gate 不跟踪集合后续内容变化或完整 Gradle runtime I/O；标准远端 repository runtime/state、复杂 signing、
   release preview 和真实设备验收仍未闭合。
 
+## T06 Gradle Java NIO/File derived path cache gate（2026-10-05）
+
+- PR #335（`e8d70cd`）将 `FileSystems.getDefault().getPath(...)`、`File.getCanonicalFile()`、
+  `File.getCanonicalPath()`、`File.getAbsolutePath()` 和 `File.toPath()` 纳入 Android Gradle app-script
+  静态 file-I/O marker；命中时只关闭 artifact cache reuse，普通 Gradle 构建继续。
+- 回归覆盖限定与非限定 `FileSystems`/派生路径调用，并确认注释和字符串中的相似文本不触发；已有模板
+  Android debug/release packaging、两个 ABI 与 CLI debug/release miss→hit smoke 继续通过。
+- 本地验证为 workspace `456 passed, 1 ignored`，另通过 fmt、clippy、build、design docs、package list、
+  diff check；PR 与 push 两套 required workflow 的三 OS、desktop-template、android-template、baseline-driver
+  全绿后以 squash merge 合并，无版本发布/tag。
+- 该 gate 只扩大保守静态 marker 集合，不追踪派生路径对象后续读取、plugin/build-script 任意运行时 I/O 或
+  完整 Gradle 输入闭包；标准远端 repository runtime/state、复杂/远端 signing、release preview 和真实设备
+  验收仍未闭合。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -440,6 +454,11 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 - PR #329 的 `File(...)`、`Paths.get(...)`、`Path.of(...)` 限定/非限定路径 marker 与注释/字符串排除回归通过；clippy/build/fmt/design docs、package list、diff check 和真实 Android debug/release packaging、ABI、CLI miss→hit smoke 通过。并行 workspace test 首次 452 passed、1 ignored、4 个现有 coordinator/devserver 时序测试失败，四项单线程单独重跑通过。PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash 为 `cc1da49`，无版本发布或 tag。
 - PR #331 的 `ClassLoader` resource APIs、`ServiceLoader.load`、`Class.forName` marker 与注释/字符串排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs、Android debug/release packaging、ABI 与 CLI miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash 为 `8a4d4b4`，无版本发布或 tag。
 - PR #333 的 `from(...)`、Groovy `from 'path'` file collection/source-set marker 与普通变量名、注释/字符串排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs、Android debug/release packaging、ABI 与 CLI miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash 为 `be895ce`，无版本发布或 tag。
+- PR #335 的 Java NIO/File 派生路径 marker（`FileSystems.getDefault().getPath(...)`、`getCanonicalFile()`、
+  `getCanonicalPath()`、`getAbsolutePath()`、`toPath()`）及限定/非限定形式、注释/字符串排除回归通过；workspace
+  456 passed、1 ignored，fmt/clippy/build/design docs/package list、diff check、Android debug/release packaging、
+  ABI 与 CLI debug/release miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、
+  android-template、baseline-driver 全绿；squash 为 `e8d70cd`，无版本发布或 tag。
 
 ## 未覆盖
 
