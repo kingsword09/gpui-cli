@@ -96,6 +96,9 @@ const ANDROID_GRADLE_GLOBAL_CONFIG_CACHE_DISABLED_REASON: &str =
     "Android global Gradle configuration is not modeled; cache reuse is disabled";
 const ANDROID_GRADLE_DISTRIBUTION_FINGERPRINT_DOMAIN: &[u8] =
     b"gpui-android-gradle-wrapper-distributions-v1\0";
+pub const ANDROID_GRADLE_DISTRIBUTION_CHANGED_REASON: &str = "Android Gradle wrapper distribution changed since the BuildKey was planned; cache reuse is disabled";
+const ANDROID_GRADLE_RELATIVE_USER_HOME_CACHE_DISABLED_REASON: &str =
+    "relative GRADLE_USER_HOME resolution is context-dependent; cache reuse is disabled";
 const ANDROID_GRADLE_GLOBAL_ENVIRONMENT_NAMES: &[&str] = &[
     "GRADLE_HOME",
     "GRADLE_OPTS",
@@ -225,15 +228,56 @@ pub struct AndroidBuildPlan {
     pub layout: BuildOutputLayout,
     pub snapshot: FrozenBuildRoot,
     pub cache_hit_disabled_reason: Option<String>,
+    pub gradle_distribution_identity: Option<AndroidGradleDistributionIdentity>,
     pub debug_keystore_identity: Option<AndroidDebugKeystoreIdentity>,
     pub signing_identity: Option<AndroidSigningIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AndroidGradleDistributionIdentity {
+    gradle_user_home: PathBuf,
+    fingerprint: String,
+}
+
+impl AndroidGradleDistributionIdentity {
+    pub fn from_parts(gradle_user_home: PathBuf, fingerprint: String) -> Self {
+        Self {
+            gradle_user_home,
+            fingerprint,
+        }
+    }
+
+    pub fn gradle_user_home(&self) -> &Path {
+        &self.gradle_user_home
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub fn matches_fingerprint(&self) -> bool {
+        !android_gradle_user_configuration_is_present(&self.gradle_user_home)
+            && android_gradle_distribution_fingerprint_for(&self.gradle_user_home).as_deref()
+                == Some(self.fingerprint.as_str())
+    }
+
+    pub fn matches_current(&self) -> bool {
+        let Some(current_home) = android_gradle_absolute_user_home_from_environment() else {
+            return false;
+        };
+        current_home == self.gradle_user_home
+            && !has_unmodeled_android_gradle_environment(env::vars_os())
+            && self.matches_fingerprint()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AndroidPreviewCachePolicy {
+    pub key: BuildKey,
     pub disabled_reason: Option<String>,
     pub debug_keystore_hash: Option<String>,
     pub android_signing_fingerprint: Option<String>,
+    pub gradle_distribution_identity: Option<AndroidGradleDistributionIdentity>,
 }
 
 struct BuildKeyInputs<'a> {
@@ -973,19 +1017,40 @@ pub fn android_preview_cache_policy(
         android_dynamic_dependency_cache_disabled_reason(&root, &native)?;
     let global_configuration_disabled_reason =
         android_gradle_global_configuration_cache_disabled_reason(&root);
+    let relative_user_home_disabled_reason =
+        android_gradle_relative_user_home_cache_disabled_reason(
+            env::var_os("GRADLE_USER_HOME").as_deref(),
+        );
     let signing_policy = android_cache_signing_policy(&root, release, &mut native)?;
     let (_, rustc_fingerprint) = rustc_identity()?;
-    let (_, toolchain_disabled_reason) = bind_android_toolchain_identity(
+    let android_identity = android_toolchain_identity(&root);
+    let (toolchain_fingerprint, toolchain_disabled_reason) = bind_android_toolchain_identity(
         &mut native,
         &rustc_fingerprint,
-        android_toolchain_fingerprint(&root),
+        android_identity
+            .as_ref()
+            .map(|(fingerprint, _)| fingerprint.clone()),
     );
     let signing_disabled_reason = if release && signing_policy.signing_identity.is_some() {
         Some("Android release signing is not a live preview cache target".into())
     } else {
         signing_policy.disabled_reason
     };
+    let manifest = Inputs::scan_stable(&root, 2)?;
+    let (key, wrapper_environment_disabled_reason) = build_key_from_inputs(
+        BuildKeyInputs {
+            project_root: &root,
+            manifest: &manifest,
+            source_manifest_hash: manifest.digest(),
+            native: &native,
+        },
+        target_triple.to_owned(),
+        release,
+        toolchain_fingerprint,
+        Some(abi.to_owned()),
+    )?;
     Ok(AndroidPreviewCachePolicy {
+        key,
         disabled_reason: combine_cache_hit_disabled_reasons([
             compiler_tool_cache_disabled_reason(&root, Some(target_triple)),
             toolchain_disabled_reason,
@@ -993,8 +1058,10 @@ pub fn android_preview_cache_policy(
             verification_disabled_reason,
             dynamic_dependency_disabled_reason,
             global_configuration_disabled_reason,
+            relative_user_home_disabled_reason,
             signing_disabled_reason,
             build_script_disabled_reason,
+            wrapper_environment_disabled_reason,
         ]),
         debug_keystore_hash: signing_policy
             .debug_keystore_identity
@@ -1002,6 +1069,7 @@ pub fn android_preview_cache_policy(
         android_signing_fingerprint: signing_policy
             .signing_identity
             .map(|identity| identity.fingerprint),
+        gradle_distribution_identity: android_identity.map(|(_, identity)| identity),
     })
 }
 
@@ -1087,10 +1155,13 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
     if let Some(identity) = &signing_policy.signing_identity {
         identity.copy_into_snapshot(&snapshot, &root)?;
     }
+    let android_identity = android_toolchain_identity(&snapshot.root);
     let (toolchain_fingerprint, toolchain_disabled_reason) = bind_android_toolchain_identity(
         &mut native,
         &rustc_fingerprint,
-        android_toolchain_fingerprint(&snapshot.root),
+        android_identity
+            .as_ref()
+            .map(|(fingerprint, _)| fingerprint.clone()),
     );
     let cache_hit_disabled_reason = combine_cache_hit_disabled_reasons([
         toolchain_disabled_reason,
@@ -1125,6 +1196,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         layout,
         snapshot,
         cache_hit_disabled_reason,
+        gradle_distribution_identity: android_identity.map(|(_, identity)| identity),
         debug_keystore_identity: signing_policy.debug_keystore_identity,
         signing_identity: signing_policy.signing_identity,
     })
@@ -1289,6 +1361,14 @@ fn android_gradle_global_configuration_cache_disabled_reason(root: &Path) -> Opt
     )
 }
 
+fn android_gradle_relative_user_home_cache_disabled_reason(
+    gradle_user_home: Option<&OsStr>,
+) -> Option<String> {
+    gradle_user_home
+        .filter(|path| !Path::new(path).is_absolute())
+        .map(|_| ANDROID_GRADLE_RELATIVE_USER_HOME_CACHE_DISABLED_REASON.into())
+}
+
 fn android_gradle_global_configuration_cache_disabled_reason_for(
     gradle_user_home: Option<&Path>,
     has_unmodeled_environment: bool,
@@ -1309,6 +1389,17 @@ fn android_default_user_home() -> Option<OsString> {
     #[cfg(not(windows))]
     let home = env::var_os("HOME");
     home
+}
+
+fn android_gradle_absolute_user_home_from_environment() -> Option<PathBuf> {
+    match env::var_os("GRADLE_USER_HOME") {
+        Some(path) if Path::new(&path).is_absolute() => Some(PathBuf::from(path)),
+        Some(_) => None,
+        None => {
+            let home = PathBuf::from(android_default_user_home()?);
+            home.is_absolute().then(|| home.join(".gradle"))
+        }
+    }
 }
 
 fn android_gradle_user_home(
@@ -1674,6 +1765,12 @@ fn quoted_value_contains_dynamic_range(source: &str) -> bool {
 }
 
 fn android_toolchain_fingerprint(project_root: &Path) -> Option<String> {
+    android_toolchain_identity(project_root).map(|(fingerprint, _)| fingerprint)
+}
+
+fn android_toolchain_identity(
+    project_root: &Path,
+) -> Option<(String, AndroidGradleDistributionIdentity)> {
     let sdk_root = consistent_environment_directory(&["ANDROID_HOME", "ANDROID_SDK_ROOT"])?;
     let ndk_home = consistent_environment_directory(&["ANDROID_NDK_HOME"])?;
     if env::var_os("NDK_HOME").is_some()
@@ -1689,23 +1786,41 @@ fn android_toolchain_fingerprint(project_root: &Path) -> Option<String> {
     let cargo_ndk = command_version("cargo", &["ndk", "--version"], false)?;
     let (java, java_home) = java_runtime_details()?;
     let java_runtime = java_runtime_fingerprint(&java_home)?;
-    let gradle_distributions = android_gradle_distribution_fingerprint(project_root)?;
+    let gradle_distribution = android_gradle_distribution_identity(project_root)?;
     let identity = format!(
-        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\nndk-compiler-resources={ndk_compiler_resources}\ncargo-ndk={cargo_ndk}\njava={java}\njava-runtime={java_runtime}\ngradle-wrapper-distributions={gradle_distributions}"
+        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\nndk-compiler-resources={ndk_compiler_resources}\ncargo-ndk={cargo_ndk}\njava={java}\njava-runtime={java_runtime}\ngradle-wrapper-distributions={}",
+        gradle_distribution.fingerprint()
     );
-    Some(format!("{:x}", Sha256::digest(identity.as_bytes())))
+    Some((
+        format!("{:x}", Sha256::digest(identity.as_bytes())),
+        gradle_distribution,
+    ))
 }
 
-fn android_gradle_distribution_fingerprint(project_root: &Path) -> Option<String> {
+fn android_gradle_distribution_identity(
+    project_root: &Path,
+) -> Option<AndroidGradleDistributionIdentity> {
     let gradle_user_home = android_gradle_user_home(
         project_root,
         env::var_os("GRADLE_USER_HOME").as_deref(),
         android_default_user_home().as_deref(),
     )?;
-    android_gradle_distribution_fingerprint_for(&gradle_user_home)
+    android_gradle_distribution_identity_for(&gradle_user_home)
 }
 
-fn android_gradle_distribution_fingerprint_for(gradle_user_home: &Path) -> Option<String> {
+fn android_gradle_distribution_identity_for(
+    gradle_user_home: &Path,
+) -> Option<AndroidGradleDistributionIdentity> {
+    let fingerprint = android_gradle_distribution_fingerprint_for(gradle_user_home)?;
+    Some(AndroidGradleDistributionIdentity {
+        gradle_user_home: gradle_user_home.to_owned(),
+        fingerprint,
+    })
+}
+
+pub(crate) fn android_gradle_distribution_fingerprint_for(
+    gradle_user_home: &Path,
+) -> Option<String> {
     android_gradle_distribution_fingerprint_with_budget(
         gradle_user_home,
         &mut DirectoryFingerprintBudget::default(),
@@ -4873,12 +4988,21 @@ mod tests {
             .join("gradle-9.4.1-bin.zip.ok");
         fs::write(&install_marker, b"verified distribution").unwrap();
         let first = android_gradle_distribution_fingerprint_for(home.path()).unwrap();
+        let identity = android_gradle_distribution_identity_for(home.path()).unwrap();
         assert_eq!(first.len(), 64);
         assert!(!first.contains(home.path().to_string_lossy().as_ref()));
+        assert!(identity.matches_fingerprint());
+
+        let user_config = home.path().join("gradle.properties");
+        fs::write(&user_config, "org.gradle.jvmargs=-Xmx2g\n").unwrap();
+        assert!(!identity.matches_fingerprint());
+        fs::remove_file(user_config).unwrap();
+        assert!(identity.matches_fingerprint());
 
         fs::write(installation.join("lib/gradle-core.jar"), b"modified bytes").unwrap();
         let modified = android_gradle_distribution_fingerprint_for(home.path()).unwrap();
         assert_ne!(first, modified);
+        assert!(!identity.matches_fingerprint());
 
         fs::write(&install_marker, b"changed distribution marker").unwrap();
         let changed_marker = android_gradle_distribution_fingerprint_for(home.path()).unwrap();
@@ -4931,6 +5055,17 @@ mod tests {
             Some(default_home.path().join(".gradle"))
         );
         assert!(android_gradle_user_home(project.path(), Some(OsStr::new("")), None).is_none());
+        assert!(
+            android_gradle_relative_user_home_cache_disabled_reason(Some(OsStr::new("relative")))
+                .is_some()
+        );
+        assert!(
+            android_gradle_relative_user_home_cache_disabled_reason(Some(
+                default_home.path().as_os_str()
+            ))
+            .is_none()
+        );
+        assert!(android_gradle_relative_user_home_cache_disabled_reason(None).is_none());
     }
 
     #[test]
@@ -5652,6 +5787,10 @@ mod tests {
         fs::write(app.join("release.jks"), b"private-keystore").unwrap();
 
         let policy = android_preview_cache_policy(root.path(), false, "arm64-v8a").unwrap();
+        assert_eq!(
+            policy.key,
+            android_build_key(root.path(), false, &["arm64-v8a".into()]).unwrap()
+        );
         assert!(
             policy
                 .disabled_reason

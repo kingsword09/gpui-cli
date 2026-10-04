@@ -22,7 +22,7 @@ use crate::devserver::control::{self, Command as ControlCommand, Registration};
 use crate::devserver::events::{Event, Kind, Page};
 use crate::runner::android::AndroidRunner;
 use crate::runner::build_inputs::{
-    DesktopBuildPlan, FrozenCheckInputs, android_build_key, android_preview_cache_policy,
+    DesktopBuildPlan, FrozenCheckInputs, android_preview_cache_policy,
     compiler_tool_cache_disabled_reason, desktop_build_key, desktop_build_plan,
     frozen_check_inputs, ios_build_key, prepare_android_signing_snapshot,
 };
@@ -351,6 +351,7 @@ fn matrix_target_build(
         cache_hit_disabled_reason,
         android_debug_keystore_hash,
         android_signing_fingerprint,
+        android_gradle_distribution_identity,
     ) = match platform {
         MatrixPlatform::Macos | MatrixPlatform::Windows | MatrixPlatform::Linux => {
             let key = desktop_build_key(snapshot_root, false)?;
@@ -362,6 +363,7 @@ fn matrix_target_build(
                 key,
                 BuildPlatform::Desktop,
                 cache_hit_disabled_reason,
+                None,
                 None,
                 None,
             )
@@ -378,17 +380,20 @@ fn matrix_target_build(
                 cache_hit_disabled_reason,
                 None,
                 None,
+                None,
             )
         }
         MatrixPlatform::Android => {
             let abi = abi.context("Android matrix target has no ABI for BuildKey")?;
             let policy = android_preview_cache_policy(snapshot_root, false, abi)?;
+            let key = policy.key;
             (
-                android_build_key(snapshot_root, false, &[abi.to_owned()])?,
+                key,
                 BuildPlatform::Android,
                 policy.disabled_reason,
                 policy.debug_keystore_hash,
                 policy.android_signing_fingerprint,
+                policy.gradle_distribution_identity,
             )
         }
     };
@@ -399,6 +404,7 @@ fn matrix_target_build(
     outputs.cache_hit_disabled_reason = cache_hit_disabled_reason;
     outputs.android_debug_keystore_hash = android_debug_keystore_hash;
     outputs.android_signing_fingerprint = android_signing_fingerprint;
+    outputs.android_gradle_distribution_identity = android_gradle_distribution_identity;
     Ok(MatrixTargetBuild {
         key_hash: key.key_hash().to_owned(),
         outputs,
@@ -413,6 +419,7 @@ fn preview_outputs_from_layout(layout: &BuildOutputLayout) -> PreviewBuildOutput
         cache_hit_disabled_reason: None,
         android_debug_keystore_hash: None,
         android_signing_fingerprint: None,
+        android_gradle_distribution_identity: None,
         jni_libs_dir: layout.android_jni_dir.clone(),
         gradle_build_dir: layout.android_gradle_build_dir.clone(),
         ios_derived_data_dir: layout.ios_derived_data_dir.clone(),
@@ -1243,6 +1250,16 @@ impl DesktopCheckRunner {
             }
             if let Some(fingerprint) = &outputs.android_signing_fingerprint {
                 child.env("GPUI_PREVIEW_ANDROID_SIGNING_FINGERPRINT", fingerprint);
+            }
+            if let Some(identity) = &outputs.android_gradle_distribution_identity {
+                child.env(
+                    "GPUI_PREVIEW_ANDROID_GRADLE_USER_HOME",
+                    identity.gradle_user_home(),
+                );
+                child.env(
+                    "GPUI_PREVIEW_ANDROID_GRADLE_DISTRIBUTION_FINGERPRINT",
+                    identity.fingerprint(),
+                );
             }
             if let Some(path) = &outputs.jni_libs_dir {
                 child.env("GPUI_PREVIEW_JNI_LIBS_DIR", path);
