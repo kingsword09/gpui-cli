@@ -2101,6 +2101,10 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         return true;
     }
 
+    if gradle_source_root_api_uses_unmodeled_path(source) {
+        return true;
+    }
+
     if [
         &["System", "getenv"][..],
         &["System", "getProperty"][..],
@@ -2166,6 +2170,37 @@ fn gradle_file_api_uses_unmodeled_path(source: &str) -> bool {
     false
 }
 
+fn gradle_source_root_api_uses_unmodeled_path(source: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            if matches!(identifier, "srcDir" | "srcDirs")
+                && gradle_call_has_opening_parenthesis(source, end)
+                && !gradle_source_root_call_is_managed(source, identifier, end)
+            {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_source_root_call_is_managed(source: &str, identifier: &str, method_end: usize) -> bool {
+    identifier == "srcDirs"
+        && gradle_call_has_exact_argument(source, method_end, "gpuiJniLibsDir")
+        && gradle_call_has_string_argument(source, "gradleProperty", "gpui.jniLibsDir")
+        && gradle_contains_identifiers_in_order(source, &["sourceSets", "jniLibs", "srcDirs"])
+}
+
 fn gradle_file_call_is_managed(source: &str, identifier: &str, method_end: usize) -> bool {
     if identifier != "file" {
         return false;
@@ -2209,6 +2244,33 @@ fn gradle_call_has_exact_argument(source: &str, method_end: usize, expected: &st
     source.get(argument..end) == Some(expected)
         && gradle_skip_trivia(source, end).and_then(|closing| source.as_bytes().get(closing))
             == Some(&b')')
+}
+
+fn gradle_contains_identifiers_in_order(source: &str, sequence: &[&str]) -> bool {
+    if sequence.is_empty() {
+        return false;
+    }
+    let mut matched = 0;
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &source[position..end] == sequence[matched] {
+                matched += 1;
+                if matched == sequence.len() {
+                    return true;
+                }
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
 }
 
 fn android_gradle_identifier_is_managed_io(source: &str, identifier: &str) -> bool {
@@ -6124,6 +6186,22 @@ mod tests {
         fs::write(
             &script,
             r#"
+                val gpuiJniLibsDir = providers.gradleProperty("gpui.jniLibsDir")
+                    .orElse("src/main/jniLibs").get()
+                android { sourceSets { getByName("main") { jniLibs.srcDirs(gpuiJniLibsDir) } } }
+            "#,
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
+
+        fs::write(
+            &script,
+            r#"
                 val configuredBuildDir = providers.gradleProperty("gpui.buildDir").get()
                 val managedBuildDir = file(configuredBuildDir)
                 val ndkHome = providers.environmentVariable("ANDROID_NDK_HOME").get()
@@ -6145,6 +6223,8 @@ mod tests {
             "val value = providers.gradleProperty(\"custom.input\")",
             "val value = file(\"config.json\")",
             "val value = files(\"config.json\")",
+            "android { sourceSets { getByName(\"main\") { java.srcDir(\"src/generated/java\") } } }",
+            "android { sourceSets { getByName(\"main\") { java.srcDirs(\"src/generated/java\", \"src/shared/java\") } } }",
             "val value = file(\"config.json\").readText()",
             "val value = providers.fileContents(\"config.properties\")",
             "val value = layout.projectDirectory.file(\"config.properties\")",
