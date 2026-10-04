@@ -1,9 +1,9 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-05（Asia/Shanghai）。核查代码：`70d7c5c`（PR #345 squash merge）；本轮复核了
+更新日期：2026-10-05（Asia/Shanghai）。核查代码：`4d8b251`（PR #349 squash merge）；本轮复核了
 其间的文档提交 `c218710`、`6c4cdca`、`29ca7c4`、`e32ebb0`、`1dce78f`、`37adb4f`、`f497e4b`、
-`d144e61`、`0525f25`、`338bcf0`、`032e9a9` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`、`70d7c5c`。
-PR #343/#344/#346/#347 仅校正或记录状态；当前 `origin/main` 指向 `032e9a9`。后续提交须重新核对，本文不是动态状态。
+`d144e61`、`0525f25`、`338bcf0`、`032e9a9` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`、`70d7c5c`、`4d8b251`。
+PR #343/#344/#346/#347/#348 仅校正或记录状态；当前 `origin/main` 指向 `4d8b251`。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -179,6 +179,14 @@ CLI miss→hit smoke、fmt/clippy/build/design docs/package list/diff check 均�
 Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI 全绿，squash merge
 `70d7c5c`。这不追踪归档对象后续 I/O，也不等于完整 Gradle/plugin 输入闭包或真实设备验收；标准远端
 repository runtime/state、复杂/远端 signing 与 release preview 仍未闭合。
+
+PR #349 将 Java `Scanner`、`PrintStream`、`PrintWriter` 文件构造器加入同一 code-aware Android Gradle
+app-script marker；限定/非限定类名及 File/Path/String 参数形态只关闭 cache reuse，普通构建继续。注释、字符串、
+普通 app source 与模板 clean task 不误触发。workspace 456 passed、1 ignored，fmt/clippy/build/design docs/
+package list/diff check 与 Android debug/release packaging、CLI miss→hit smoke 通过；PR/push 两套
+Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿，squash merge `4d8b251`。
+这是保守静态构造器 marker，不追踪构造后对象的读写或完整 Gradle/plugin 输入闭包；标准远端 repository
+runtime/state、复杂/远端 signing、release preview、真实设备验收仍未闭合，T06 保持 `in_progress`。
 
 ## 2. 相对上次审计的新合并
 
@@ -563,6 +571,8 @@ repository runtime/state、复杂/远端 signing 与 release preview 仍未闭�
 | PR #341 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；push Windows 失败 job 定向重跑后通过；squash merge `892fc21`；无版本发布/tag |
 | 本地运行时验证（PR #345） | ZIP/JAR file/stream constructor 与 `FileSystems.newFileSystem(...)` marker 回归通过；注释/字符串、普通 app source 和模板 clean task 排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list、diff check 通过；真实 Android debug/release packaging 与 CLI debug/release miss→hit smoke 通过 |
 | PR #345 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `70d7c5c`；无版本发布/tag |
+| 本地运行时验证（PR #349） | `Scanner`/`PrintStream`/`PrintWriter` file-backed constructor marker 与限定/非限定类名、File/Path/String 输入、注释/字符串和普通 app source 排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list/diff check、Android debug/release packaging 与 CLI debug/release miss→hit smoke 通过 |
+| PR #349 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `4d8b251`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
