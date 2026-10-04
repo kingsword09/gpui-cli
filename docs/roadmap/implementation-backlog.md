@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-05，主分支 `be895ce`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-05，主分支 `7473a5b`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -1070,6 +1070,13 @@ workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list/dif
 packaging 与 CLI miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、
 baseline-driver 全绿，squash 为 `4d8b251`。不追踪对象后续 I/O 或完整 Gradle 输入闭包；真实设备验收及远端
 repository/signing/release-preview 边界仍未闭合，T06 保持 `in_progress`。
+
+#352 将 Java NIO `Path.toFile()` 加入 Android Gradle app-script 静态 file-I/O marker；限定/非限定形式命中，
+注释、字符串和普通 app source 排除，命中时只关闭 cache reuse，普通构建继续。workspace 456 passed、1 ignored，
+fmt/clippy/build/design docs/package list/diff check、Android debug/release packaging、双 ABI 与 CLI debug/release
+miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿，
+squash 为 `7473a5b`。不追踪派生 `File` 对象后续读写、Gradle/plugin 任意运行时 I/O 或完整输入闭包；真实设备验收及
+远端 repository/signing/release-preview 边界仍未闭合，T06 保持 `in_progress`。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
