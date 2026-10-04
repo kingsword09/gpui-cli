@@ -2158,6 +2158,15 @@ const ANDROID_GRADLE_FILE_METADATA_IDENTIFIERS: &[&str] = &[
     "probeContentType",
     "toRealPath",
 ];
+const ANDROID_GRADLE_ARCHIVE_CONSTRUCTOR_IDENTIFIERS: &[&str] = &[
+    "ZipFile",
+    "JarFile",
+    "ZipInputStream",
+    "JarInputStream",
+    "ZipOutputStream",
+    "JarOutputStream",
+    "ZipFileSystemProvider",
+];
 
 fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
     if gradle_provider_call_uses_unmodeled_value(
@@ -2189,6 +2198,10 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
     }
 
     if gradle_file_metadata_api_uses_unmodeled_path(source) {
+        return true;
+    }
+
+    if gradle_archive_constructor_uses_unmodeled_io(source) {
         return true;
     }
 
@@ -2371,6 +2384,29 @@ fn gradle_file_metadata_api_uses_unmodeled_path(source: &str) -> bool {
             let receiver = source[..position].trim_end();
             if ANDROID_GRADLE_FILE_METADATA_IDENTIFIERS.contains(&identifier)
                 && receiver.ends_with('.')
+                && gradle_call_has_opening_parenthesis(source, end)
+            {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_archive_constructor_uses_unmodeled_io(source: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            if ANDROID_GRADLE_ARCHIVE_CONSTRUCTOR_IDENTIFIERS.contains(&identifier)
                 && gradle_call_has_opening_parenthesis(source, end)
             {
                 return true;
@@ -6495,6 +6531,16 @@ mod tests {
             "val value = FileSystems.getDefault().getFileStores()",
             "val value = FileSystems.getDefault().getRootDirectories()",
             "val value = fileStore.getAttribute(\"volume:vsn\")",
+            "val value = ZipFile(\"config.zip\")",
+            "val value = java.util.zip.ZipFile(archivePath)",
+            "val value = JarFile(\"plugin.jar\")",
+            "val value = java.util.jar.JarFile(jarPath)",
+            "val value = ZipInputStream(input)",
+            "val value = JarInputStream(input)",
+            "val value = ZipOutputStream(output)",
+            "val value = JarOutputStream(output)",
+            "val value = ZipFileSystemProvider()",
+            "val value = FileSystems.newFileSystem(archivePath, loader)",
             "val value = javaClass.getResource(\"/config.properties\")",
             "val value = javaClass.getResourceAsStream(\"/config.properties\")",
             "val value = ClassLoader.getSystemResource(\"config.properties\")",
@@ -6562,10 +6608,11 @@ mod tests {
                 // File("comment-only").delete() and File("comment-only").canRead()
                 // Files.isReadable(path) and Files.getLastModifiedTime(path) and Files.newDirectoryStream(path)
                 // Files.createDirectories(path) and Files.deleteIfExists(path) and path.toRealPath()
+                // ZipFile(\"comment-only.zip\") and FileSystems.newFileSystem(path, loader)
                 // javaClass.getResource("comment-only") and ServiceLoader.load(Provider::class.java)
                 // fileCollection.from("comment-only")
                 val from = "ordinary-variable"
-                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath()"
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath() ZipFile(\"string-only.zip\") JarFile(\"string-only.jar\")"
             "#,
         )
         .unwrap();
