@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-05（Asia/Shanghai）。核查代码：`8a4d4b4`（PR #331 squash merge）。
+更新日期：2026-10-05（Asia/Shanghai）。核查代码：`be895ce`（PR #333 squash merge）。
 本轮核查时 `origin/main` 指向该提交；后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -143,6 +143,12 @@ PR #331 扩展 Android Gradle app-script 的静态 file-I/O marker，识别 `Cla
 注释和字符串不触发。该 gate 不追踪类加载后的任意 I/O、plugin/runtime 行为或完整 Gradle 输入闭包。
 标准远端 repository runtime/state、复杂 signing、release preview 和真实设备验收仍未闭合。
 
+PR #333 将 `from(...)` 与 Groovy `from 'path'` file collection 配置纳入 Android Gradle app-script
+marker，覆盖 `layout.files.from(...)`、自定义 file collection 与 source-set `from`；普通构建继续，只有
+cache reuse 被关闭。检测要求方法调用后存在参数，普通 `from` 变量、注释和字符串不触发。它不追踪集合后续
+内容变化或完整 Gradle runtime I/O，标准远端 repository runtime/state、复杂 signing、release preview 和设备
+验收仍未闭合。
+
 ## 2. 相对上次审计的新合并
 
 ### T06 Android Gradle cache input closure updates
@@ -248,6 +254,7 @@ PR #331 扩展 Android Gradle app-script 的静态 file-I/O marker，识别 `Cla
 | `9c0fef8`（#327） | 扩展 file marker 至 Groovy command-style `file`/`files` 和 `srcDirs files` 路径声明；仅关闭 cache reuse，注释/字符串不触发，普通构建继续 | 保守静态路径 marker，不追踪返回对象后续使用、source provider/runtime 内容或完整 Gradle 输入闭包 |
 | `cc1da49`（#329） | 扩展 file marker 至 Java/Kotlin `File(...)`、`Paths.get(...)`、`Path.of(...)`（含限定与非限定形式）；仅关闭 cache reuse，普通构建继续，注释/字符串不触发 | 不追踪构造对象后续读取或 Gradle 完整运行时读集；远端仓库状态、复杂 signing 与设备验收仍未闭合 |
 | `8a4d4b4`（#331） | 扩展 Android Gradle app-script I/O marker 至 `ClassLoader` resource lookup、`ServiceLoader` 与 `Class.forName`；只关闭 cache reuse，普通构建继续，注释/字符串不触发 | 不追踪加载类后的任意 I/O、plugin/runtime 行为或完整 Gradle 输入闭包；远端仓库状态、复杂 signing 与设备验收仍未闭合 |
+| `be895ce`（#333） | 扩展 marker 至 `from(...)` 与 Groovy `from 'path'` file collection 输入，覆盖布局文件集合及 source-set；只关闭 cache reuse，普通构建继续 | 不追踪集合后续内容变化或完整 Gradle runtime I/O；远端仓库状态、复杂 signing 与设备验收仍未闭合 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -512,6 +519,8 @@ PR #331 扩展 Android Gradle app-script 的静态 file-I/O marker，识别 `Cla
 | PR #329 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `cc1da49`；无版本发布/tag |
 | 本地运行时验证（PR #331） | `ClassLoader` resource APIs、`ServiceLoader.load`、`Class.forName` bypass 与注释/字符串排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs、Android debug/release packaging、ABI 与 CLI miss→hit smoke 通过 |
 | PR #331 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `8a4d4b4`；无版本发布/tag |
+| 本地运行时验证（PR #333） | `from(...)` / Groovy `from 'path'` file collection 与 source-set 调用 bypass；普通变量名、注释/字符串排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs、Android debug/release packaging、ABI 与 CLI miss→hit smoke 通过 |
+| PR #333 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `be895ce`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
