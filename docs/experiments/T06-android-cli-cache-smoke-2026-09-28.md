@@ -289,6 +289,16 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 该 gate 仍是保守静态扫描，不追踪返回对象后续使用、source provider/runtime 文件变化或完整 Gradle 输入闭包，
   也不等于真实设备、复杂 signing、release preview 或标准远端 repository runtime/state 验收。
 
+## T06 Gradle Java/Kotlin path constructor cache gate（2026-10-05）
+
+- PR #329（`cc1da49`）将 `File(...)`、`java.nio.file.Paths.get(...)`、`java.nio.file.Path.of(...)` 纳入
+  Android app-script I/O marker；覆盖限定与非限定类名，未建模调用只关闭 artifact cache reuse，普通构建继续。
+- 回归验证注释和字符串中的相似表达式不触发；Android debug/release packaging、ABI 与 CLI debug/release
+  miss→hit smoke 通过。
+- 该 marker 不追踪构造对象后续的读取或完整 Gradle runtime I/O，也不构成远端 repository、复杂 signing、
+  release preview 或真实设备验收。workspace 全量测试的一次并行运行中 4 个既有进程时序测试失败，逐项单线程
+  重跑通过；CI 两套 workflow 全绿。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -410,6 +420,7 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 - 文档 PR #323 将审计基准更新至 `1475d24`，补齐 #322 的 source-root gate、模板 JNI 例外、本地验证和未闭合边界；文档检查、PR/push 两套 CI 全绿，squash 为 `1475d24`，无版本发布或 tag。
 - PR #325 的 `setSrcDirs(...)`、属性赋值、Groovy command-style source-root bypass、模板 JNI 例外与注释/字符串排除回归通过；workspace 456 passed、1 个手动 benchmark ignored，clippy/build/fmt/design docs/package list、diff check 通过。PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 最终全绿；PR run 首次 macOS 遇到既有 registry manifest 测试偶发失败，按 job 重跑通过，fail-fast 取消的 Linux/Windows jobs 也分别重跑通过；squash 为 `1b765ee`，无版本发布或 tag。
 - PR #327 的 Groovy command-style `file/files`、`srcDirs files` bypass 与注释/字符串排除回归通过；workspace 456 passed、1 个手动 benchmark ignored，clippy/build/fmt/design docs/package list、diff check 通过；真实 Android debug/release packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash 为 `9c0fef8`，无版本发布或 tag。
+- PR #329 的 `File(...)`、`Paths.get(...)`、`Path.of(...)` 限定/非限定路径 marker 与注释/字符串排除回归通过；clippy/build/fmt/design docs、package list、diff check 和真实 Android debug/release packaging、ABI、CLI miss→hit smoke 通过。并行 workspace test 首次 452 passed、1 ignored、4 个现有 coordinator/devserver 时序测试失败，四项单线程单独重跑通过。PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash 为 `cc1da49`，无版本发布或 tag。
 
 ## 未覆盖
 

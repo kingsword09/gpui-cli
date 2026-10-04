@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-05（Asia/Shanghai）。核查代码：`9c0fef8`（PR #327 squash merge）。
+更新日期：2026-10-05（Asia/Shanghai）。核查代码：`cc1da49`（PR #329 squash merge）。
 本轮核查时 `origin/main` 指向该提交；后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -132,6 +132,12 @@ PR #327 补齐 Groovy command-style `file 'path'` / `files 'path'` 路径解析�
 类似文本不触发 gate。该保守静态扫描仍不追踪返回对象后续使用、source provider/runtime 文件集合或完整
 Gradle 输入闭包，也不闭合标准远端 repository runtime/state、复杂 signing、release preview 或真实设备验收。
 
+PR #329 将 Java/Kotlin `File(...)`、`java.nio.file.Paths.get(...)` 和 `java.nio.file.Path.of(...)`
+路径构造也纳入同一静态 marker；限定与非限定类名均只关闭 cache reuse，普通构建继续，注释和字符串不触发。
+该 gate 不追踪构造对象后续读取或 Gradle 完整运行时读集。workspace 全量测试并行运行时有 4 个现有
+coordinator/devserver 子进程时序测试失败，四项均在单线程单独重跑时通过；这不替代常态全量测试的稳定性问题。
+标准远端 repository runtime/state、复杂 signing、release preview 和真实设备验收仍未闭合。
+
 ## 2. 相对上次审计的新合并
 
 ### T06 Android Gradle cache input closure updates
@@ -235,6 +241,7 @@ Gradle 输入闭包，也不闭合标准远端 repository runtime/state、复杂
 | `1475d24`（#323） | 文档基准更新到 PR #322 squash merge，记录 source-root cache gate、模板 JNI 例外、验证证据和未闭合边界 | 仅文档一致性更新；不增加 runtime 或平台验收 |
 | `1b765ee`（#325） | 扩展 source-root marker 至 `setSrcDirs(...)`、`srcDirs` 属性赋值和 Groovy command-style `srcDir`/`srcDirs +=` 声明；仅关闭 cache reuse，保留模板 JNI 例外 | 保守静态 DSL marker，不追踪 provider/runtime 内容或完整 Gradle 输入闭包 |
 | `9c0fef8`（#327） | 扩展 file marker 至 Groovy command-style `file`/`files` 和 `srcDirs files` 路径声明；仅关闭 cache reuse，注释/字符串不触发，普通构建继续 | 保守静态路径 marker，不追踪返回对象后续使用、source provider/runtime 内容或完整 Gradle 输入闭包 |
+| `cc1da49`（#329） | 扩展 file marker 至 Java/Kotlin `File(...)`、`Paths.get(...)`、`Path.of(...)`（含限定与非限定形式）；仅关闭 cache reuse，普通构建继续，注释/字符串不触发 | 不追踪构造对象后续读取或 Gradle 完整运行时读集；远端仓库状态、复杂 signing 与设备验收仍未闭合 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -495,6 +502,8 @@ Gradle 输入闭包，也不闭合标准远端 repository runtime/state、复杂
 | PR #325 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 最终全部通过；PR workflow 首次 macOS run 命中既有 registry manifest 测试偶发失败，按 job 重跑通过，fail-fast 取消的 Linux/Windows 也分别重跑通过；squash merge `1b765ee`；无版本发布/tag |
 | 本地运行时验证（PR #327） | Groovy command-style `file/files`、`srcDirs files` bypass 与注释/字符串排除回归通过；workspace 456 passed、1 个手动 benchmark ignored，clippy/build/fmt/design docs/package list、diff check 通过；真实 Android debug/release packaging、`arm64-v8a`/`x86_64` ABI 与 debug/release CLI miss→hit smoke 通过 |
 | PR #327 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `9c0fef8`；无版本发布/tag |
+| 本地运行时验证（PR #329） | `File(...)`、`Paths.get(...)`、`Path.of(...)` 限定/非限定形式 bypass 与注释/字符串排除回归通过；clippy/build/fmt/design docs、package list、diff check 与真实 Android debug/release packaging、ABI、CLI miss→hit smoke 通过。Workspace 测试并行运行 452 passed、1 ignored、4 项既有并发/子进程测试失败；四项均单线程单独重跑通过 |
+| PR #329 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `cc1da49`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
