@@ -2079,6 +2079,7 @@ const ANDROID_GRADLE_FILE_IO_IDENTIFIERS: &[&str] = &[
     "getCanonicalPath",
     "getAbsolutePath",
     "toPath",
+    "toFile",
     "loadClass",
     "forName",
 ];
@@ -6481,6 +6482,8 @@ mod tests {
             "val value = File(\"config.json\").toPath()",
             "val value = File(\"config.json\").getAbsolutePath()",
             "val value = File(\"config.json\").canRead()",
+            "val value = path.toFile()",
+            "val value = java.nio.file.Path.of(configPath).toFile()",
             "val value = File(\"config.json\").canWrite()",
             "val value = File(\"config.json\").canExecute()",
             "val value = File(\"config.json\").isHidden()",
@@ -6617,6 +6620,7 @@ mod tests {
                 // file 'comment-only'
                 // File("comment-only") and Paths.get("comment-only")
                 // File("comment-only").getCanonicalPath() and FileSystems.getDefault().getPath("comment-only")
+                // path.toFile() and Path.of("comment-only").toFile()
                 // File("comment-only").listFiles() and File("comment-only").lastModified()
                 // File("comment-only").delete() and File("comment-only").canRead()
                 // Files.isReadable(path) and Files.getLastModifiedTime(path) and Files.newDirectoryStream(path)
@@ -6626,7 +6630,7 @@ mod tests {
                 // javaClass.getResource("comment-only") and ServiceLoader.load(Provider::class.java)
                 // fileCollection.from("comment-only")
                 val from = "ordinary-variable"
-                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath() ZipFile(\"string-only.zip\") JarFile(\"string-only.jar\") Scanner(File(\"string-only.txt\")) PrintStream(\"string-only.txt\") PrintWriter(\"string-only.txt\")"
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath() path.toFile() ZipFile(\"string-only.zip\") JarFile(\"string-only.jar\") Scanner(File(\"string-only.txt\")) PrintStream(\"string-only.txt\") PrintWriter(\"string-only.txt\")"
             "#,
         )
         .unwrap();
