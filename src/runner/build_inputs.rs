@@ -2075,6 +2075,8 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         &["System", "clearProperty"][..],
         &["project", "property"][..],
         &["gradle", "startParameter", "projectProperties"][..],
+        &["providers", "of"][..],
+        &["providers", "provider"][..],
     ]
     .iter()
     .any(|sequence| gradle_contains_identifier_sequence(source, sequence))
@@ -2086,6 +2088,7 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         || gradle_contains_identifier(source, "exec")
         || gradle_contains_identifier(source, "javaexec")
         || gradle_contains_identifier(source, "commandLine")
+        || gradle_contains_identifier(source, "ValueSource")
         || gradle_contains_identifier_sequence(source, &["apply", "from"])
         || gradle_contains_identifier(source, "includeBuild")
     {
@@ -6026,6 +6029,9 @@ mod tests {
             "val value = gradleLocalProperties(rootDir)",
             "val value = resources.text.fromArchiveEntry(\"config.zip\", \"entry\")",
             "val value = provider.getAsFile()",
+            "val value = providers.of(MyValueSource::class) {}",
+            "val value = providers.provider { \"computed\" }",
+            "abstract class Inputs : ValueSource<String, ValueSource.Parameters>",
             "val value = URL(\"https://example.test/config.json\")",
             "tasks.register(\"probe\") { exec { commandLine(\"tool\") } }",
             "repositories { maven { url = uri(\"https://example.test/maven\") } }",
