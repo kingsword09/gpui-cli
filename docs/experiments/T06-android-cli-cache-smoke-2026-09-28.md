@@ -280,6 +280,15 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 模板 `srcDirs(gpuiJniLibsDir)` 受控例外保持可复用；回归验证注释和字符串中的 marker 文本不会误触发。
 - 该 gate 仍是保守静态扫描，不追踪 source provider 的运行时目录/文件变化，也不构成完整 Gradle 输入闭包或设备验收。
 
+## T06 Gradle command-style file path cache gate（2026-10-05）
+
+- PR #327（`9c0fef8`）补齐 Groovy command-style `file 'path'` / `files 'path'` 路径解析，以及
+  `srcDirs files 'path'` source-root 声明；未建模输入只关闭 Android artifact cache reuse，普通构建继续。
+- 回归确认注释和字符串中的类似文本不触发 marker；真实模板 debug/release packaging、两个 ABI 和 CLI
+  debug/release miss→hit cache smoke 通过。
+- 该 gate 仍是保守静态扫描，不追踪返回对象后续使用、source provider/runtime 文件变化或完整 Gradle 输入闭包，
+  也不等于真实设备、复杂 signing、release preview 或标准远端 repository runtime/state 验收。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -400,6 +409,7 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 - PR #322 的未建模 `srcDir(...)`/`srcDirs(...)` bypass 与模板 JNI `gpui.jniLibsDir` 例外回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging、ABI 检查与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `dfc023c`，无版本发布或 tag。
 - 文档 PR #323 将审计基准更新至 `1475d24`，补齐 #322 的 source-root gate、模板 JNI 例外、本地验证和未闭合边界；文档检查、PR/push 两套 CI 全绿，squash 为 `1475d24`，无版本发布或 tag。
 - PR #325 的 `setSrcDirs(...)`、属性赋值、Groovy command-style source-root bypass、模板 JNI 例外与注释/字符串排除回归通过；workspace 456 passed、1 个手动 benchmark ignored，clippy/build/fmt/design docs/package list、diff check 通过。PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 最终全绿；PR run 首次 macOS 遇到既有 registry manifest 测试偶发失败，按 job 重跑通过，fail-fast 取消的 Linux/Windows jobs 也分别重跑通过；squash 为 `1b765ee`，无版本发布或 tag。
+- PR #327 的 Groovy command-style `file/files`、`srcDirs files` bypass 与注释/字符串排除回归通过；workspace 456 passed、1 个手动 benchmark ignored，clippy/build/fmt/design docs/package list、diff check 通过；真实 Android debug/release packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash 为 `9c0fef8`，无版本发布或 tag。
 
 ## 未覆盖
 
