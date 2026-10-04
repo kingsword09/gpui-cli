@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-04（Asia/Shanghai）。核查代码：`b2dc719`（PR #293 squash merge）。
+更新日期：2026-10-04（Asia/Shanghai）。核查代码：`8e44e44`（PR #296 squash merge）。
 本轮核查时 `origin/main` 指向该提交；后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -89,7 +89,11 @@ build-script 声明/实际读集和网络/用户态文件系统跨平台对照�
 | G3 | 两种移动 runner、进程证据、matrix admission/并行调度/control/native capture、同一 delegated lease 下的 run/capture/log/cleanup evidence、cleanup-finalized matrix evidence、capture-only cell 的非伪造报告边界、runner identity/capability/run-identity/bounded-event-log evidence、移动截图 manifest/identity verification、pre-ready launch failure evidence、cleanup error evidence、action failure operation ID evidence、Android capture 的 best-effort viewport/scale/orientation/foreground metadata、移动 semantics 默认 admission 不再误报支持 | 完整三端同快照矩阵、真实设备环境元数据与故障/重连、移动 semantics provider/完整语义与输入证据、repro 和 L2/L3 CI |
 | G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug live preview verified cache hit、Android 固定 Gradle wrapper checksum、Gradle dependency verification SHA-256 metadata、动态/changing dependency cache bypass、NDK compiler-tool/sysroot/header、选定 SDK package、Java runtime 与 compiler/linker executable content fingerprint、Rust compiler selector environment/content inputs、Cargo build flags/profile override inputs、显式清理；T05 已覆盖外部 Cargo path package live watcher/index 并有一个大型输入集本机对照；T06 frozen build plan 按 Cargo package 声明对 workspace 与 external path package 的默认/自定义 build script 保守 bypass artifact cache reuse，`build=false` 不误触发 | 缓存输入遗漏、iOS physical live preview、Android release APK/复杂或远端 signing cache hit、远端仓库状态和任意 build-script I/O、T05 build-script 实际读集/网络及用户态文件系统跨平台证据、跨平台性能对照、共享构建/预热、性能指标/预算和 Agent 基准 |
 
+G2/G4 补充：PR #295 对已知 Gradle user-home 配置与 Gradle/JVM 注入环境 fail-closed，只禁用复用并继续普通构建；PR #296 让 cache-disabled Android build/preview 不发布新的可复用 manifest。检测不覆盖 wrapper 解压 distribution 的全部配置、plan 后并发修改或任意 Gradle/build-script I/O，相关工作仍为 `in_progress`。
+
 ## 2. 相对上次审计的新合并
+
+### T06 Android Gradle cache input closure updates
 
 | 提交 | 新进展 | 判定边界 |
 | --- | --- | --- |
@@ -169,6 +173,11 @@ build-script 声明/实际读集和网络/用户态文件系统跨平台对照�
 | `caf03eb`（#289） | 将 Rust wrapper、`CC`、`CXX`、`AR` 与每个选定 target 的 `CARGO_TARGET_<TARGET>_LINKER` 统一扩展为有界可执行文件内容指纹；相同路径替换内容会改变 BuildKey；matrix desktop/iOS/Android cache gate 分别绑定实际 target triple 或 ABI 对应的 Rust target | 命令参数或 shell 语法、缺失/非普通文件/不可执行文件、读取竞态、非 Unicode 环境值或超过 64 MiB 预算时只禁用 cache reuse，普通构建继续；不闭合工具启动的子进程、额外环境/文件/网络读取以及 build.rs/Gradle/NDK/Xcode 任意隐藏 I/O |
 | `5c0cbde`（#291） | 将 `RUSTUP_TOOLCHAIN`、`RUSTC_BOOTSTRAP` 纳入 BuildKey 环境摘要，并对显式 `RUSTC` 选择的可执行文件复用有界内容指纹；相同路径替换内容会改变摘要，缺失/参数化/不可安全读取时普通构建继续但禁用 cache reuse | 只闭合显式 Rust compiler selector 环境；未闭合默认 `rustc` 之外的 Cargo 可执行文件/global Cargo 配置、编译器子进程或 build.rs/Gradle/NDK/Xcode 隐藏 I/O |
 | `b2dc719`（#293） | 将 `CARGO_BUILD_RUSTFLAGS` 及 dev/release profile 的 debug、assertions、codegen-units、incremental、LTO、opt-level、overflow-checks、panic、rpath、split-debuginfo、strip 覆盖纳入 BuildKey 环境摘要；每项变化都有 hash 回归 | 只覆盖 CLI 当前 dev/release profile 的显式 Cargo 环境覆盖；custom profile、Cargo 可执行文件/global Cargo 配置、build.rs/Gradle/NDK/Xcode 隐藏 I/O 与远端状态仍未闭合 |
+
+| 提交 | 新进展 | 判定边界 |
+| --- | --- | --- |
+| `dbb275d`（#295） | Android build plan 与 preview cache gate 检查 Gradle user-home 的 `gradle.properties`、`init.gradle(.kts)`/`init.d`，以及 Gradle/JVM 注入环境；配置存在或 home 不可解析时只禁用 artifact cache reuse，普通构建继续，诊断不含 home 路径或配置值 | 这是已知全局配置面的保守 bypass，不读取/指纹化配置内容；不扫描未显式指定 `GRADLE_HOME` 时 wrapper 解压 distribution 内部的 init 脚本，也不闭合任意 build-script I/O 或 plan 后并发变化 |
+| `8e44e44`（#296） | Android 普通 build 与 live preview 在 cache reuse 不安全时不再发布新的可复用 artifact manifest；普通 build 直接返回已验证存在的 APK，避免未建模 Gradle 配置下产物污染同一 BuildKey 的后续 cache hit | 不改变安全路径的 verified-manifest 命中；不把全局配置冻结或加入 BuildKey，也不提供 Android 设备验收 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -394,6 +403,10 @@ build-script 声明/实际读集和网络/用户态文件系统跨平台对照�
 | 本地运行时验证（PR #293） | `CARGO_BUILD_RUSTFLAGS` 与 dev/release profile 覆盖的逐项 hash 回归通过；workspace 442 passed、1 个手动 benchmark ignored，全部集成/协议测试、workspace clippy、build、Windows target check、fmt、design docs 和 diff check 通过 |
 | PR #293 CI | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；无发布/tag |
 | PR #293 合并 | squash merge `b2dc719`；无发布/tag |
+| 本地运行时验证（PR #295） | Gradle user-home 配置/环境 gate、home 解析与无路径/秘密诊断回归通过；workspace 445 passed、1 个手动 benchmark ignored，clippy/build/Windows target check/fmt/design docs/package list 通过；本机 Android debug/release APK 与 CLI miss→hit smoke 通过 |
+| PR #295 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `dbb275d`；无发布/tag |
+| 本地运行时验证（PR #296） | bypass Android manifest 不发布/不覆盖且直接返回 APK 的回归通过；workspace 445 passed、1 个手动 benchmark ignored，clippy/build/Windows target check/fmt/design docs/package list 与本机 Android debug/release、CLI miss→hit smoke 通过 |
+| PR #296 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `8e44e44`；无发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
