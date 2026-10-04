@@ -105,6 +105,8 @@ jobs:
       - run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
       - run: cargo build --locked
       - run: cargo install cargo-ndk --locked --version 4.1.2
+      - name: Install the pinned Gradle wrapper distribution
+        run: bash templates/android/gradle/gradlew --version
       - name: Probe the active Android BuildKey toolchain identity
         env:
           GPUI_REQUIRE_ANDROID_TOOLCHAIN_FINGERPRINT: '1'

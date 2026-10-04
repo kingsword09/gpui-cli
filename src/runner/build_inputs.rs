@@ -94,6 +94,8 @@ const ANDROID_SIGNING_MARKERS: &[&str] = &[
 ];
 const ANDROID_GRADLE_GLOBAL_CONFIG_CACHE_DISABLED_REASON: &str =
     "Android global Gradle configuration is not modeled; cache reuse is disabled";
+const ANDROID_GRADLE_DISTRIBUTION_FINGERPRINT_DOMAIN: &[u8] =
+    b"gpui-android-gradle-wrapper-distributions-v1\0";
 const ANDROID_GRADLE_GLOBAL_ENVIRONMENT_NAMES: &[&str] = &[
     "GRADLE_HOME",
     "GRADLE_OPTS",
@@ -1207,26 +1209,61 @@ fn android_gradle_wrapper_distribution_checksum(
         )
     })?;
     let mut checksum = None;
+    let mut distribution_base = None;
+    let mut distribution_path = None;
     for line in contents.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "distributionSha256Sum" {
-            continue;
-        }
-        if checksum.is_some() {
+        let (key, value) = android_gradle_wrapper_property_key_value(line);
+        if key.contains('\\') {
+            // Escaped Java-properties keys can override the wrapper location
+            // while looking unrelated to a line-oriented parser.
             return Ok(None);
         }
-        let value = value.trim();
-        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Ok(None);
+        match key {
+            "distributionBase" => {
+                if distribution_base.replace(value).is_some() || value != "GRADLE_USER_HOME" {
+                    return Ok(None);
+                }
+            }
+            "distributionPath" => {
+                if distribution_path.replace(value).is_some() || value != "wrapper/dists" {
+                    return Ok(None);
+                }
+            }
+            "distributionSha256Sum" => {
+                if checksum.is_some()
+                    || value.len() != 64
+                    || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Ok(None);
+                }
+                checksum = Some(value.to_ascii_lowercase());
+            }
+            _ => {}
         }
-        checksum = Some(value.to_ascii_lowercase());
+    }
+    if distribution_base != Some("GRADLE_USER_HOME") || distribution_path != Some("wrapper/dists") {
+        return Ok(None);
     }
     Ok(checksum)
+}
+
+fn android_gradle_wrapper_property_key_value(line: &str) -> (&str, &str) {
+    let boundary = line
+        .char_indices()
+        .find(|(_, character)| matches!(character, '=' | ':') || character.is_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(line.len());
+    let key = &line[..boundary];
+    let remainder = line[boundary..].trim_start();
+    let value = remainder
+        .strip_prefix('=')
+        .or_else(|| remainder.strip_prefix(':'))
+        .unwrap_or(remainder)
+        .trim();
+    (key, value)
 }
 
 fn android_gradle_wrapper_cache_disabled_reason(
@@ -1236,8 +1273,7 @@ fn android_gradle_wrapper_cache_disabled_reason(
     Ok(android_gradle_wrapper_distribution_checksum(root, native)?
         .is_none()
         .then(|| {
-            "Android Gradle wrapper distribution checksum is missing or invalid; cache reuse is disabled"
-                .into()
+            "Android Gradle wrapper checksum or installation layout is unsupported; cache reuse is disabled".into()
         }))
 }
 
@@ -1653,10 +1689,112 @@ fn android_toolchain_fingerprint(project_root: &Path) -> Option<String> {
     let cargo_ndk = command_version("cargo", &["ndk", "--version"], false)?;
     let (java, java_home) = java_runtime_details()?;
     let java_runtime = java_runtime_fingerprint(&java_home)?;
+    let gradle_distributions = android_gradle_distribution_fingerprint(project_root)?;
     let identity = format!(
-        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\nndk-compiler-resources={ndk_compiler_resources}\ncargo-ndk={cargo_ndk}\njava={java}\njava-runtime={java_runtime}"
+        "sdk-packages={sdk_packages}\nndk-revision={ndk_revision}\nndk-compiler-tools={ndk_compiler_tools}\nndk-compiler-resources={ndk_compiler_resources}\ncargo-ndk={cargo_ndk}\njava={java}\njava-runtime={java_runtime}\ngradle-wrapper-distributions={gradle_distributions}"
     );
     Some(format!("{:x}", Sha256::digest(identity.as_bytes())))
+}
+
+fn android_gradle_distribution_fingerprint(project_root: &Path) -> Option<String> {
+    let gradle_user_home = android_gradle_user_home(
+        project_root,
+        env::var_os("GRADLE_USER_HOME").as_deref(),
+        android_default_user_home().as_deref(),
+    )?;
+    android_gradle_distribution_fingerprint_for(&gradle_user_home)
+}
+
+fn android_gradle_distribution_fingerprint_for(gradle_user_home: &Path) -> Option<String> {
+    android_gradle_distribution_fingerprint_with_budget(
+        gradle_user_home,
+        &mut DirectoryFingerprintBudget::default(),
+    )
+}
+
+fn android_gradle_distribution_fingerprint_with_budget(
+    gradle_user_home: &Path,
+    budget: &mut DirectoryFingerprintBudget,
+) -> Option<String> {
+    let distributions = gradle_user_home.join("wrapper/dists");
+    let metadata = match fs::symlink_metadata(&distributions) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return None,
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return None;
+    }
+
+    let mut pending = vec![(distributions.clone(), 0_u8)];
+    let mut installations = Vec::new();
+    let mut wrapper_files = Vec::new();
+    while let Some((directory, depth)) = pending.pop() {
+        if depth == 3 {
+            let relative = directory.strip_prefix(&distributions).ok()?;
+            let relative = relative.to_str()?.replace('\\', "/");
+            let fingerprint = bounded_directory_fingerprint(
+                &directory,
+                b"gpui-android-gradle-installation-v1\0",
+                budget,
+            )?;
+            installations.push((relative, fingerprint));
+            continue;
+        }
+
+        let mut children = fs::read_dir(&directory)
+            .ok()?
+            .map(|entry| entry.ok())
+            .collect::<Option<Vec<_>>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for entry in children {
+            let file_type = entry.file_type().ok()?;
+            if file_type.is_symlink() {
+                return None;
+            }
+            if file_type.is_dir() {
+                budget.record(0)?;
+                pending.push((entry.path(), depth + 1));
+            } else if file_type.is_file() {
+                let name = entry.file_name().into_string().ok()?;
+                if name.to_ascii_lowercase().ends_with(".lck") {
+                    budget.record(0)?;
+                    continue;
+                }
+                let path = entry.path();
+                let relative = path.strip_prefix(&distributions).ok()?;
+                let relative = relative.to_str()?.replace('\\', "/");
+                let metadata = entry.metadata().ok()?;
+                budget.record(metadata.len())?;
+                wrapper_files.push((relative, hash_file_contents(&path).ok()?));
+            } else {
+                return None;
+            }
+        }
+    }
+    if installations.is_empty() {
+        // The wrapper may install Gradle during this build. Do not publish a
+        // cache entry whose BuildKey was computed without the runtime contents.
+        return None;
+    }
+
+    installations.sort();
+    wrapper_files.sort();
+    let mut digest = Sha256::new();
+    digest.update(ANDROID_GRADLE_DISTRIBUTION_FINGERPRINT_DOMAIN);
+    for (relative, fingerprint) in installations {
+        digest.update(b"d");
+        digest.update((relative.len() as u64).to_be_bytes());
+        digest.update(relative.as_bytes());
+        digest.update(fingerprint.as_bytes());
+    }
+    for (relative, fingerprint) in wrapper_files {
+        digest.update(b"f");
+        digest.update((relative.len() as u64).to_be_bytes());
+        digest.update(relative.as_bytes());
+        digest.update(fingerprint.as_bytes());
+    }
+    Some(format!("{:x}", digest.finalize()))
 }
 
 fn android_ndk_host_tag_candidates() -> &'static [&'static str] {
@@ -2231,7 +2369,7 @@ fn bind_android_toolchain_identity(
         Some(fingerprint) => (fingerprint, None),
         None => (
             "unavailable".into(),
-            Some("Android SDK/NDK/cargo-ndk/JDK identity is unavailable or ambiguous; Android cache reuse is disabled".into()),
+            Some("Android SDK/NDK/cargo-ndk/JDK/Gradle distribution identity is unavailable or ambiguous; Android cache reuse is disabled".into()),
         ),
     };
     native
@@ -4505,6 +4643,14 @@ mod tests {
         let fingerprint = android_toolchain_fingerprint(&project_root);
         let sdk_root = consistent_environment_directory(&["ANDROID_HOME", "ANDROID_SDK_ROOT"]);
         let ndk_home = consistent_environment_directory(&["ANDROID_NDK_HOME"]);
+        let gradle_user_home = android_gradle_user_home(
+            &project_root,
+            env::var_os("GRADLE_USER_HOME").as_deref(),
+            android_default_user_home().as_deref(),
+        );
+        let gradle_distribution_available = gradle_user_home
+            .as_deref()
+            .is_some_and(test_gradle_distribution_is_installed);
         let ndk_alias_matches = env::var_os("NDK_HOME").is_none()
             || consistent_environment_directory(&["NDK_HOME"]).as_ref() == ndk_home.as_ref();
         let probes_available = command_version("cargo", &["ndk", "--version"], false).is_some()
@@ -4521,11 +4667,48 @@ mod tests {
         if env::var_os("GPUI_REQUIRE_ANDROID_TOOLCHAIN_FINGERPRINT").is_some() {
             assert!(
                 fingerprint.is_some(),
-                "Android toolchain fingerprint was required but SDK/NDK/JDK/cargo-ndk identity is unavailable"
+                "Android toolchain fingerprint was required but SDK/NDK/JDK/cargo-ndk/Gradle distribution identity is unavailable"
             );
-        } else if ndk_alias_matches && probes_available && package_metadata_available {
+        } else if ndk_alias_matches
+            && probes_available
+            && package_metadata_available
+            && gradle_distribution_available
+        {
             assert!(fingerprint.is_some());
         }
+    }
+
+    fn test_gradle_distribution_is_installed(gradle_user_home: &Path) -> bool {
+        let distributions = gradle_user_home.join("wrapper/dists");
+        if !fs::symlink_metadata(&distributions)
+            .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_dir())
+        {
+            return false;
+        }
+        let mut pending = vec![(distributions, 0_u8)];
+        while let Some((directory, depth)) = pending.pop() {
+            if depth == 3 {
+                return true;
+            }
+            let Ok(entries) = fs::read_dir(directory) else {
+                return false;
+            };
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    return false;
+                };
+                let Ok(file_type) = entry.file_type() else {
+                    return false;
+                };
+                if file_type.is_symlink() {
+                    return false;
+                }
+                if file_type.is_dir() {
+                    pending.push((entry.path(), depth + 1));
+                }
+            }
+        }
+        false
     }
 
     #[test]
@@ -4675,6 +4858,65 @@ mod tests {
     }
 
     #[test]
+    fn android_gradle_distribution_fingerprint_tracks_installed_contents() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(android_gradle_distribution_fingerprint_for(home.path()).is_none());
+
+        let installation = home
+            .path()
+            .join("wrapper/dists/gradle-9.4.1-bin/opaque-hash/gradle-9.4.1");
+        fs::create_dir_all(installation.join("lib")).unwrap();
+        fs::write(installation.join("lib/gradle-core.jar"), b"official bytes").unwrap();
+        let install_marker = installation
+            .parent()
+            .unwrap()
+            .join("gradle-9.4.1-bin.zip.ok");
+        fs::write(&install_marker, b"verified distribution").unwrap();
+        let first = android_gradle_distribution_fingerprint_for(home.path()).unwrap();
+        assert_eq!(first.len(), 64);
+        assert!(!first.contains(home.path().to_string_lossy().as_ref()));
+
+        fs::write(installation.join("lib/gradle-core.jar"), b"modified bytes").unwrap();
+        let modified = android_gradle_distribution_fingerprint_for(home.path()).unwrap();
+        assert_ne!(first, modified);
+
+        fs::write(&install_marker, b"changed distribution marker").unwrap();
+        let changed_marker = android_gradle_distribution_fingerprint_for(home.path()).unwrap();
+        assert_ne!(modified, changed_marker);
+
+        let inactive = home
+            .path()
+            .join("wrapper/dists/gradle-8.10-bin/other-hash/gradle-8.10");
+        fs::create_dir_all(&inactive).unwrap();
+        fs::write(inactive.join("gradle-launcher.jar"), b"other installation").unwrap();
+        let with_inactive_distribution =
+            android_gradle_distribution_fingerprint_for(home.path()).unwrap();
+        assert_ne!(changed_marker, with_inactive_distribution);
+    }
+
+    #[test]
+    fn android_gradle_distribution_fingerprint_fails_closed_on_budget_and_links() {
+        let home = tempfile::tempdir().unwrap();
+        let installation = home
+            .path()
+            .join("wrapper/dists/gradle-9.4.1-bin/opaque-hash/gradle-9.4.1");
+        fs::create_dir_all(installation.join("lib")).unwrap();
+        fs::write(installation.join("lib/gradle-core.jar"), b"contents").unwrap();
+
+        let mut budget = DirectoryFingerprintBudget::new(2, 8);
+        assert!(
+            android_gradle_distribution_fingerprint_with_budget(home.path(), &mut budget).is_none()
+        );
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("gradle-core.jar", installation.join("lib/alias.jar"))
+                .unwrap();
+            assert!(android_gradle_distribution_fingerprint_for(home.path()).is_none());
+        }
+    }
+
+    #[test]
     fn android_gradle_user_home_resolves_override_and_default() {
         let project = tempfile::tempdir().unwrap();
         let default_home = tempfile::tempdir().unwrap();
@@ -4715,7 +4957,7 @@ mod tests {
         fs::write(
             &properties,
             format!(
-                "distributionUrl=https\\://services.gradle.org/distributions/gradle-9.4.1-bin.zip\ndistributionSha256Sum={checksum}\n"
+                "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistributionUrl=https\\://services.gradle.org/distributions/gradle-9.4.1-bin.zip\ndistributionSha256Sum={checksum}\n"
             ),
         )
         .unwrap();
@@ -4730,6 +4972,34 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some(expected_checksum.as_str())
+        );
+
+        fs::write(
+            &properties,
+            format!(
+                "distributionBase=PROJECT\ndistributionPath=wrapper/dists\ndistributionUrl=https\\://services.gradle.org/distributions/gradle-9.4.1-bin.zip\ndistributionSha256Sum={checksum}\n"
+            ),
+        )
+        .unwrap();
+        native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_wrapper_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some()
+        );
+
+        fs::write(
+            &properties,
+            format!(
+                "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\ndistribution\\u0050ath=custom\ndistributionSha256Sum={checksum}\n"
+            ),
+        )
+        .unwrap();
+        native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_wrapper_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some()
         );
 
         fs::write(
