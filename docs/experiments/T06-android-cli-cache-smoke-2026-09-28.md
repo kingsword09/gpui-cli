@@ -330,6 +330,22 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   完整 Gradle 输入闭包；标准远端 repository runtime/state、复杂/远端 signing、release preview 和真实设备
   验收仍未闭合。
 
+## T06 Gradle Java File metadata and mutation cache gate（2026-10-05）
+
+- PR #338（`0e04377`）将 Java `File` 的 `canRead`/`canWrite`/`canExecute`、`isHidden`、大小/时间/空间
+  查询、`list`/`listFiles` 以及 create/mkdir/delete/rename/permission mutation API 纳入 Android Gradle
+  app-script 静态 marker；新增方法要求 receiver-call 形态，命中时只关闭 artifact cache reuse，普通 Gradle
+  构建继续。
+- 回归覆盖这些 API、限定/非限定既有路径入口，并确认注释和字符串不触发；模板的
+  `tasks.register("clean", Delete::class) { delete(rootProject.layout.buildDirectory) }` 也保持 cache eligible。
+- 首轮真实 smoke 暴露裸 `delete` 标识符会误判模板 clean task；实现随后收窄为 receiver 方法调用并重跑通过。
+  最终本地验证为 workspace `456 passed, 1 ignored`，另通过 fmt、clippy、build、design docs、package list、
+  diff check；真实 Android debug/release packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release miss→hit
+  smoke 通过。PR 与 push 两套 required workflow 的三 OS、desktop-template、android-template、baseline-driver
+  全绿后以 squash merge 合并，无版本发布/tag。
+- 该 gate 仍是保守静态 marker，不追踪文件系统状态、路径对象或文件内容的完整运行时读集，也不闭合标准远端
+  repository runtime/state、复杂/远端 signing、release preview 或真实设备验收。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -459,6 +475,11 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   456 passed、1 ignored，fmt/clippy/build/design docs/package list、diff check、Android debug/release packaging、
   ABI 与 CLI debug/release miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、
   android-template、baseline-driver 全绿；squash 为 `e8d70cd`，无版本发布或 tag。
+- PR #338 的 Java `File` 状态/元数据、目录枚举和 mutation receiver-call marker，以及注释/字符串和模板
+  `Delete::class` clean-task 排除回归通过；首轮 smoke 的裸 `delete` false positive 已收窄并修复；workspace
+  456 passed、1 ignored，fmt/clippy/build/design docs/package list、diff check、Android debug/release packaging、
+  双 ABI 与 CLI debug/release miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、
+  android-template、baseline-driver 全绿；squash 为 `0e04377`，无版本发布或 tag。
 
 ## 未覆盖
 

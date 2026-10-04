@@ -1043,6 +1043,13 @@ cache reuse，普通构建继续，限定/非限定形式均覆盖，注释和�
 后续读取或完整 Gradle runtime I/O；标准远端 repository runtime/state、复杂/远端 signing、release preview
 和真实设备验收仍未闭合。
 
+#338 将 Java `File` 的权限/元数据查询、目录枚举和常见文件系统变更方法纳入 Android Gradle app-script
+marker，包括 `canRead/canWrite/canExecute`、大小/时间/空间查询、`list/listFiles`、创建/删除/重命名与权限
+变更；新增 API 仅在 receiver 方法调用形态下关闭 cache reuse，普通构建继续。注释、字符串和模板 clean task
+的 `Delete::class`/`delete(rootProject.layout.buildDirectory)` 不触发。该静态 gate 不追踪文件系统状态的运行时
+读集或完整 Gradle 输入闭包；标准远端 repository runtime/state、复杂/远端 signing、release preview 和真实
+设备验收仍未闭合。
+
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
 3. 缓存复用不复用 run/安装身份；调用者取消不杀其他 owner 的共享构建。
