@@ -2113,6 +2113,10 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         return true;
     }
 
+    if gradle_file_collection_from_uses_unmodeled_path(source) {
+        return true;
+    }
+
     if gradle_source_root_api_uses_unmodeled_path(source) {
         return true;
     }
@@ -2206,6 +2210,38 @@ fn gradle_path_constructor_uses_unmodeled_path(source: &str) -> bool {
         }
     }
     false
+}
+
+fn gradle_file_collection_from_uses_unmodeled_path(source: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &source[position..end] == "from" && gradle_from_call_has_argument(source, end) {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_from_call_has_argument(source: &str, method_end: usize) -> bool {
+    let Some(argument) = gradle_skip_trivia(source, method_end) else {
+        return false;
+    };
+    match source.as_bytes().get(argument) {
+        Some(b'(' | b'[' | b'{') => true,
+        Some(byte) if is_gradle_identifier_start(*byte) => true,
+        Some(b'"' | b'\'') => true,
+        _ => false,
+    }
 }
 
 fn gradle_member_call_has_name(source: &str, member_owner_end: usize, member: &str) -> bool {
@@ -6318,6 +6354,11 @@ mod tests {
             "val value = rootDir.resolve(\"config.properties\")",
             "val value = gradleLocalProperties(rootDir)",
             "val value = resources.text.fromArchiveEntry(\"config.zip\", \"entry\")",
+            "val value = layout.files.from(\"config.json\")",
+            "val value = fileCollection.from(configPath)",
+            "android { sourceSets { main { java.from(\"src/generated/java\") } } }",
+            "val value = fileCollection.from 'config.json'",
+            "android { sourceSets { main { java.from 'src/generated/java' } } }",
             "val value = provider.getAsFile()",
             "val value = providers.of(MyValueSource::class) {}",
             "val value = providers.provider { \"computed\" }",
@@ -6358,7 +6399,9 @@ mod tests {
                 // file 'comment-only'
                 // File("comment-only") and Paths.get("comment-only")
                 // javaClass.getResource("comment-only") and ServiceLoader.load(Provider::class.java)
-                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\")"
+                // fileCollection.from("comment-only")
+                val from = "ordinary-variable"
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\")"
             "#,
         )
         .unwrap();
