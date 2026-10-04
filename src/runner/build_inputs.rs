@@ -101,6 +101,7 @@ const ANDROID_GRADLE_RELATIVE_USER_HOME_CACHE_DISABLED_REASON: &str =
     "relative GRADLE_USER_HOME resolution is context-dependent; cache reuse is disabled";
 const ANDROID_GRADLE_LOCAL_BUILD_LOGIC_CACHE_DISABLED_REASON: &str =
     "local Gradle build logic inputs are not modeled; cache reuse is disabled";
+const ANDROID_GRADLE_APP_SCRIPT_IO_CACHE_DISABLED_REASON: &str = "Android Gradle app script uses unmodeled file, environment, network, or process I/O; cache reuse is disabled";
 const ANDROID_GRADLE_GLOBAL_ENVIRONMENT_NAMES: &[&str] = &[
     "GRADLE_HOME",
     "GRADLE_OPTS",
@@ -1019,6 +1020,8 @@ pub fn android_preview_cache_policy(
         android_dynamic_dependency_cache_disabled_reason(&root, &native)?;
     let local_build_logic_disabled_reason =
         android_gradle_local_build_logic_cache_disabled_reason(&native);
+    let app_script_io_disabled_reason =
+        android_gradle_app_script_io_cache_disabled_reason(&root, &native)?;
     let global_configuration_disabled_reason =
         android_gradle_global_configuration_cache_disabled_reason(&root);
     let relative_user_home_disabled_reason =
@@ -1062,6 +1065,7 @@ pub fn android_preview_cache_policy(
             verification_disabled_reason,
             dynamic_dependency_disabled_reason,
             local_build_logic_disabled_reason,
+            app_script_io_disabled_reason,
             global_configuration_disabled_reason,
             relative_user_home_disabled_reason,
             signing_disabled_reason,
@@ -1151,6 +1155,8 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         android_dynamic_dependency_cache_disabled_reason(&snapshot.root, &native)?;
     let local_build_logic_disabled_reason =
         android_gradle_local_build_logic_cache_disabled_reason(&native);
+    let app_script_io_disabled_reason =
+        android_gradle_app_script_io_cache_disabled_reason(&snapshot.root, &native)?;
     let global_configuration_disabled_reason =
         android_gradle_global_configuration_cache_disabled_reason(&snapshot.root);
     native
@@ -1176,6 +1182,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         verification_disabled_reason,
         dynamic_dependency_disabled_reason,
         local_build_logic_disabled_reason,
+        app_script_io_disabled_reason,
         global_configuration_disabled_reason,
         signing_policy.disabled_reason,
         build_script_disabled_reason,
@@ -1666,6 +1673,280 @@ fn android_gradle_local_build_logic_cache_disabled_reason(native: &NativeInputs)
         .keys()
         .any(|path| is_android_gradle_local_build_logic_input(path))
         .then(|| ANDROID_GRADLE_LOCAL_BUILD_LOGIC_CACHE_DISABLED_REASON.into())
+}
+
+fn android_gradle_app_script_io_cache_disabled_reason(
+    root: &Path,
+    native: &NativeInputs,
+) -> Result<Option<String>> {
+    for relative in native
+        .files
+        .keys()
+        .filter(|path| is_android_gradle_app_script_input(path))
+    {
+        let source = fs::read_to_string(root.join(relative))
+            .with_context(|| format!("reading Android Gradle app script {relative}"))?;
+        if contains_android_gradle_unmodeled_io(&source) {
+            return Ok(Some(format!(
+                "{ANDROID_GRADLE_APP_SCRIPT_IO_CACHE_DISABLED_REASON}: '{relative}'"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn is_android_gradle_app_script_input(path: &str) -> bool {
+    let path = Path::new(path);
+    let normalized = path.to_string_lossy();
+    path.starts_with("mobile/android/gradle")
+        && (normalized.ends_with(".gradle") || normalized.ends_with(".gradle.kts"))
+        && !is_android_gradle_local_build_logic_input(&normalized)
+}
+
+const ANDROID_GRADLE_MANAGED_PROPERTIES: &[&str] =
+    &["gpui.abis", "gpui.buildDir", "gpui.jniLibsDir"];
+const ANDROID_GRADLE_MANAGED_ENVIRONMENT: &[&str] = &["GPUI_ANDROID_ABIS", "ANDROID_NDK_HOME"];
+const ANDROID_GRADLE_FILE_IO_IDENTIFIERS: &[&str] = &[
+    "FileInputStream",
+    "FileOutputStream",
+    "FileReader",
+    "FileWriter",
+    "RandomAccessFile",
+    "FileChannel",
+    "Files",
+    "fileTree",
+    "zipTree",
+    "tarTree",
+    "fromFile",
+    "fromUri",
+    "readText",
+    "readBytes",
+    "writeText",
+    "writeBytes",
+    "getText",
+    "setText",
+    "withReader",
+    "withWriter",
+    "withInputStream",
+    "withOutputStream",
+    "appendText",
+    "appendBytes",
+    "readLines",
+    "eachLine",
+    "forEachLine",
+    "inputStream",
+    "outputStream",
+    "newInputStream",
+    "newOutputStream",
+    "newBufferedReader",
+    "newBufferedWriter",
+    "exists",
+    "isFile",
+    "isDirectory",
+    "listFiles",
+    "walk",
+    "walkTopDown",
+    "walkBottomUp",
+    "readAttributes",
+    "copy",
+    "sync",
+    "ant",
+];
+const ANDROID_GRADLE_NETWORK_IDENTIFIERS: &[&str] = &[
+    "URL",
+    "URI",
+    "URLClassLoader",
+    "HttpURLConnection",
+    "URLConnection",
+    "HttpClient",
+    "HttpRequest",
+    "HttpResponse",
+    "OkHttpClient",
+    "Socket",
+    "ServerSocket",
+    "DatagramSocket",
+    "uri",
+];
+
+fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
+    if gradle_provider_call_uses_unmodeled_value(
+        source,
+        "gradleProperty",
+        ANDROID_GRADLE_MANAGED_PROPERTIES,
+    ) || gradle_provider_call_uses_unmodeled_value(
+        source,
+        "environmentVariable",
+        ANDROID_GRADLE_MANAGED_ENVIRONMENT,
+    ) {
+        return true;
+    }
+
+    if [
+        &["System", "getenv"][..],
+        &["System", "getProperty"][..],
+        &["System", "getProperties"][..],
+        &["System", "setProperty"][..],
+        &["System", "clearProperty"][..],
+        &["project", "property"][..],
+        &["gradle", "startParameter", "projectProperties"][..],
+    ]
+    .iter()
+    .any(|sequence| gradle_contains_identifier_sequence(source, sequence))
+        || gradle_contains_identifier(source, "findProperty")
+        || gradle_contains_identifier(source, "systemProperty")
+        || gradle_contains_identifier(source, "projectProperties")
+        || gradle_contains_identifier(source, "ProcessBuilder")
+        || gradle_contains_identifier(source, "Runtime")
+        || gradle_contains_identifier(source, "exec")
+        || gradle_contains_identifier(source, "javaexec")
+        || gradle_contains_identifier(source, "commandLine")
+        || gradle_contains_identifier_sequence(source, &["apply", "from"])
+        || gradle_contains_identifier(source, "includeBuild")
+    {
+        return true;
+    }
+
+    if ANDROID_GRADLE_NETWORK_IDENTIFIERS
+        .iter()
+        .any(|identifier| gradle_contains_identifier(source, identifier))
+    {
+        return true;
+    }
+
+    ANDROID_GRADLE_FILE_IO_IDENTIFIERS.iter().any(|identifier| {
+        gradle_contains_identifier(source, identifier)
+            && !android_gradle_identifier_is_managed_io(source, identifier)
+    })
+}
+
+fn android_gradle_identifier_is_managed_io(source: &str, identifier: &str) -> bool {
+    match identifier {
+        "FileInputStream" => {
+            gradle_contains_identifier_sequence(source, &["keystoreProperties", "load"])
+                && gradle_call_has_string_argument(source, "FileInputStream", "keystore.properties")
+        }
+        "inputStream" => {
+            source.contains("ANDROID_NDK_HOME")
+                && source.contains("ndkDirectory")
+                && gradle_call_has_string_argument(source, "resolve", "source.properties")
+        }
+        _ => false,
+    }
+}
+
+fn gradle_provider_call_uses_unmodeled_value(
+    source: &str,
+    method: &str,
+    managed_values: &[&str],
+) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &source[position..end] == method
+                && let Some(argument) = gradle_first_string_argument(source, end)
+                && !managed_values.contains(&argument.as_str())
+            {
+                return true;
+            }
+            if &source[position..end] == method
+                && gradle_call_is_non_literal_or_missing_argument(source, end)
+            {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_call_has_string_argument(source: &str, method: &str, expected: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &source[position..end] == method
+                && gradle_first_string_argument(source, end).as_deref() == Some(expected)
+            {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_call_is_non_literal_or_missing_argument(source: &str, method_end: usize) -> bool {
+    let Some(opening) = gradle_skip_trivia(source, method_end) else {
+        return true;
+    };
+    source.as_bytes().get(opening) != Some(&b'(')
+        || gradle_skip_trivia(source, opening + 1)
+            .and_then(|argument| source.as_bytes().get(argument))
+            .is_none_or(|byte| !matches!(byte, b'"' | b'\''))
+}
+
+fn gradle_first_string_argument(source: &str, method_end: usize) -> Option<String> {
+    let opening = gradle_skip_trivia(source, method_end)?;
+    if source.as_bytes().get(opening) != Some(&b'(') {
+        return None;
+    }
+    let argument = gradle_skip_trivia(source, opening + 1)?;
+    let quote = *source.as_bytes().get(argument)?;
+    if !matches!(quote, b'"' | b'\'') {
+        return None;
+    }
+    let closing = gradle_skip_string(source, argument)?;
+    let width = if quote == b'"' && source.as_bytes().get(argument..argument + 3) == Some(b"\"\"\"")
+    {
+        3
+    } else {
+        1
+    };
+    let value = &source[argument + width..closing - width];
+    (!value.contains('\\') && !value.contains("${")).then(|| value.to_owned())
+}
+
+fn gradle_contains_identifier_sequence(source: &str, sequence: &[&str]) -> bool {
+    if sequence.is_empty() {
+        return false;
+    }
+    let mut matched = 0;
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            if identifier == sequence[matched] {
+                matched += 1;
+                if matched == sequence.len() {
+                    return true;
+                }
+            } else {
+                matched = usize::from(identifier == sequence[0]);
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
 }
 
 fn is_android_gradle_local_build_logic_input(path: &str) -> bool {
@@ -5418,6 +5699,94 @@ mod tests {
         fs::write(&ordinary_app_source, "class Ordinary\n").unwrap();
         let native = NativeInputs::scan(root.path()).unwrap();
         assert!(android_gradle_local_build_logic_cache_disabled_reason(&native).is_none());
+    }
+
+    #[test]
+    fn ordinary_android_gradle_app_script_io_disables_only_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        let script = app.join("build.gradle.kts");
+
+        fs::write(
+            &script,
+            r#"
+                val gpuiAbis = providers.gradleProperty("gpui.abis")
+                val buildDir = providers.gradleProperty("gpui.buildDir")
+                val jniDir = providers.gradleProperty("gpui.jniLibsDir")
+                val ndkHome = providers.environmentVariable("ANDROID_NDK_HOME")
+                val ndkDirectory = file(ndkHome.get())
+                val properties = java.util.Properties().apply {
+                    ndkDirectory.resolve("source.properties").inputStream().use { load(it) }
+                }
+            "#,
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
+
+        for source in [
+            "val value = System.getenv(\"CUSTOM_INPUT\")",
+            "val value = providers.gradleProperty(\"custom.input\")",
+            "val value = file(\"config.json\").readText()",
+            "val value = URL(\"https://example.test/config.json\")",
+            "tasks.register(\"probe\") { exec { commandLine(\"tool\") } }",
+            "repositories { maven { url = uri(\"https://example.test/maven\") } }",
+        ] {
+            fs::write(&script, source).unwrap();
+            let native = NativeInputs::scan(root.path()).unwrap();
+            let reason = android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .unwrap_or_else(|| panic!("unmodeled Gradle I/O was missed: {source}"));
+            assert!(reason.contains(ANDROID_GRADLE_APP_SCRIPT_IO_CACHE_DISABLED_REASON));
+            assert!(reason.contains("mobile/android/gradle/app/build.gradle.kts"));
+        }
+
+        fs::write(
+            &script,
+            r#"
+                // System.getenv("CUSTOM_INPUT") and URL("https://example.test")
+                val text = "file(\"config.json\").readText()"
+            "#,
+        )
+        .unwrap();
+        let ordinary_source = root
+            .path()
+            .join("mobile/android/gradle/app/src/main/kotlin/Ordinary.kt");
+        fs::create_dir_all(ordinary_source.parent().unwrap()).unwrap();
+        fs::write(
+            &ordinary_source,
+            "class Ordinary { val value = System.getenv(\"CUSTOM_INPUT\") }\n",
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
+
+        fs::write(
+            &script,
+            r#"
+                val ndkHome = providers.environmentVariable("ANDROID_NDK_HOME")
+                val keystoreProperties = java.util.Properties()
+                keystoreProperties.load(FileInputStream("keystore.properties"))
+                val ndkDirectory = file("ndk")
+                ndkDirectory.resolve("source.properties").inputStream()
+            "#,
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
