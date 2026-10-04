@@ -7,8 +7,9 @@ host sysroot 和 Clang builtin headers 内容；PR #265 又纳入项目实际选
 build-tools package 内容；PR #267 为 Gradle Android plugin/dependency artifacts 加入 SHA-256
 dependency verification metadata，并把严格校验状态作为 cache reuse 前置条件；PR #269 又纳入
 实际 Java runtime 内容。PR #295 为已知 Gradle global user-home 配置/注入环境增加 cache bypass；PR #296
-禁止 cache-disabled Android build/preview 发布新的可复用 artifact manifest；PR #298 又检查 wrapper 解压
-distribution 的 `init.d` 自定义脚本入口。
+禁止 cache-disabled Android build/preview 发布新的可复用 artifact manifest；PR #298 检查 wrapper 解压
+distribution 的 `init.d` 自定义脚本入口；PR #300 将标准 layout 下所有已安装 distribution 内容纳入
+Android toolchain fingerprint/BuildKey。
 
 ## 后续 T05 输入索引证据（2026-10-03）
 
@@ -126,8 +127,9 @@ distribution 的 `init.d` 自定义脚本入口。
 - PR #296（`8e44e44`）让 cache-disabled 的普通 Android build 与 live preview 不发布新的 verified artifact
   manifest；普通 build 直接返回存在且可用的 APK。回归确认 bypass 不覆盖旧 manifest，旧 hash 在输出变化后
   验证失败，从而避免配置移除后命中 bypass 构建产物。
-- #295 先按 build plan 检查已知用户级入口，#298 再覆盖 wrapper distribution 的 `init.d`；两者都不冻结
-  user home，也不闭合 plan 后并发修改、distribution 其他文件、任意 Gradle/plugin/build-script I/O 或远端仓库状态。
+- #295 先按 build plan 检查已知用户级入口，#298 检查 wrapper distribution 的 `init.d`，#300 再指纹化标准
+  wrapper layout 下的 distribution 内容；这些切片都不冻结或在 build 前后重核验 user home，因此不闭合
+  plan 后并发修改、任意 Gradle/plugin/build-script I/O 或远端仓库状态。
 
 ## T06 Gradle wrapper distribution init scripts（2026-10-04）
 
@@ -138,6 +140,18 @@ distribution 的 `init.d` 自定义脚本入口。
   可复用 manifest。本机实际 Gradle 9.4.1/9.7.0 解压目录只有官方 `readme.txt`，cache-hit smoke 仍通过。
 - 这只覆盖 Gradle installation init scripts，不 fingerprint 整个解压 distribution，也不冻结 wrapper home；
   plan 后的配置变化、任意 Gradle 插件/build-script I/O 和远端仓库状态仍未闭合。
+
+## T06 Gradle wrapper distribution content fingerprint（2026-10-04）
+
+- PR #300（`b0767ab`）将标准 `distributionBase=GRADLE_USER_HOME` / `distributionPath=wrapper/dists` 下
+  所有已安装 distribution 的相对路径、目录项和文件内容摘要纳入 Android toolchain identity/BuildKey；
+  安装目录旁的普通状态/ZIP 文件也纳入，瞬态 `.lck` 文件排除。扫描包括非活动版本，路径摘要不含 user-home
+  绝对路径。
+- wrapper properties 缺少固定 checksum、使用非标准/重复/escaped 安装布局，或当前尚无已安装 distribution 时，
+  cache reuse bypass；symlink、special entry、读取/编码失败或超过 100,000 entries / 512 MiB 预算也只
+  bypass cache reuse，普通构建继续。distribution 在该次构建中下载后不为该次 plan 发布可复用 manifest。
+- 本地 fingerprint 使用有界完整内容扫描，每次 Android BuildKey plan 增加文件读取成本；尚无跨平台性能对照。
+  该摘要不冻结 user home，也不在 Gradle 执行前后重核验，因而不解决 plan 后并发变化。
 
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
@@ -229,6 +243,11 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   workspace 446 passed、1 个手动 benchmark ignored，clippy/build/Windows target check/fmt/package list 通过。
   本机 Android debug/release APK 与 CLI miss→hit smoke 通过；PR 与 push 两套 Linux/macOS/Windows、
   Android/desktop template、baseline-driver 全绿；squash 为 `a10dd0c`，无版本发布或 tag。
+- PR #300 的 installed distribution contents/marker 替换、inactive distribution、标准路径策略、escaped/nonstandard
+  layout bypass、超预算与 symlink fail-closed 回归通过；workspace 448 passed、1 个手动 benchmark ignored，
+  focused Gradle/toolchain tests、clippy/build/Windows target check/fmt/design docs/package list 通过。Pinned
+  Gradle wrapper probe、本机 Android debug/release APK 与 CLI miss→hit smoke 通过；PR 与 push 两套 CI 全绿，
+  squash 为 `b0767ab`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -237,13 +256,14 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   Gradle APK 打包、manifest 校验和第二次 cache hit；
 - Android emulator/device 安装启动、release/custom signing、cache 并发订阅/取消引用和容量
   清理仍未覆盖。
-- #295/#298 的 global Gradle gate 只在 build plan 时检查已知 user-home 配置入口、列举的 Gradle/JVM
-  环境注入及 wrapper distribution 的 `init.d`；它不锁定/复制 user home，检查后并发修改仍可能竞态。
-  除 init.d 外，wrapper 解压 distribution 的文件没有指纹化；未识别环境变量和任意 build-script I/O 仍是未建模输入。
+- #295/#298/#300 的 global Gradle gate 在 build plan 检查已知 user-home 配置/环境入口、`init.d`，并对标准
+  wrapper layout 中已安装 distribution 内容做有界 fingerprint；它不锁定/复制或在 build 前后重核验 user home，
+  检查后并发修改仍可能竞态。非标准 wrapper layout 只 bypass；未识别环境变量和任意 build-script I/O 仍未建模。
 - cache-hit CI 子流程主动排除了 root user-home 配置，因此它验证干净配置下的 cache hit；存在上述 global
   配置时预期是普通构建成功但 cache reuse bypass，不把该情形算作设备或完整 Gradle 输入验收。
-- wrapper checksum 只校验 Gradle distribution ZIP；它不 fingerprint Gradle runtime 的所有解压文件、
-  AGP/plugins、远端仓库状态、NDK/build-script I/O，也不替代完整 Android 构建输入闭包或设备验收。
+- wrapper checksum 校验 Gradle distribution ZIP；#300 另对当前已安装 wrapper distributions 做有界内容摘要，
+  但不覆盖 AGP/plugins 的任意运行时 I/O、远端仓库状态、NDK/build-script I/O，也不替代完整 Android 构建输入
+  闭包或设备验收。
 - 动态依赖扫描是保守的静态字符串检查；它能把已知不稳定声明降级为正常 cache miss，但不解析完整
   Gradle DSL，也不证明 AGP/plugin 仓库制品、远端元数据或 build-script I/O 已纳入输入闭包。
 - NDK fingerprint 现在包含当前 host prebuilt 的 clang/clang++、lld/ld.lld、LLVM archiver/inspection
