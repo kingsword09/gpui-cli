@@ -572,7 +572,9 @@ allowlist 遗漏已由 #149 修复；#283 又补齐 workspace wrapper 与所选 
 `CXXFLAGS`；#289 将 Rust wrapper、`CC`、`CXX`、`AR` 与所选 target linker 统一纳入有界 executable
 content fingerprint，命令参数、shell 语法、不可执行/不可读取/竞态/非 Unicode/超预算输入只 bypass
 cache reuse，普通构建继续；#291 再纳入显式 `RUSTC` selector 内容与 `RUSTUP_TOOLCHAIN`/
-`RUSTC_BOOTSTRAP`；#293 纳入 `CARGO_BUILD_RUSTFLAGS` 及 dev/release profile overrides。其他输入遗漏、
+`RUSTC_BOOTSTRAP`；#293 纳入 `CARGO_BUILD_RUSTFLAGS` 及 dev/release profile overrides。#295 对
+Gradle user-home `gradle.properties`、`init.gradle(.kts)`/`init.d` 与 Gradle/JVM 注入环境禁用 Android
+cache reuse；#296 又保证 bypass build/preview 不发布新的 reusable artifact manifest。其他输入遗漏、
 跨命令共享构建和冻结执行边界仍有效，
 见[当前审计](current-status.md)。
 
@@ -917,6 +919,17 @@ Android toolchain identity 目前还会对项目选定的 SDK platform/build-too
 禁用 cache reuse。Gradle plugin/dependency artifacts 另由模板内 Gradle verification metadata 固定
 SHA-256；metadata 缺失、不严格或未完整哈希时 cache bypass。该内容闭包不包括所有已安装 SDK
 package、远端仓库可用性/状态、未触发的可选制品或任意 build-script I/O；有界预热仍未实现。
+
+PR #295 增加 Android Gradle global-config cache gate：解析显式 `GRADLE_USER_HOME`，否则使用
+平台默认 user home；已知的 `gradle.properties`、`init.gradle`、`init.gradle.kts`、`init.d`，或
+`GRADLE_HOME`、Gradle/JVM options 与 `ORG_GRADLE_PROJECT_*` 注入环境，会让普通 build 和 preview
+只关闭 artifact cache reuse，不阻止构建。home 无法安全解析时也 fail closed；诊断不写入路径、属性名或
+配置值。PR #296 保证被 gate 的 Android build/preview 不发布新的可复用 manifest，非复用普通 build
+直接返回 APK；既有 manifest 不会被 bypass 产物覆盖。Android cache-hit smoke 使用临时 Gradle user home，
+只共享已下载 caches/wrapper 目录，不继承 user-home 根配置/init 脚本。
+
+这只是已知全局配置面的保守拒绝，不读取或冻结配置内容；plan 之后的并发修改、wrapper 解压 distribution
+内部未发现的 init 脚本、任意 Gradle/plugin/build-script 文件/环境/网络读集与远端仓库状态仍未闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
