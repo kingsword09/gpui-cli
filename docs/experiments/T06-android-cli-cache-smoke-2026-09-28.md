@@ -7,7 +7,8 @@ host sysroot 和 Clang builtin headers 内容；PR #265 又纳入项目实际选
 build-tools package 内容；PR #267 为 Gradle Android plugin/dependency artifacts 加入 SHA-256
 dependency verification metadata，并把严格校验状态作为 cache reuse 前置条件；PR #269 又纳入
 实际 Java runtime 内容。PR #295 为已知 Gradle global user-home 配置/注入环境增加 cache bypass；PR #296
-禁止 cache-disabled Android build/preview 发布新的可复用 artifact manifest。
+禁止 cache-disabled Android build/preview 发布新的可复用 artifact manifest；PR #298 又检查 wrapper 解压
+distribution 的 `init.d` 自定义脚本入口。
 
 ## 后续 T05 输入索引证据（2026-10-03）
 
@@ -125,8 +126,18 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - PR #296（`8e44e44`）让 cache-disabled 的普通 Android build 与 live preview 不发布新的 verified artifact
   manifest；普通 build 直接返回存在且可用的 APK。回归确认 bypass 不覆盖旧 manifest，旧 hash 在输出变化后
   验证失败，从而避免配置移除后命中 bypass 构建产物。
-- 该切片按 build plan 检查已知用户级入口，不冻结 home，也不闭合 wrapper 解压目录内部未发现的 init 脚本、
-  plan 后并发修改、任意 Gradle/plugin/build-script I/O 或远端仓库状态。
+- #295 先按 build plan 检查已知用户级入口，#298 再覆盖 wrapper distribution 的 `init.d`；两者都不冻结
+  user home，也不闭合 plan 后并发修改、distribution 其他文件、任意 Gradle/plugin/build-script I/O 或远端仓库状态。
+
+## T06 Gradle wrapper distribution init scripts（2026-10-04）
+
+- PR #298（`a10dd0c`）在 user-home cache gate 中检查 `wrapper/dists/<distribution>/<hash>/<gradle-root>/init.d`，
+  覆盖所有已安装 distribution，而不只项目当前版本。目录遍历共享最多 4096 个 entry 的预算；仅普通
+  `readme.txt` 放行，其他 entry、符号链接、不可读状态或超预算只关闭 cache reuse。
+- 不读取脚本原文或发行版其他文件内容，不记录绝对路径；普通 Android build/preview 继续，只是不消费/发布
+  可复用 manifest。本机实际 Gradle 9.4.1/9.7.0 解压目录只有官方 `readme.txt`，cache-hit smoke 仍通过。
+- 这只覆盖 Gradle installation init scripts，不 fingerprint 整个解压 distribution，也不冻结 wrapper home；
+  plan 后的配置变化、任意 Gradle 插件/build-script I/O 和远端仓库状态仍未闭合。
 
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
@@ -143,7 +154,8 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   工具缓存仍复用已配置目录，避免读写用户已有 signing key。
 - cache-hit 子流程用临时 `GRADLE_USER_HOME`；只将原 user home 的 `caches` 与 `wrapper` 目录链接进来，
   不带入根目录 `gradle.properties`/`init.gradle(.kts)`/`init.d`，并清理显式 Gradle/JVM 注入变量，使 smoke
-  验证的是无未建模 global config 时的真实 miss→hit 路径。
+  验证的是无未建模 global config 时的真实 miss→hit 路径；wrapper 链接保留 distribution，cache gate 仍会
+  检查该 distribution 内部的 `init.d`。
 - 生成的 `gradle-wrapper.properties` 固定 Gradle 9.4.1 官方 checksum
   `2ab2958f2a1e51120c326cad6f385153bb11ee93b3c216c5fccebfdfbb7ec6cb`；BuildKey 已哈希该 properties
   文件，缺少、重复或畸形 checksum 时 CLI 仍正常构建但不消费/发布可复用 artifact manifest。
@@ -213,6 +225,10 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   ignored，clippy/build/Windows target check/fmt/design docs/package list 通过。本机 Android debug/release
   APK 与 CLI miss→hit smoke 通过；PR 与 push 两套 Linux/macOS/Windows、Android/desktop template、
   baseline-driver 全绿；squash 为 `8e44e44`，无版本发布或 tag。
+- PR #298 的 wrapper distribution init-script presence、official README allowlist、custom-script bypass 回归通过；
+  workspace 446 passed、1 个手动 benchmark ignored，clippy/build/Windows target check/fmt/package list 通过。
+  本机 Android debug/release APK 与 CLI miss→hit smoke 通过；PR 与 push 两套 Linux/macOS/Windows、
+  Android/desktop template、baseline-driver 全绿；squash 为 `a10dd0c`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -221,9 +237,9 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   Gradle APK 打包、manifest 校验和第二次 cache hit；
 - Android emulator/device 安装启动、release/custom signing、cache 并发订阅/取消引用和容量
   清理仍未覆盖。
-- #295 的 global Gradle gate 只在 build plan 时检查已知 user-home 配置入口与列举的 Gradle/JVM
-  环境注入；它不锁定/复制 user home，检查后并发修改仍可能竞态。若未设置 `GRADLE_HOME`，wrapper 已解压
-  distribution 内自带/用户修改的 init 脚本没有递归扫描；未识别环境变量和任意 build-script I/O 仍是未建模输入。
+- #295/#298 的 global Gradle gate 只在 build plan 时检查已知 user-home 配置入口、列举的 Gradle/JVM
+  环境注入及 wrapper distribution 的 `init.d`；它不锁定/复制 user home，检查后并发修改仍可能竞态。
+  除 init.d 外，wrapper 解压 distribution 的文件没有指纹化；未识别环境变量和任意 build-script I/O 仍是未建模输入。
 - cache-hit CI 子流程主动排除了 root user-home 配置，因此它验证干净配置下的 cache hit；存在上述 global
   配置时预期是普通构建成功但 cache reuse bypass，不把该情形算作设备或完整 Gradle 输入验收。
 - wrapper checksum 只校验 Gradle distribution ZIP；它不 fingerprint Gradle runtime 的所有解压文件、
