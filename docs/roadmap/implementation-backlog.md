@@ -578,7 +578,9 @@ cache reuse；#296 又保证 bypass build/preview 不发布新的 reusable artif
 Gradle wrapper distributions 的 `init.d` 并对自定义入口 bypass；#300 将标准 wrapper layout 下所有已安装
 distribution 内容纳入 Android toolchain fingerprint，并对非标准布局/缺失安装/有界扫描失败 bypass；#302 在
 普通 build 与 matrix/live preview 的复用前及 Gradle 后重核验 distribution/global gate，变化时只保留普通 APK；
-#304 对本地 `buildSrc`/`build-logic` 自定义 Gradle plugin 输入直接 bypass cache reuse。
+#304 对本地 `buildSrc`/`build-logic` 自定义 Gradle plugin 输入直接 bypass cache reuse；#306 对普通
+Android app Gradle script 的已知文件/环境/网络/进程 I/O marker 直接 bypass cache reuse，保留已建模
+GPUI/NDK/签名读取与普通构建路径。
 其他输入遗漏、
 跨命令共享构建和冻结执行边界仍有效，
 见[当前审计](current-status.md)。
@@ -957,6 +959,12 @@ Gradle cwd 解析分叉。
 #304 对 `mobile/android/gradle/buildSrc` 与 `build-logic` 下的任何已扫描文件保守关闭 cache reuse，不读取 plugin
 源码内容，也不将这些路径加入额外 fingerprint；普通构建继续。这样只处理本地 convention/plugin build logic
 这一已知执行入口，普通 app Gradle script 的任意文件/环境/网络读集与远端仓库状态仍未闭合。
+
+#306 对 Android root 下非 `buildSrc`/`build-logic` 的 `.gradle`/`.gradle.kts` 脚本增加保守静态
+I/O marker gate：未建模的 provider/env、文件读取、网络/进程、`apply from` 或 `includeBuild`
+入口只关闭 cache reuse，普通构建和 preview 继续；GPUI ABI/输出目录、NDK `source.properties`
+和受控签名读取作为当前已建模例外，注释、字符串和普通 app source 不触发。该扫描不是完整
+Gradle 解析器或运行时读集追踪，未识别的 plugin/script I/O 与远端仓库状态仍需后续闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
