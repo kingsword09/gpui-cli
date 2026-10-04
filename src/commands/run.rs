@@ -10,7 +10,7 @@ use crate::runner::android::AndroidRunner;
 use crate::runner::build_cache::{BuildCacheLookup, BuildOutputLock, lookup_verified};
 use crate::runner::build_coordinator::{BuildCoordinatorRole, coordinate_build};
 use crate::runner::build_inputs::{
-    DesktopBuildPlan, android_build_plan, desktop_build_plan, ios_build_plan,
+    AndroidBuildPlan, DesktopBuildPlan, android_build_plan, desktop_build_plan, ios_build_plan,
 };
 use crate::runner::build_manifest::BuildArtifactManifest;
 use crate::runner::ios::IosSimulatorRunner;
@@ -1033,6 +1033,12 @@ fn lookup_verified_android_apk(
     }
 }
 
+fn android_gradle_distribution_identity_matches(plan: &AndroidBuildPlan) -> bool {
+    plan.gradle_distribution_identity
+        .as_ref()
+        .is_some_and(|identity| identity.matches_current())
+}
+
 /// Builds Android outputs or reuses a verified default-debug APK and JNI tree.
 pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     if !project.android_gradle_dir().exists() {
@@ -1042,7 +1048,8 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     let plan = android_build_plan(&project.root, release, &abis)?;
     let layout = &plan.layout;
 
-    let reusable = plan.cache_hit_disabled_reason.is_none();
+    let mut reusable = plan.cache_hit_disabled_reason.is_none()
+        && android_gradle_distribution_identity_matches(&plan);
     if let Some(identity) = &plan.signing_identity {
         identity.verify_unchanged()?;
     }
@@ -1050,11 +1057,18 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
         identity.verify_unchanged()?;
     }
     let role = coordinated_build(layout, &plan.key, reusable, || {
+        if reusable && !android_gradle_distribution_identity_matches(&plan) {
+            reusable = false;
+        }
         if let Some(identity) = &plan.signing_identity {
             identity.verify_unchanged()?;
         }
         let cache_lookup = if let Some(reason) = &plan.cache_hit_disabled_reason {
             AndroidBuildCacheLookup::Miss(reason.clone())
+        } else if !reusable {
+            AndroidBuildCacheLookup::Miss(
+                crate::runner::build_inputs::ANDROID_GRADLE_DISTRIBUTION_CHANGED_REASON.into(),
+            )
         } else {
             if let Some(identity) = &plan.debug_keystore_identity {
                 identity.verify_unchanged()?;
@@ -1066,23 +1080,32 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
         };
         match cache_lookup {
             AndroidBuildCacheLookup::Hit { manifest, .. } => {
-                if let Some(identity) = &plan.debug_keystore_identity {
-                    identity.verify_unchanged()?;
+                if !android_gradle_distribution_identity_matches(&plan) {
+                    reusable = false;
+                    println!(
+                        "  {} Android cache miss: {}",
+                        "→".blue(),
+                        crate::runner::build_inputs::ANDROID_GRADLE_DISTRIBUTION_CHANGED_REASON
+                    );
+                } else {
+                    if let Some(identity) = &plan.debug_keystore_identity {
+                        identity.verify_unchanged()?;
+                    }
+                    if let Some(identity) = &plan.signing_identity {
+                        identity.verify_unchanged()?;
+                        ensure_installable_apk(&apk_path_at(
+                            project,
+                            release,
+                            layout.android_gradle_build_dir.as_deref(),
+                        )?)?;
+                    }
+                    println!(
+                        "  {} Android BuildKey cache hit: {} verified artifact(s)",
+                        "✓".green(),
+                        manifest.files.len()
+                    );
+                    return Ok(());
                 }
-                if let Some(identity) = &plan.signing_identity {
-                    identity.verify_unchanged()?;
-                    ensure_installable_apk(&apk_path_at(
-                        project,
-                        release,
-                        layout.android_gradle_build_dir.as_deref(),
-                    )?)?;
-                }
-                println!(
-                    "  {} Android BuildKey cache hit: {} verified artifact(s)",
-                    "✓".green(),
-                    manifest.files.len()
-                );
-                return Ok(());
             }
             AndroidBuildCacheLookup::Miss(reason) => {
                 println!("  {} Android cache miss: {reason}", "→".blue());
@@ -1150,6 +1173,14 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
         if let Some(identity) = &plan.signing_identity {
             identity.verify_unchanged()?;
         }
+        if reusable && !android_gradle_distribution_identity_matches(&plan) {
+            reusable = false;
+            println!(
+                "  {} Android cache miss: {}",
+                "→".blue(),
+                crate::runner::build_inputs::ANDROID_GRADLE_DISTRIBUTION_CHANGED_REASON
+            );
+        }
         let manifest = publish_android_build_manifest_if_reusable(layout, &apk, reusable)?;
         if let Some(identity) = &plan.signing_identity {
             identity.verify_unchanged()?;
@@ -1164,7 +1195,12 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
         println!("  {} {}", "✓".green(), apk.display());
         Ok(())
     })?;
-    if role == Some(BuildCoordinatorRole::Follower)
+    if reusable && !android_gradle_distribution_identity_matches(&plan) {
+        reusable = false;
+    }
+    if reusable
+        && role == Some(BuildCoordinatorRole::Follower)
+        && android_gradle_distribution_identity_matches(&plan)
         && let AndroidBuildCacheLookup::Hit { manifest } =
             lookup_verified_android_apk(project, layout, &plan.key, release)
     {

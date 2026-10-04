@@ -42,6 +42,7 @@ use crate::runner::build_coordinator::{
     coordinate_preview_build_with_leader_control,
 };
 use crate::runner::build_inputs::{
+    ANDROID_GRADLE_DISTRIBUTION_CHANGED_REASON, AndroidGradleDistributionIdentity,
     android_custom_signing_fingerprint, android_debug_keystore_hash,
 };
 use crate::runner::build_manifest::BuildArtifactManifest;
@@ -110,6 +111,7 @@ pub struct PreviewBuildOutputs {
     pub cache_hit_disabled_reason: Option<String>,
     pub android_debug_keystore_hash: Option<String>,
     pub android_signing_fingerprint: Option<String>,
+    pub android_gradle_distribution_identity: Option<AndroidGradleDistributionIdentity>,
     pub jni_libs_dir: Option<PathBuf>,
     pub gradle_build_dir: Option<PathBuf>,
     pub ios_derived_data_dir: Option<PathBuf>,
@@ -128,6 +130,18 @@ impl PreviewBuildOutputs {
                 .ok(),
             android_signing_fingerprint: std::env::var("GPUI_PREVIEW_ANDROID_SIGNING_FINGERPRINT")
                 .ok(),
+            android_gradle_distribution_identity: match (
+                std::env::var_os("GPUI_PREVIEW_ANDROID_GRADLE_USER_HOME"),
+                std::env::var("GPUI_PREVIEW_ANDROID_GRADLE_DISTRIBUTION_FINGERPRINT"),
+            ) {
+                (Some(user_home), Ok(fingerprint)) => {
+                    Some(AndroidGradleDistributionIdentity::from_parts(
+                        PathBuf::from(user_home),
+                        fingerprint,
+                    ))
+                }
+                _ => None,
+            },
             jni_libs_dir: std::env::var_os("GPUI_PREVIEW_JNI_LIBS_DIR").map(PathBuf::from),
             gradle_build_dir: std::env::var_os("GPUI_PREVIEW_GRADLE_BUILD_DIR").map(PathBuf::from),
             ios_derived_data_dir: std::env::var_os("GPUI_PREVIEW_IOS_DERIVED_DATA_DIR")
@@ -491,6 +505,23 @@ fn verify_preview_android_output(
         bail!("preview Android artifact manifest does not identify the expected outputs");
     }
     Ok(())
+}
+
+fn verify_android_preview_output_or_unshared(
+    layout: &BuildOutputLayout,
+    key_hash: &str,
+    identity: &AndroidGradleDistributionIdentity,
+    jni_libs_dir: &Path,
+    apk_output_dir: &Path,
+    apk_path: &Path,
+) -> Result<()> {
+    if identity.matches_current() {
+        verify_preview_android_output(layout, key_hash, jni_libs_dir, apk_output_dir)
+    } else if apk_path.is_file() {
+        Ok(())
+    } else {
+        bail!("Gradle finished after its distribution changed but produced no APK")
+    }
 }
 
 fn verify_preview_desktop_output(layout: &BuildOutputLayout, key_hash: &str) -> Result<()> {
@@ -1460,6 +1491,10 @@ fn build_android_apk_live(
         && (outputs.android_debug_keystore_hash.is_some()
             || outputs.android_signing_fingerprint.is_some())
         && outputs.cache_hit_disabled_reason.is_none()
+        && outputs
+            .android_gradle_distribution_identity
+            .as_ref()
+            .is_some_and(AndroidGradleDistributionIdentity::matches_current)
     {
         let jni_libs_dir = outputs
             .jni_libs_dir
@@ -1482,7 +1517,20 @@ fn build_android_apk_live(
                 }
             }
             verify_android_preview_signing_inputs(project, Some(outputs))?;
-            verify_preview_android_output(layout, key_hash, jni_libs_dir, &apk_output_dir)
+            let apk = super::run::apk_path_at(project, false, Some(gradle_build_dir))?;
+            verify_android_preview_output_or_unshared(
+                layout,
+                key_hash,
+                outputs
+                    .android_gradle_distribution_identity
+                    .as_ref()
+                    .context(
+                        "Android preview coordinator requires a Gradle distribution identity",
+                    )?,
+                jni_libs_dir,
+                &apk_output_dir,
+                &apk,
+            )
         };
         coordinate_preview_build_controlled(
             &layout,
@@ -1524,12 +1572,25 @@ fn build_android_apk_live_once(
         .unwrap_or_else(|| project.android_jni_libs_dir());
     let gradle_build_dir = outputs.and_then(|outputs| outputs.gradle_build_dir.clone());
     let cache_key = outputs.and_then(|outputs| outputs.build_key_hash.as_deref());
-    let cache_hit_enabled = outputs.is_some_and(|outputs| {
+    let mut cache_hit_enabled = outputs.is_some_and(|outputs| {
         outputs.cache_hit_disabled_reason.is_none()
             && (outputs.android_debug_keystore_hash.is_some()
                 || outputs.android_signing_fingerprint.is_some())
+            && outputs.android_gradle_distribution_identity.is_some()
             && cache_key.is_some()
     });
+    if cache_hit_enabled
+        && !outputs
+            .and_then(|outputs| outputs.android_gradle_distribution_identity.as_ref())
+            .is_some_and(AndroidGradleDistributionIdentity::matches_current)
+    {
+        cache_hit_enabled = false;
+        println!(
+            "  {} Android preview cache miss: {}",
+            "→".blue(),
+            ANDROID_GRADLE_DISTRIBUTION_CHANGED_REASON
+        );
+    }
     if let Some(outputs) = outputs
         && let Some(reason) = &outputs.cache_hit_disabled_reason
     {
@@ -1568,12 +1629,24 @@ fn build_android_apk_live_once(
                             &[&jni_libs_dir, apk_output_dir],
                         ) =>
                     {
+                        if outputs
+                            .android_gradle_distribution_identity
+                            .as_ref()
+                            .is_some_and(AndroidGradleDistributionIdentity::matches_current)
+                        {
+                            println!(
+                                "  {} Android preview BuildKey cache hit: {}",
+                                "✓".green(),
+                                cache_key.expect("cache hit requires a BuildKey hash")
+                            );
+                            return Ok(Some(apk));
+                        }
+                        cache_hit_enabled = false;
                         println!(
-                            "  {} Android preview BuildKey cache hit: {}",
-                            "✓".green(),
-                            cache_key.expect("cache hit requires a BuildKey hash")
+                            "  {} Android preview cache miss: {}",
+                            "→".blue(),
+                            ANDROID_GRADLE_DISTRIBUTION_CHANGED_REASON
                         );
-                        return Ok(Some(apk));
                     }
                     BuildCacheLookup::Hit(_) => println!(
                         "  {} Android preview cache miss: manifest roots are not usable",
@@ -1625,17 +1698,25 @@ fn build_android_apk_live_once(
 
     check_android_libraries_at(&jni_libs_dir, &project.app_lib_name(), &abis)?;
 
+    let mut gradle = super::run::gradle_command_with_outputs(
+        project,
+        false,
+        &abis,
+        Some(&jni_libs_dir),
+        outputs
+            .as_ref()
+            .and_then(|outputs| outputs.gradle_build_dir.as_deref()),
+    );
+    if cache_hit_enabled
+        && let Some(identity) = outputs
+            .as_ref()
+            .and_then(|outputs| outputs.android_gradle_distribution_identity.as_ref())
+    {
+        gradle.env("GRADLE_USER_HOME", identity.gradle_user_home());
+    }
     run_tool(
         &format!("gradlew {}", gradle_task(false)),
-        &mut super::run::gradle_command_with_outputs(
-            project,
-            false,
-            &abis,
-            Some(&jni_libs_dir),
-            outputs
-                .as_ref()
-                .and_then(|outputs| outputs.gradle_build_dir.as_deref()),
-        ),
+        &mut gradle,
         build,
     )?;
     verify_android_preview_signing_inputs(project, outputs)?;
@@ -1644,6 +1725,19 @@ fn build_android_apk_live_once(
     if let Some(outputs) = outputs
         && let Some(key_hash) = outputs.build_key_hash.as_deref()
     {
+        if cache_hit_enabled
+            && !outputs
+                .android_gradle_distribution_identity
+                .as_ref()
+                .is_some_and(AndroidGradleDistributionIdentity::matches_current)
+        {
+            cache_hit_enabled = false;
+            println!(
+                "  {} Android preview cache miss: {}",
+                "→".blue(),
+                ANDROID_GRADLE_DISTRIBUTION_CHANGED_REASON
+            );
+        }
         if let Some(expected_keystore_hash) = outputs.android_debug_keystore_hash.as_deref() {
             let current_keystore_hash = android_debug_keystore_hash()?
                 .context("default Android debug keystore disappeared during preview build")?;
@@ -3141,5 +3235,77 @@ mod tests {
 
         fs::write(jni.join("libdemo.so"), b"tampered native library").unwrap();
         assert!(verify_preview_android_output(&layout, &key_hash, &jni, &apk_dir).is_err());
+    }
+
+    #[test]
+    fn changed_gradle_distribution_accepts_the_apk_without_publishing_a_manifest() {
+        let user_home = tempfile::tempdir().unwrap();
+        let installation = user_home
+            .path()
+            .join("wrapper/dists/gradle-9.4.1-bin/hash/gradle-9.4.1");
+        fs::create_dir_all(installation.join("lib")).unwrap();
+        fs::write(installation.join("lib/gradle-core.jar"), b"before").unwrap();
+        let original_fingerprint =
+            crate::runner::build_inputs::android_gradle_distribution_fingerprint_for(
+                user_home.path(),
+            )
+            .unwrap();
+        let identity = AndroidGradleDistributionIdentity::from_parts(
+            user_home.path().to_path_buf(),
+            original_fingerprint,
+        );
+
+        let output = tempfile::tempdir().unwrap();
+        let jni = output.path().join("jni/arm64-v8a");
+        let apk_output = output.path().join("gradle/outputs/apk/debug");
+        fs::create_dir_all(&jni).unwrap();
+        fs::create_dir_all(&apk_output).unwrap();
+        fs::write(jni.join("libdemo.so"), b"native library").unwrap();
+        let apk = apk_output.join("app-debug.apk");
+        fs::write(&apk, b"usable APK").unwrap();
+        let layout = BuildOutputLayout {
+            platform: BuildPlatform::Android,
+            key_hash: "e".repeat(64),
+            root: output.path().to_path_buf(),
+            cargo_target_dir: output.path().join("cargo-target"),
+            native_staging_dir: output.path().join("native-staging"),
+            android_jni_dir: Some(jni.clone()),
+            android_gradle_build_dir: Some(output.path().join("gradle")),
+            ios_derived_data_dir: None,
+        };
+        assert!(
+            verify_android_preview_output_or_unshared(
+                &layout,
+                &layout.key_hash,
+                &identity,
+                &jni,
+                &apk_output,
+                &apk,
+            )
+            .is_err()
+        );
+
+        fs::write(
+            installation.join("lib/gradle-core.jar"),
+            b"changed while building",
+        )
+        .unwrap();
+        assert!(
+            verify_android_preview_output_or_unshared(
+                &layout,
+                &layout.key_hash,
+                &identity,
+                &jni,
+                &apk_output,
+                &apk,
+            )
+            .is_ok()
+        );
+        assert!(
+            !output
+                .path()
+                .join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE)
+                .exists()
+        );
     }
 }
