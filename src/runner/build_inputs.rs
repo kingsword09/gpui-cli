@@ -2167,6 +2167,8 @@ const ANDROID_GRADLE_ARCHIVE_CONSTRUCTOR_IDENTIFIERS: &[&str] = &[
     "JarOutputStream",
     "ZipFileSystemProvider",
 ];
+const ANDROID_GRADLE_FILE_BACKED_CONSTRUCTOR_IDENTIFIERS: &[&str] =
+    &["Scanner", "PrintStream", "PrintWriter"];
 
 fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
     if gradle_provider_call_uses_unmodeled_value(
@@ -2201,7 +2203,12 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         return true;
     }
 
-    if gradle_archive_constructor_uses_unmodeled_io(source) {
+    if gradle_constructor_uses_unmodeled_io(source, ANDROID_GRADLE_ARCHIVE_CONSTRUCTOR_IDENTIFIERS)
+        || gradle_constructor_uses_unmodeled_io(
+            source,
+            ANDROID_GRADLE_FILE_BACKED_CONSTRUCTOR_IDENTIFIERS,
+        )
+    {
         return true;
     }
 
@@ -2396,7 +2403,7 @@ fn gradle_file_metadata_api_uses_unmodeled_path(source: &str) -> bool {
     false
 }
 
-fn gradle_archive_constructor_uses_unmodeled_io(source: &str) -> bool {
+fn gradle_constructor_uses_unmodeled_io(source: &str, identifiers: &[&str]) -> bool {
     let mut cursor = 0;
     while let Some(position) = gradle_next_code_position(source, cursor) {
         let bytes = source.as_bytes();
@@ -2406,8 +2413,7 @@ fn gradle_archive_constructor_uses_unmodeled_io(source: &str) -> bool {
                 end += 1;
             }
             let identifier = &source[position..end];
-            if ANDROID_GRADLE_ARCHIVE_CONSTRUCTOR_IDENTIFIERS.contains(&identifier)
-                && gradle_call_has_opening_parenthesis(source, end)
+            if identifiers.contains(&identifier) && gradle_call_has_opening_parenthesis(source, end)
             {
                 return true;
             }
@@ -6541,6 +6547,13 @@ mod tests {
             "val value = JarOutputStream(output)",
             "val value = ZipFileSystemProvider()",
             "val value = FileSystems.newFileSystem(archivePath, loader)",
+            "val value = Scanner(File(configPath))",
+            "val value = java.util.Scanner(Path.of(configPath))",
+            "val value = Scanner(configPath)",
+            "val value = PrintStream(File(outputPath))",
+            "val value = java.io.PrintStream(outputPath)",
+            "val value = PrintWriter(Path.of(outputPath))",
+            "val value = java.io.PrintWriter(outputPath)",
             "val value = javaClass.getResource(\"/config.properties\")",
             "val value = javaClass.getResourceAsStream(\"/config.properties\")",
             "val value = ClassLoader.getSystemResource(\"config.properties\")",
@@ -6609,10 +6622,11 @@ mod tests {
                 // Files.isReadable(path) and Files.getLastModifiedTime(path) and Files.newDirectoryStream(path)
                 // Files.createDirectories(path) and Files.deleteIfExists(path) and path.toRealPath()
                 // ZipFile(\"comment-only.zip\") and FileSystems.newFileSystem(path, loader)
+                // Scanner(File(\"comment-only.txt\")) and PrintWriter(\"comment-only.txt\")
                 // javaClass.getResource("comment-only") and ServiceLoader.load(Provider::class.java)
                 // fileCollection.from("comment-only")
                 val from = "ordinary-variable"
-                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath() ZipFile(\"string-only.zip\") JarFile(\"string-only.jar\")"
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath() ZipFile(\"string-only.zip\") JarFile(\"string-only.jar\") Scanner(File(\"string-only.txt\")) PrintStream(\"string-only.txt\") PrintWriter(\"string-only.txt\")"
             "#,
         )
         .unwrap();
