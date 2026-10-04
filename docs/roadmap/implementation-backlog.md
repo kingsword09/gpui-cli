@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-04，主分支 `1475d24`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-04，主分支 `1b765ee`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -1011,6 +1011,11 @@ repository runtime/state、复杂/远端 signing、release preview 与真实设�
 只关闭 cache reuse、普通构建继续。模板 JNI `srcDirs(gpuiJniLibsDir)` 仅在 `gpui.jniLibsDir` provider 与
 `sourceSets`/`jniLibs` 上下文匹配时放行。该扫描不追踪 source provider 的运行时内容，完整 Gradle 输入闭包和
 标准远端 repository runtime/state、复杂 signing、release preview、真实设备验收仍需后续工作。
+
+#325 扩展 source-root marker 至 `setSrcDirs(...)`、`srcDirs = ...` 属性赋值、Groovy command-style
+`srcDir 'path'` 及 `srcDirs += ...`；未建模声明仅关闭 cache reuse，普通构建继续。模板 JNI 受控
+`srcDirs(gpuiJniLibsDir)` 例外保留，注释/字符串不触发 gate。该静态 marker 仍不追踪 provider/runtime 文件集合，
+标准远端 repository runtime/state、复杂 signing、release preview 和真实设备验收未闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
