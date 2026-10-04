@@ -242,6 +242,17 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 回归覆盖 custom provider、provider closure 和 ValueSource 声明；真实 Android smoke 继续验证模板
   debug/release packaging 与 CLI debug/release miss→hit，说明模板未被新增 marker 误判。
 
+## T06 Gradle `add("classpath", ...)` plugin cache gate（2026-10-04）
+
+- PR #318（`c754013`）对 Android Gradle `buildscript` 中的 `add("classpath", ...)` 动态依赖写法复用
+  未知 plugin cache-disabled reason。只有字面量、固定版本的
+  `com.android.tools.build:gradle:<version>` 坐标保持 cache eligibility；未知坐标和非字面量/catalog
+  值只关闭 artifact cache reuse，普通 build/preview 继续。
+- 回归覆盖固定 AGP 放行、未知 plugin 坐标和 `libs.plugins...` 非字面量值，并保留直接 `classpath(...)`
+  的既有覆盖；不读取 plugin 实现内容或将坐标额外写入 BuildKey。
+- 该切片不闭合 plugin 实现的任意运行时 I/O、标准远端 repository runtime/state、复杂/远端 signing、
+  release preview 或真实设备验收。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -357,6 +368,7 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 - PR #312 的已知 AGP buildscript classpath 保持 cache eligibility、未知/动态/version-catalog/非字面量 classpath bypass 回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/Windows target check/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging 与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `d5abe82`，无版本发布或 tag。
 - PR #314 的 provider/project file I/O marker bypass 回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/Windows target check/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging 与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `9584673`，无版本发布或 tag。
 - PR #316 的 custom provider/ValueSource marker bypass 回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/Windows target check/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging 与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `a248be9`，无版本发布或 tag。
+- PR #318 的 `add("classpath", ...)` 固定 AGP 放行、未知坐标和非字面量/catalog bypass 回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/Windows target check/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging、ABI 检查与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `c754013`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -365,12 +377,12 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   Gradle APK 打包、manifest 校验和第二次 cache hit；
 - Android emulator/device 安装启动、custom/remote signing、release preview、cache 并发订阅/取消引用和容量
   清理仍未覆盖。
-补充：#295/#298/#300/#302/#304/#306/#308/#310/#312/#314/#316 的 gate 在 build plan 检查已知 user-home 配置/环境入口、`init.d`，对标准 wrapper
+补充：#295/#298/#300/#302/#304/#306/#308/#310/#312/#314/#316/#318 的 gate 在 build plan 检查已知 user-home 配置/环境入口、`init.d`，对标准 wrapper
   layout 中已安装 distribution 内容做有界 fingerprint，在复用前/Gradle 后重核验当前 identity，并对本地
   buildSrc/build-logic 直接 bypass；#306 又对普通 Gradle app script 的一组已知 I/O marker 直接 bypass；#308
   对 unsigned release 允许非 live cache hit，并对未知 plugin signing behavior 直接 bypass；#310 对自定义
   repository entry 直接 bypass cache reuse，但不读取或 fingerprint 标准远端 repository runtime/state；#312 对
-  未知 buildscript classpath、已知 provider/project file I/O marker 和 custom provider/ValueSource marker 直接 bypass cache reuse；它不锁定或复制
+  未知 buildscript classpath、#318 对 `add("classpath", ...)` 的未知/非字面量值、已知 provider/project file I/O marker 和 custom provider/ValueSource marker 直接 bypass cache reuse；它不锁定或复制
   user home，检查后的并发修改仍可能竞态。非标准 wrapper layout 和相对 preview user home 只 bypass；未识别
   环境变量、未被 marker 识别的 app build-script/plugin I/O、custom/remote signing 仍未建模。
 - cache-hit CI 子流程主动排除了 root user-home 配置，因此它验证干净配置下的 cache hit；存在上述 global

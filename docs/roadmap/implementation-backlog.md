@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-03，主分支 `a385d8a`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-04，主分支 `c754013`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -996,6 +996,11 @@ Gradle DSL/runtime read-set 追踪；标准远端 repository runtime/state、复
 #316 对 Android Gradle app script 的 `ProviderFactory` custom provider/`ValueSource` 入口增加保守 marker：
 `providers.of`、`providers.provider` 和 `ValueSource` 命中时只关闭 cache reuse，普通构建继续。该切片不解析
 ValueSource 实现或 provider closure 的实际读集；标准远端 repository runtime/state、复杂 signing 和 release preview 仍需后续闭合。
+
+#318 对 Android Gradle `buildscript` 中 `add("classpath", ...)` 的动态依赖写法复用同一保守插件 gate：只有
+字面量、固定版本的 `com.android.tools.build:gradle:<version>` 坐标保持 cache eligibility；未知坐标和非字面量/
+catalog 值只关闭 cache reuse，普通构建继续。该切片不闭合 plugin 实现任意运行时 I/O、标准远端 repository
+runtime/state、复杂/远端 signing、release preview 或真实设备验收。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
