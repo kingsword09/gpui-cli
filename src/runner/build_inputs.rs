@@ -2180,11 +2180,13 @@ fn gradle_source_root_api_uses_unmodeled_path(source: &str) -> bool {
                 end += 1;
             }
             let identifier = &source[position..end];
-            if matches!(identifier, "srcDir" | "srcDirs")
-                && gradle_call_has_opening_parenthesis(source, end)
-                && !gradle_source_root_call_is_managed(source, identifier, end)
-            {
-                return true;
+            if matches!(identifier, "srcDir" | "srcDirs" | "setSrcDirs") {
+                let managed_template_root = identifier == "srcDirs"
+                    && gradle_call_has_opening_parenthesis(source, end)
+                    && gradle_source_root_call_is_managed(source, identifier, end);
+                if !managed_template_root {
+                    return true;
+                }
             }
             cursor = end;
         } else {
@@ -6225,6 +6227,10 @@ mod tests {
             "val value = files(\"config.json\")",
             "android { sourceSets { getByName(\"main\") { java.srcDir(\"src/generated/java\") } } }",
             "android { sourceSets { getByName(\"main\") { java.srcDirs(\"src/generated/java\", \"src/shared/java\") } } }",
+            "android { sourceSets { getByName(\"main\") { java.setSrcDirs(listOf(\"src/generated/java\")) } } }",
+            "android { sourceSets { getByName(\"main\") { java.srcDirs = listOf(\"src/generated/java\") } } }",
+            "android { sourceSets { main { java.srcDir 'src/generated/java' } } }",
+            "android { sourceSets { main { resources.srcDirs += 'src/generated/resources' } } }",
             "val value = file(\"config.json\").readText()",
             "val value = providers.fileContents(\"config.properties\")",
             "val value = layout.projectDirectory.file(\"config.properties\")",
@@ -6248,6 +6254,22 @@ mod tests {
             assert!(reason.contains(ANDROID_GRADLE_APP_SCRIPT_IO_CACHE_DISABLED_REASON));
             assert!(reason.contains("mobile/android/gradle/app/build.gradle.kts"));
         }
+
+        fs::write(
+            &script,
+            r#"
+                // srcDir("comment-only")
+                /* sourceSets { main { java.setSrcDirs(listOf("comment-only")) } } */
+                val example = "srcDirs = listOf(\"string-only\")"
+            "#,
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
 
         fs::write(
             &script,
