@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-05，主分支 `8a4d4b4`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-05，主分支 `be895ce`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -1031,6 +1031,11 @@ release preview 和真实设备验收未闭合。
 Gradle app-script I/O marker；命中只关闭 cache reuse，普通构建继续，注释/字符串不触发。它不追踪加载后的任意
 I/O、plugin/runtime 行为或完整 Gradle 输入闭包；远端 repository runtime/state、复杂 signing、release preview
 和真实设备验收仍未闭合。
+
+#333 将 `from(...)` 和 Groovy command-style `from 'path'` 文件集合输入纳入 marker，覆盖 `layout.files`、
+自定义 file collection 与 source-set `from` 调用；仅关闭 cache reuse，普通构建继续。无参数的普通变量名、注释
+和字符串不触发。该静态 gate 不追踪集合后续内容变化或完整 Gradle runtime I/O；远端 repository runtime/state、
+复杂 signing、release preview 和真实设备验收仍未闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
