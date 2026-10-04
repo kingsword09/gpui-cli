@@ -99,6 +99,8 @@ const ANDROID_GRADLE_DISTRIBUTION_FINGERPRINT_DOMAIN: &[u8] =
 pub const ANDROID_GRADLE_DISTRIBUTION_CHANGED_REASON: &str = "Android Gradle wrapper distribution changed since the BuildKey was planned; cache reuse is disabled";
 const ANDROID_GRADLE_RELATIVE_USER_HOME_CACHE_DISABLED_REASON: &str =
     "relative GRADLE_USER_HOME resolution is context-dependent; cache reuse is disabled";
+const ANDROID_GRADLE_LOCAL_BUILD_LOGIC_CACHE_DISABLED_REASON: &str =
+    "local Gradle build logic inputs are not modeled; cache reuse is disabled";
 const ANDROID_GRADLE_GLOBAL_ENVIRONMENT_NAMES: &[&str] = &[
     "GRADLE_HOME",
     "GRADLE_OPTS",
@@ -1015,6 +1017,8 @@ pub fn android_preview_cache_policy(
         android_gradle_verification_cache_disabled_reason(&root, &native);
     let dynamic_dependency_disabled_reason =
         android_dynamic_dependency_cache_disabled_reason(&root, &native)?;
+    let local_build_logic_disabled_reason =
+        android_gradle_local_build_logic_cache_disabled_reason(&native);
     let global_configuration_disabled_reason =
         android_gradle_global_configuration_cache_disabled_reason(&root);
     let relative_user_home_disabled_reason =
@@ -1057,6 +1061,7 @@ pub fn android_preview_cache_policy(
             wrapper_disabled_reason,
             verification_disabled_reason,
             dynamic_dependency_disabled_reason,
+            local_build_logic_disabled_reason,
             global_configuration_disabled_reason,
             relative_user_home_disabled_reason,
             signing_disabled_reason,
@@ -1144,6 +1149,8 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         android_gradle_verification_cache_disabled_reason(&snapshot.root, &native);
     let dynamic_dependency_disabled_reason =
         android_dynamic_dependency_cache_disabled_reason(&snapshot.root, &native)?;
+    let local_build_logic_disabled_reason =
+        android_gradle_local_build_logic_cache_disabled_reason(&native);
     let global_configuration_disabled_reason =
         android_gradle_global_configuration_cache_disabled_reason(&snapshot.root);
     native
@@ -1168,6 +1175,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         wrapper_disabled_reason,
         verification_disabled_reason,
         dynamic_dependency_disabled_reason,
+        local_build_logic_disabled_reason,
         global_configuration_disabled_reason,
         signing_policy.disabled_reason,
         build_script_disabled_reason,
@@ -1650,6 +1658,22 @@ fn android_dynamic_dependency_cache_disabled_reason(
         }
     }
     Ok(None)
+}
+
+fn android_gradle_local_build_logic_cache_disabled_reason(native: &NativeInputs) -> Option<String> {
+    native
+        .files
+        .keys()
+        .any(|path| is_android_gradle_local_build_logic_input(path))
+        .then(|| ANDROID_GRADLE_LOCAL_BUILD_LOGIC_CACHE_DISABLED_REASON.into())
+}
+
+fn is_android_gradle_local_build_logic_input(path: &str) -> bool {
+    let path = Path::new(path);
+    path.strip_prefix("mobile/android/gradle/buildSrc").is_ok()
+        || path
+            .strip_prefix("mobile/android/gradle/build-logic")
+            .is_ok()
 }
 
 fn is_android_gradle_dependency_input(path: &str) -> bool {
@@ -5362,6 +5386,38 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn local_android_gradle_build_logic_disables_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        let build_src = root
+            .path()
+            .join("mobile/android/gradle/buildSrc/src/main/kotlin");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&build_src).unwrap();
+        fs::write(app.join("build.gradle.kts"), "plugins {}\n").unwrap();
+        fs::write(
+            build_src.join("ConventionPlugin.kt"),
+            "class ConventionPlugin { fun apply() = readEnvironment() }\n",
+        )
+        .unwrap();
+
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert_eq!(
+            android_gradle_local_build_logic_cache_disabled_reason(&native).as_deref(),
+            Some(ANDROID_GRADLE_LOCAL_BUILD_LOGIC_CACHE_DISABLED_REASON)
+        );
+
+        fs::remove_dir_all(root.path().join("mobile/android/gradle/buildSrc")).unwrap();
+        let ordinary_app_source = root
+            .path()
+            .join("mobile/android/gradle/app/src/main/kotlin/Ordinary.kt");
+        fs::create_dir_all(ordinary_app_source.parent().unwrap()).unwrap();
+        fs::write(&ordinary_app_source, "class Ordinary\n").unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(android_gradle_local_build_logic_cache_disabled_reason(&native).is_none());
     }
 
     #[test]
