@@ -8,9 +8,9 @@ build-tools package 内容；PR #267 为 Gradle Android plugin/dependency artifa
 dependency verification metadata，并把严格校验状态作为 cache reuse 前置条件；PR #269 又纳入
 实际 Java runtime 内容。PR #295 为已知 Gradle global user-home 配置/注入环境增加 cache bypass；PR #296
 禁止 cache-disabled Android build/preview 发布新的可复用 artifact manifest；PR #298 检查 wrapper 解压
-distribution 的 `init.d` 自定义脚本入口；PR #300 将标准 layout 下所有已安装 distribution 内容纳入
-Android toolchain fingerprint/BuildKey；PR #302 又将该 identity 传入普通 build 与 matrix/live preview，
-在复用前和 Gradle 完成后重核验。
+  distribution 的 `init.d` 自定义脚本入口；PR #300 将标准 layout 下所有已安装 distribution 内容纳入
+  Android toolchain fingerprint/BuildKey；PR #302 又将该 identity 传入普通 build 与 matrix/live preview，
+  在复用前和 Gradle 完成后重核验；PR #304 对本地 buildSrc/build-logic 自定义 Gradle plugin 输入直接 bypass。
 
 ## 后续 T05 输入索引证据（2026-10-03）
 
@@ -166,6 +166,16 @@ Android toolchain fingerprint/BuildKey；PR #302 又将该 identity 传入普通
 - 回归覆盖：配置出现/消失和 distribution content 改变、policy/build-key 一致性、unshared APK 不发布 manifest、
   当前环境路径与 fixture fingerprint 分离；本地每次 Android plan 仍有完整有界扫描的 I/O 成本。
 
+## T06 Local Gradle build logic cache gate（2026-10-04）
+
+- PR #304（`ccdecf5`）对 `mobile/android/gradle/buildSrc` 与 `build-logic` 下的任何已扫描文件启用保守
+  cache bypass。该类 convention/plugin code 可能在 Gradle configuration/build 阶段读取环境、用户文件、网络或
+  改写 variant/signing，当前 CLI 不解析其实际读集，因此不消费/发布 artifact cache；普通 build/preview 继续。
+- gate 只检查路径是否属于这两个本地 build-logic 根，不读取 plugin 内容、不把路径或内容写入 BuildKey；普通
+  `app/src/main` source 不触发该 gate。动态 dependency/signing/included-build checks 仍独立运行。
+- 这只缩小了已知本地 plugin 输入面；普通 `build.gradle(.kts)`、AGP/plugin implementation 的任意 I/O、远端
+  repository metadata/state 和真实设备验收仍未闭合。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -265,6 +275,10 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   对齐和变化期间 unshared APK 保留/manifest 抑制回归通过；workspace 449 passed、1 个手动 benchmark ignored，
   clippy/build/Windows target check/fmt/design docs/package list 通过。本机 Android debug/release APK 与 CLI
   miss→hit smoke 通过；PR 与 push 两套 CI 全绿，squash 为 `1c8cbd5`，无版本发布或 tag。
+- PR #304 的 buildSrc/build-logic 检测与普通 app source 排除回归通过；workspace 451 passed、1 个手动 benchmark
+  ignored，focused gate test、clippy/build/Windows target check/fmt/design docs/package list 通过。本机 Android
+  debug/release APK 与 CLI miss→hit smoke 通过；PR 与 push 两套 CI 全绿（push macOS failed job rerun 后通过），
+  squash 为 `ccdecf5`，无版本发布或 tag。
 
 ## 未覆盖
 
@@ -273,15 +287,15 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   Gradle APK 打包、manifest 校验和第二次 cache hit；
 - Android emulator/device 安装启动、release/custom signing、cache 并发订阅/取消引用和容量
   清理仍未覆盖。
-- #295/#298/#300/#302 的 global Gradle gate 在 build plan 检查已知 user-home 配置/环境入口、`init.d`，对标准
-  wrapper layout 中已安装 distribution 内容做有界 fingerprint，并在复用前/Gradle 后重核验当前 identity；它不
-  锁定或复制 user home，检查后的并发修改仍可能竞态。非标准 wrapper layout 和相对 preview user home 只 bypass；
-  未识别环境变量和任意 build-script I/O 仍未建模。
+- #295/#298/#300/#302/#304 的 gate 在 build plan 检查已知 user-home 配置/环境入口、`init.d`，对标准 wrapper
+  layout 中已安装 distribution 内容做有界 fingerprint，在复用前/Gradle 后重核验当前 identity，并对本地
+  buildSrc/build-logic 直接 bypass；它不锁定或复制 user home，检查后的并发修改仍可能竞态。非标准 wrapper
+  layout 和相对 preview user home 只 bypass；未识别环境变量、普通 app build-script/plugin I/O 仍未建模。
 - cache-hit CI 子流程主动排除了 root user-home 配置，因此它验证干净配置下的 cache hit；存在上述 global
   配置时预期是普通构建成功但 cache reuse bypass，不把该情形算作设备或完整 Gradle 输入验收。
 - wrapper checksum 校验 Gradle distribution ZIP；#300 另对当前已安装 wrapper distributions 做有界内容摘要，
   #302 在执行前后重核验该摘要并抑制变化后的 reusable manifest，但不覆盖 AGP/plugins 的任意运行时 I/O、远端
-  仓库状态、NDK/build-script I/O，也不替代完整 Android 构建输入闭包或设备验收。
+  仓库状态、普通 app build-script/AGP plugin I/O、NDK/build-script I/O，也不替代完整 Android 构建输入闭包或设备验收。
 - 动态依赖扫描是保守的静态字符串检查；它能把已知不稳定声明降级为正常 cache miss，但不解析完整
   Gradle DSL，也不证明 AGP/plugin 仓库制品、远端元数据或 build-script I/O 已纳入输入闭包。
 - NDK fingerprint 现在包含当前 host prebuilt 的 clang/clang++、lld/ld.lld、LLVM archiver/inspection
