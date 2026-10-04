@@ -575,7 +575,8 @@ cache reuse，普通构建继续；#291 再纳入显式 `RUSTC` selector 内容�
 `RUSTC_BOOTSTRAP`；#293 纳入 `CARGO_BUILD_RUSTFLAGS` 及 dev/release profile overrides。#295 对
 Gradle user-home `gradle.properties`、`init.gradle(.kts)`/`init.d` 与 Gradle/JVM 注入环境禁用 Android
 cache reuse；#296 又保证 bypass build/preview 不发布新的 reusable artifact manifest；#298 有界扫描已解压
-Gradle wrapper distributions 的 `init.d` 并对自定义入口 bypass。其他输入遗漏、
+Gradle wrapper distributions 的 `init.d` 并对自定义入口 bypass；#300 将标准 wrapper layout 下所有已安装
+distribution 内容纳入 Android toolchain fingerprint，并对非标准布局/缺失安装/有界扫描失败 bypass。其他输入遗漏、
 跨命令共享构建和冻结执行边界仍有效，
 见[当前审计](current-status.md)。
 
@@ -933,10 +934,15 @@ PR #295 增加 Android Gradle global-config cache gate：解析显式 `GRADLE_US
 有限的 wrapper 目录层级，最多 4096 个 entry；只有普通 `readme.txt` 会被视为 inert，其余条目、符号链接、
 目录/entry 错误或预算耗尽都 fail closed。它不读取 init script 原文，也不把绝对路径写入 BuildKey 或诊断。
 
-这只是已知全局配置面的保守拒绝，不读取或冻结配置内容；plan 之后的并发修改、wrapper 解压 distribution
-内部非 `init.d` 文件、任意 Gradle/plugin/build-script 文件/环境/网络读集与远端仓库状态仍未闭合。扫描遍历
-`wrapper/dists` 下所有已安装 distribution，而非仅项目当前 wrapper 版本；非活动 distribution 出现自定义
-`init.d` 条目也会保守关闭 cache reuse。扫描项超 4096、目录/entry 不可读或遇到符号链接也只 bypass。
+#300 将标准 `distributionBase=GRADLE_USER_HOME` / `distributionPath=wrapper/dists` 下的所有已安装
+distribution 内容摘要与相邻 wrapper 状态文件纳入 Android toolchain fingerprint/BuildKey；相对路径和
+文件内容进入摘要，不包含绝对路径，瞬态 `.lck` 文件不参与。仅接受明确、未歧义的标准 wrapper layout；
+非标准或 escaped/重复属性、distribution 尚未安装、symlink/特殊 entry/读取失败，或超过 100,000 entries /
+512 MiB 的有界扫描预算时只禁用 cache reuse，普通构建继续。distribution 第一次在构建中下载/安装时不发布
+可复用 manifest；后续 plan 可在安装存在时计算 fingerprint。
+
+这仍不冻结或在 BuildKey 计算后重核验 user home；plan 后并发修改、任意 Gradle/plugin/build-script 文件/
+环境/网络读集与远端仓库状态仍未闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
