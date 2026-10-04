@@ -376,6 +376,18 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   Gradle/plugin/provider runtime I/O，也不闭合标准远端 repository state、复杂/远端 signing、release preview
   或真实 Android 设备验收。
 
+## T06 Gradle file-backed Java constructor cache gate（2026-10-05）
+
+- PR #349（`4d8b251`）将 `Scanner`、`PrintStream`、`PrintWriter` 构造调用加入 Android Gradle app-script
+  code-aware marker，覆盖 File/Path/String 参数形态与限定类名；命中只关闭 cache reuse，普通 Gradle build 继续。
+- 回归确认注释和字符串中的同名调用、普通 `app/src/main` source 不触发；模板 clean task 仍保持 cache eligible。
+- 本地 workspace 456 passed、1 ignored，integration/protocol/upgrade suites、fmt/clippy/build/design docs/
+  package list/diff check 均通过；Android debug/release packaging 与 CLI miss→hit smoke 通过。PR/push 两套
+  Linux/macOS/Windows、desktop-template、android-template、baseline-driver CI 全绿；squash merge `4d8b251`，
+  无版本发布/tag。
+- 静态构造器 gate 不追踪对象构造后的读取/写入或完整 Gradle/plugin/provider runtime I/O；远端 repository
+  runtime/state、复杂/远端 signing、release preview 和真实设备验收仍未闭合。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
