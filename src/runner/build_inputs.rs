@@ -104,6 +104,8 @@ const ANDROID_GRADLE_LOCAL_BUILD_LOGIC_CACHE_DISABLED_REASON: &str =
 const ANDROID_GRADLE_APP_SCRIPT_IO_CACHE_DISABLED_REASON: &str = "Android Gradle app script uses unmodeled file, environment, network, or process I/O; cache reuse is disabled";
 const ANDROID_GRADLE_UNKNOWN_PLUGIN_CACHE_DISABLED_REASON: &str =
     "Android Gradle plugin signing behavior is not modeled; cache reuse is disabled";
+const ANDROID_GRADLE_CUSTOM_REPOSITORY_CACHE_DISABLED_REASON: &str =
+    "Android Gradle custom repository behavior is not modeled; cache reuse is disabled";
 const ANDROID_GRADLE_GLOBAL_ENVIRONMENT_NAMES: &[&str] = &[
     "GRADLE_HOME",
     "GRADLE_OPTS",
@@ -1026,6 +1028,8 @@ pub fn android_preview_cache_policy(
         android_gradle_app_script_io_cache_disabled_reason(&root, &native)?;
     let unknown_plugin_disabled_reason =
         android_gradle_unknown_plugin_cache_disabled_reason(&root, &native)?;
+    let custom_repository_disabled_reason =
+        android_gradle_custom_repository_cache_disabled_reason(&root, &native)?;
     let global_configuration_disabled_reason =
         android_gradle_global_configuration_cache_disabled_reason(&root);
     let relative_user_home_disabled_reason =
@@ -1071,6 +1075,7 @@ pub fn android_preview_cache_policy(
             local_build_logic_disabled_reason,
             app_script_io_disabled_reason,
             unknown_plugin_disabled_reason,
+            custom_repository_disabled_reason,
             global_configuration_disabled_reason,
             relative_user_home_disabled_reason,
             signing_disabled_reason,
@@ -1164,6 +1169,8 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         android_gradle_app_script_io_cache_disabled_reason(&snapshot.root, &native)?;
     let unknown_plugin_disabled_reason =
         android_gradle_unknown_plugin_cache_disabled_reason(&snapshot.root, &native)?;
+    let custom_repository_disabled_reason =
+        android_gradle_custom_repository_cache_disabled_reason(&snapshot.root, &native)?;
     let global_configuration_disabled_reason =
         android_gradle_global_configuration_cache_disabled_reason(&snapshot.root);
     native
@@ -1191,6 +1198,7 @@ pub fn android_build_plan(root: &Path, release: bool, abis: &[String]) -> Result
         local_build_logic_disabled_reason,
         app_script_io_disabled_reason,
         unknown_plugin_disabled_reason,
+        custom_repository_disabled_reason,
         global_configuration_disabled_reason,
         signing_policy.disabled_reason,
         build_script_disabled_reason,
@@ -1721,6 +1729,82 @@ fn android_gradle_unknown_plugin_cache_disabled_reason(
         }
     }
     Ok(None)
+}
+
+fn android_gradle_custom_repository_cache_disabled_reason(
+    root: &Path,
+    native: &NativeInputs,
+) -> Result<Option<String>> {
+    for relative in native
+        .files
+        .keys()
+        .filter(|path| is_android_gradle_app_script_input(path))
+    {
+        let source = fs::read_to_string(root.join(relative))
+            .with_context(|| format!("reading Android Gradle repositories {relative}"))?;
+        if android_gradle_script_has_custom_repository(&source) {
+            return Ok(Some(format!(
+                "{ANDROID_GRADLE_CUSTOM_REPOSITORY_CACHE_DISABLED_REASON}: '{relative}'"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn android_gradle_script_has_custom_repository(source: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &source[position..end] == "repositories" {
+                let Some(opening) = gradle_skip_trivia(source, end) else {
+                    return true;
+                };
+                if bytes.get(opening) != Some(&b'{') {
+                    return true;
+                }
+                let Some(closing) = gradle_matching_brace(source, opening) else {
+                    return true;
+                };
+                if android_gradle_repository_block_has_custom_entry(&source[opening + 1..closing]) {
+                    return true;
+                }
+                cursor = closing + 1;
+                continue;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn android_gradle_repository_block_has_custom_entry(source: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if !matches!(
+                &source[position..end],
+                "google" | "mavenCentral" | "gradlePluginPortal"
+            ) {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
 }
 
 fn android_gradle_script_has_unknown_plugin(source: &str) -> bool {
@@ -5968,6 +6052,40 @@ mod tests {
                         .is_some_and(|value| value
                             .contains(ANDROID_GRADLE_UNKNOWN_PLUGIN_CACHE_DISABLED_REASON)),
                     "unknown plugin was not rejected: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn custom_android_gradle_repositories_disable_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let gradle = root.path().join("mobile/android/gradle");
+        let settings = gradle.join("settings.gradle.kts");
+        fs::create_dir_all(&gradle).unwrap();
+
+        for source in [
+            "pluginManagement { repositories { google(); gradlePluginPortal(); mavenCentral() } }\ndependencyResolutionManagement { repositories { google(); mavenCentral() } }",
+            "repositories { maven { url = uri(\"https://repo.example.test\") } }",
+            "repositories { mavenLocal() }",
+            "repositories { flatDir { dirs(\"libs\") } }",
+            "repositories { exclusiveContent { forRepository { mavenCentral() } } }",
+        ] {
+            fs::write(&settings, source).unwrap();
+            let native = NativeInputs::scan(root.path()).unwrap();
+            let reason =
+                android_gradle_custom_repository_cache_disabled_reason(root.path(), &native)
+                    .unwrap();
+            if source.starts_with("pluginManagement") {
+                assert!(
+                    reason.is_none(),
+                    "standard repositories were rejected: {source}"
+                );
+            } else {
+                assert!(
+                    reason.as_deref().is_some_and(|value| value
+                        .contains(ANDROID_GRADLE_CUSTOM_REPOSITORY_CACHE_DISABLED_REASON)),
+                    "custom repository was not rejected: {source}"
                 );
             }
         }
