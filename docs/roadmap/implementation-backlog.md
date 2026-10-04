@@ -586,6 +586,8 @@ distribution 内容纳入 Android toolchain fingerprint，并对非标准布局/
 #314 对 Android Gradle app script 的 provider/project file I/O marker 增加保守 bypass：`providers.fileContents`、
 `projectDirectory`/`projectDir`/`rootDir`、`gradleLocalProperties`、archive-entry provider 和 provider file
 materialization 只关闭 cache reuse，普通构建继续。
+#316 对 Android Gradle app script 的 `ProviderFactory` custom provider/`ValueSource` 入口增加保守 marker：
+`providers.of`、`providers.provider` 和 `ValueSource` 只关闭 cache reuse，普通构建继续；不解析实现或 closure 的实际读集。
 Android app Gradle script 的已知文件/环境/网络/进程 I/O marker 直接 bypass cache reuse，保留已建模
 GPUI/NDK/签名读取与普通构建路径；#308 又允许无 signing 配置的 unsigned release APK 在非 live
 build/run 中复用 verified artifact，并对未知 Gradle plugin/alias/plugin-owned signing behavior 保守 bypass。
@@ -990,6 +992,10 @@ I/O，不闭合标准远端 repository runtime/state、复杂/远端 signing 或
 `projectDirectory`/`projectDir`/`rootDir`、`gradleLocalProperties`、archive-entry provider 和 provider
 file materialization 命中时只关闭 cache reuse，普通构建继续。该切片是已知 marker 的保守静态扫描，不是
 Gradle DSL/runtime read-set 追踪；标准远端 repository runtime/state、复杂 signing 和 release preview 仍需后续闭合。
+
+#316 对 Android Gradle app script 的 `ProviderFactory` custom provider/`ValueSource` 入口增加保守 marker：
+`providers.of`、`providers.provider` 和 `ValueSource` 命中时只关闭 cache reuse，普通构建继续。该切片不解析
+ValueSource 实现或 provider closure 的实际读集；标准远端 repository runtime/state、复杂 signing 和 release preview 仍需后续闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
