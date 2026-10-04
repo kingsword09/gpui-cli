@@ -2097,6 +2097,10 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         return true;
     }
 
+    if gradle_file_api_uses_unmodeled_path(source) {
+        return true;
+    }
+
     if [
         &["System", "getenv"][..],
         &["System", "getProperty"][..],
@@ -2136,6 +2140,75 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         gradle_contains_identifier(source, identifier)
             && !android_gradle_identifier_is_managed_io(source, identifier)
     })
+}
+
+fn gradle_file_api_uses_unmodeled_path(source: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            if matches!(identifier, "file" | "files")
+                && gradle_call_has_opening_parenthesis(source, end)
+                && !gradle_file_call_is_managed(source, identifier, end)
+            {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_file_call_is_managed(source: &str, identifier: &str, method_end: usize) -> bool {
+    if identifier != "file" {
+        return false;
+    }
+
+    if gradle_call_has_exact_argument(source, method_end, "configuredBuildDir") {
+        return gradle_call_has_string_argument(source, "gradleProperty", "gpui.buildDir");
+    }
+
+    if gradle_call_has_string_argument(source, "environmentVariable", "ANDROID_NDK_HOME")
+        && source.contains("ndkDirectory")
+        && source.contains("source.properties")
+        && (gradle_call_has_exact_argument(source, method_end, "ndkHome.get()")
+            || gradle_call_has_exact_argument(source, method_end, "ndkHome")
+            || gradle_call_has_exact_argument(source, method_end, "\"ndk\""))
+    {
+        return true;
+    }
+
+    false
+}
+
+fn gradle_call_has_opening_parenthesis(source: &str, method_end: usize) -> bool {
+    gradle_skip_trivia(source, method_end).and_then(|opening| source.as_bytes().get(opening))
+        == Some(&b'(')
+}
+
+fn gradle_call_has_exact_argument(source: &str, method_end: usize, expected: &str) -> bool {
+    let Some(opening) = gradle_skip_trivia(source, method_end) else {
+        return false;
+    };
+    if source.as_bytes().get(opening) != Some(&b'(') {
+        return false;
+    }
+    let Some(argument) = gradle_skip_trivia(source, opening + 1) else {
+        return false;
+    };
+    let Some(end) = argument.checked_add(expected.len()) else {
+        return false;
+    };
+    source.get(argument..end) == Some(expected)
+        && gradle_skip_trivia(source, end).and_then(|closing| source.as_bytes().get(closing))
+            == Some(&b')')
 }
 
 fn android_gradle_identifier_is_managed_io(source: &str, identifier: &str) -> bool {
@@ -6048,9 +6121,30 @@ mod tests {
                 .is_none()
         );
 
+        fs::write(
+            &script,
+            r#"
+                val configuredBuildDir = providers.gradleProperty("gpui.buildDir").get()
+                val managedBuildDir = file(configuredBuildDir)
+                val ndkHome = providers.environmentVariable("ANDROID_NDK_HOME").get()
+                val ndkDirectory = file(ndkHome)
+                ndkDirectory.resolve("source.properties").inputStream()
+                val unknown = file("config.json")
+            "#,
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some()
+        );
+
         for source in [
             "val value = System.getenv(\"CUSTOM_INPUT\")",
             "val value = providers.gradleProperty(\"custom.input\")",
+            "val value = file(\"config.json\")",
+            "val value = files(\"config.json\")",
             "val value = file(\"config.json\").readText()",
             "val value = providers.fileContents(\"config.properties\")",
             "val value = layout.projectDirectory.file(\"config.properties\")",
