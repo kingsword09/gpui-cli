@@ -576,7 +576,9 @@ cache reuse，普通构建继续；#291 再纳入显式 `RUSTC` selector 内容�
 Gradle user-home `gradle.properties`、`init.gradle(.kts)`/`init.d` 与 Gradle/JVM 注入环境禁用 Android
 cache reuse；#296 又保证 bypass build/preview 不发布新的 reusable artifact manifest；#298 有界扫描已解压
 Gradle wrapper distributions 的 `init.d` 并对自定义入口 bypass；#300 将标准 wrapper layout 下所有已安装
-distribution 内容纳入 Android toolchain fingerprint，并对非标准布局/缺失安装/有界扫描失败 bypass。其他输入遗漏、
+distribution 内容纳入 Android toolchain fingerprint，并对非标准布局/缺失安装/有界扫描失败 bypass；#302 在
+普通 build 与 matrix/live preview 的复用前及 Gradle 后重核验 distribution/global gate，变化时只保留普通 APK。
+其他输入遗漏、
 跨命令共享构建和冻结执行边界仍有效，
 见[当前审计](current-status.md)。
 
@@ -943,6 +945,13 @@ distribution 内容摘要与相邻 wrapper 状态文件纳入 Android toolchain 
 
 这仍不冻结或在 BuildKey 计算后重核验 user home；plan 后并发修改、任意 Gradle/plugin/build-script 文件/
 环境/网络读集与远端仓库状态仍未闭合。
+
+#302 将 distribution identity 随 Android build plan/preview policy 传入执行路径。普通 build 在协调器复用前、
+Gradle 完成后和 manifest 发布前重核验当前绝对 user home、已知 global gate 与 distribution fingerprint；变化时
+回退到独占普通构建，保留可用 APK 但不发布新的 reusable manifest。matrix/live preview 使用同一 Android policy
+BuildKey，preview cache hit 前/Gradle 后同样重核验；若构建期间变化，coordinator 只接受已有 APK 的 unshared
+完成，不把它当作可复用 artifact。相对 `GRADLE_USER_HOME` 的 preview 直接 bypass，避免 snapshot root 与
+Gradle cwd 解析分叉。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
