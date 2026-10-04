@@ -109,6 +109,7 @@ const ANDROID_GRADLE_USER_CONFIG_PATHS: &[&str] = &[
     "init.gradle.kts",
     "init.d",
 ];
+const MAX_ANDROID_GRADLE_DISTRIBUTION_SCAN_ENTRIES: usize = 4096;
 
 /// A stable Cargo workspace copy whose lifetime is bound to a build command.
 /// The temporary parent is intentionally kept alive so Cargo cannot fall back
@@ -1315,13 +1316,110 @@ fn android_gradle_user_configuration_is_present(gradle_user_home: &Path) -> bool
         Err(_) => return true,
     }
 
-    ANDROID_GRADLE_USER_CONFIG_PATHS.iter().any(|relative| {
+    let user_home_config_is_present = ANDROID_GRADLE_USER_CONFIG_PATHS.iter().any(|relative| {
         match fs::symlink_metadata(gradle_user_home.join(relative)) {
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(_) => true,
         }
-    })
+    });
+    user_home_config_is_present
+        || android_gradle_distribution_init_script_is_present(gradle_user_home)
+}
+
+fn android_gradle_distribution_init_script_is_present(gradle_user_home: &Path) -> bool {
+    // Gradle wrapper installs use wrapper/dists/<distribution>/<hash>/<gradle-root>;
+    // inspect only that bounded layout and fail closed on unknown entries.
+    let distributions = gradle_user_home.join("wrapper/dists");
+    match fs::symlink_metadata(&distributions) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => return true,
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    }
+
+    let mut remaining_entries = MAX_ANDROID_GRADLE_DISTRIBUTION_SCAN_ENTRIES;
+    let mut pending = vec![(distributions, 0_u8)];
+    while let Some((directory, depth)) = pending.pop() {
+        if depth == 3 {
+            if android_gradle_installation_init_scripts_are_present(
+                &directory,
+                &mut remaining_entries,
+            ) {
+                return true;
+            }
+            continue;
+        }
+
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => return true,
+        };
+        for entry in entries {
+            if remaining_entries == 0 {
+                return true;
+            }
+            remaining_entries -= 1;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => return true,
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => return true,
+            };
+            if file_type.is_symlink() {
+                return true;
+            }
+            if file_type.is_dir() {
+                pending.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    false
+}
+
+fn android_gradle_installation_init_scripts_are_present(
+    gradle_installation: &Path,
+    remaining_entries: &mut usize,
+) -> bool {
+    let init_directory = gradle_installation.join("init.d");
+    match fs::symlink_metadata(&init_directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => return true,
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    }
+
+    let entries = match fs::read_dir(&init_directory) {
+        Ok(entries) => entries,
+        Err(_) => return true,
+    };
+    for entry in entries {
+        if *remaining_entries == 0 {
+            return true;
+        }
+        *remaining_entries -= 1;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => return true,
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => return true,
+        };
+        if file_type.is_symlink() {
+            return true;
+        }
+        let is_distribution_readme = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("readme.txt"));
+        if !is_distribution_readme || !file_type.is_file() {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_unmodeled_android_gradle_environment(
@@ -4556,6 +4654,24 @@ mod tests {
             OsString::from("GRADLE_USER_HOME"),
             OsString::from("/private/gradle-home"),
         )]));
+    }
+
+    #[test]
+    fn android_gradle_wrapper_distribution_init_scripts_disable_cache_reuse() {
+        let home = tempfile::tempdir().unwrap();
+        let init_dir = home
+            .path()
+            .join("wrapper/dists/gradle-9.4.1-bin/test-hash/gradle-9.4.1/init.d");
+        fs::create_dir_all(&init_dir).unwrap();
+        fs::write(init_dir.join("readme.txt"), "Add init scripts here.").unwrap();
+        assert!(!android_gradle_user_configuration_is_present(home.path()));
+
+        fs::write(
+            init_dir.join("enterprise.init.gradle"),
+            "// injected config\n",
+        )
+        .unwrap();
+        assert!(android_gradle_user_configuration_is_present(home.path()));
     }
 
     #[test]
