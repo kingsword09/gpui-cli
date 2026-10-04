@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-04（Asia/Shanghai）。核查代码：`dfc023c`（PR #322 squash merge）。
+更新日期：2026-10-04（Asia/Shanghai）。核查代码：`1475d24`（PR #323 squash merge）。
 本轮核查时 `origin/main` 指向该提交；后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -221,6 +221,7 @@ signing、release preview 和设备验收仍未闭合。
 | `c754013`（#318） | 对 Android Gradle `buildscript` 的 `add("classpath", ...)` 增加保守插件 gate；固定版本的已知 AGP 字面量坐标保持 cache eligibility，未知坐标和非字面量/catalog 值只关闭 cache reuse，普通构建继续 | 只覆盖静态可证明的 AGP classpath add；不闭合 plugin 实现任意运行时 I/O、标准远端 repository runtime/state、复杂 signing 或 release preview |
 | `822030c`（#320） | Android app-script I/O marker 识别未建模的 `file(...)`/`files(...)` 路径解析调用，只关闭 cache reuse、普通构建继续；GPUI build-dir 与 NDK `source.properties` 的已建模读取仍可复用 | 不解析返回对象后续使用或 Gradle runtime I/O；不闭合标准远端 repository runtime/state、复杂 signing 或 release preview |
 | `dfc023c`（#322） | Android app-script I/O marker 识别未建模 `srcDir(...)`/`srcDirs(...)` source-root 声明，只关闭 cache reuse、普通构建继续；由已建模 `gpui.jniLibsDir` 驱动的模板 JNI source root 保持 cache eligible | 仅识别静态 source-root 调用及模板例外；不解析 source provider/runtime 变化，标准远端 repository runtime/state、复杂 signing 与 release preview 仍未闭合 |
+| `1475d24`（#323） | 文档基准更新到 PR #322 squash merge，记录 source-root cache gate、模板 JNI 例外、验证证据和未闭合边界 | 仅文档一致性更新；不增加 runtime 或平台验收 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -476,6 +477,7 @@ signing、release preview 和设备验收仍未闭合。
 | PR #320 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `822030c`；无版本发布/tag |
 | 本地运行时验证（PR #322） | 未建模 `srcDir(...)`/`srcDirs(...)` bypass、模板 `gpui.jniLibsDir` source-root 例外回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/fmt/design docs/package list、diff check 通过；Android debug/release packaging 与 CLI miss→hit smoke 通过，缓存 APK 含 `arm64-v8a`/`x86_64` |
 | PR #322 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `dfc023c`；无版本发布/tag |
+| 文档 PR #323 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `1475d24`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：

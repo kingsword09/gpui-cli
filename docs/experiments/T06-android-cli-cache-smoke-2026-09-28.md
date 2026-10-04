@@ -391,6 +391,7 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 - PR #318 的 `add("classpath", ...)` 固定 AGP 放行、未知坐标和非字面量/catalog bypass 回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/Windows target check/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging、ABI 检查与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `c754013`，无版本发布或 tag。
 - PR #320 的 `file(...)`/`files(...)` 未建模路径 bypass、GPUI build-dir/NDK path 例外与混合未知输入回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging、ABI 检查与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `822030c`，无版本发布或 tag。
 - PR #322 的未建模 `srcDir(...)`/`srcDirs(...)` bypass 与模板 JNI `gpui.jniLibsDir` 例外回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging、ABI 检查与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `dfc023c`，无版本发布或 tag。
+- 文档 PR #323 将审计基准更新至 `1475d24`，补齐 #322 的 source-root gate、模板 JNI 例外、本地验证和未闭合边界；文档检查、PR/push 两套 CI 全绿，squash 为 `1475d24`，无版本发布或 tag。
 
 ## 未覆盖
 
