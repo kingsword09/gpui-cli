@@ -694,6 +694,21 @@ fn publish_preview_android_manifest(
     Ok(())
 }
 
+fn publish_preview_android_manifest_if_reusable(
+    cache_hit_enabled: bool,
+    root: &Path,
+    key_hash: &str,
+    jni_libs_dir: &Path,
+    apk_path: &Path,
+) -> Result<bool> {
+    if cache_hit_enabled {
+        publish_preview_android_manifest(root, key_hash, jni_libs_dir, apk_path)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Runs one build + (re)launch cycle. `Ok(BuildFailed)` means a compile failure
 /// was already rendered; infrastructure errors come back as `Err`.
 fn run_iteration(
@@ -1638,7 +1653,13 @@ fn build_android_apk_live_once(
                 );
             }
         }
-        publish_preview_android_manifest(&outputs.output_root, key_hash, &jni_libs_dir, &apk)?;
+        publish_preview_android_manifest_if_reusable(
+            cache_hit_enabled,
+            &outputs.output_root,
+            key_hash,
+            &jni_libs_dir,
+            &apk,
+        )?;
     }
     verify_android_preview_signing_inputs(project, outputs)?;
     println!("  {} {}", "✓".green(), apk.display());
@@ -3032,13 +3053,54 @@ mod tests {
         )
         .unwrap();
 
-        publish_preview_android_manifest(root.path(), &"d".repeat(64), &jni, &apk).unwrap();
+        assert!(
+            !publish_preview_android_manifest_if_reusable(
+                false,
+                root.path(),
+                &"d".repeat(64),
+                &jni,
+                &apk,
+            )
+            .unwrap()
+        );
+        assert!(
+            !root
+                .path()
+                .join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE)
+                .exists()
+        );
+        assert!(
+            publish_preview_android_manifest_if_reusable(
+                true,
+                root.path(),
+                &"d".repeat(64),
+                &jni,
+                &apk,
+            )
+            .unwrap()
+        );
         let manifest =
             BuildArtifactManifest::read(&root.path().join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE))
                 .unwrap();
         assert_eq!(manifest.platform, BuildPlatform::Android);
         assert_eq!(manifest.files.len(), 3);
         manifest.verify(root.path()).unwrap();
+
+        let manifest_path = root.path().join(PREVIEW_BUILD_ARTIFACT_MANIFEST_FILE);
+        let prior_manifest = fs::read(&manifest_path).unwrap();
+        fs::write(&apk, b"built with unmodeled global configuration").unwrap();
+        assert!(
+            !publish_preview_android_manifest_if_reusable(
+                false,
+                root.path(),
+                &"d".repeat(64),
+                &jni,
+                &apk,
+            )
+            .unwrap()
+        );
+        assert_eq!(fs::read(manifest_path).unwrap(), prior_manifest);
+        assert!(manifest.verify(root.path()).is_err());
     }
 
     #[test]

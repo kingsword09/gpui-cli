@@ -952,6 +952,18 @@ fn publish_android_build_manifest(
     Ok(manifest)
 }
 
+fn publish_android_build_manifest_if_reusable(
+    layout: &BuildOutputLayout,
+    apk: &Path,
+    reusable: bool,
+) -> Result<Option<BuildArtifactManifest>> {
+    if reusable {
+        publish_android_build_manifest(layout, apk).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 enum AndroidBuildCacheLookup {
     Hit { manifest: BuildArtifactManifest },
     Miss(String),
@@ -1138,15 +1150,17 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
         if let Some(identity) = &plan.signing_identity {
             identity.verify_unchanged()?;
         }
-        publish_android_build_manifest(layout, &apk)?;
+        let manifest = publish_android_build_manifest_if_reusable(layout, &apk, reusable)?;
         if let Some(identity) = &plan.signing_identity {
             identity.verify_unchanged()?;
         }
-        println!(
-            "  {} artifact manifest: {}",
-            "✓".green(),
-            layout.artifact_manifest_path().display()
-        );
+        if manifest.is_some() {
+            println!(
+                "  {} artifact manifest: {}",
+                "✓".green(),
+                layout.artifact_manifest_path().display()
+            );
+        }
         println!("  {} {}", "✓".green(), apk.display());
         Ok(())
     })?;
@@ -1165,6 +1179,17 @@ pub fn build_android_apk(project: &Project, release: bool) -> Result<PathBuf> {
     }
     if reusable && let Some(identity) = &plan.debug_keystore_identity {
         identity.verify_unchanged()?;
+    }
+    if !reusable {
+        let apk = apk_path_at(
+            project,
+            release,
+            plan.layout.android_gradle_build_dir.as_deref(),
+        )?;
+        if plan.signing_identity.is_some() {
+            ensure_installable_apk(&apk)?;
+        }
+        return Ok(apk);
     }
     match lookup_verified_android_apk(project, layout, &plan.key, release) {
         AndroidBuildCacheLookup::Hit { .. } => {
@@ -1463,7 +1488,15 @@ mod tests {
         .unwrap();
 
         let apk = apk_output_dir.join("app-debug.apk");
-        let manifest = publish_android_build_manifest(&layout, &apk).unwrap();
+        assert!(
+            publish_android_build_manifest_if_reusable(&layout, &apk, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!layout.artifact_manifest_path().exists());
+        let manifest = publish_android_build_manifest_if_reusable(&layout, &apk, true)
+            .unwrap()
+            .unwrap();
         let project = project(base.path());
         let loaded = BuildArtifactManifest::read_verified(
             &layout.artifact_manifest_path(),
@@ -1491,6 +1524,26 @@ mod tests {
             lookup_verified_android_apk(&project, &layout, &key, false),
             AndroidBuildCacheLookup::Hit { .. }
         ));
+
+        let manifest_path = layout.artifact_manifest_path();
+        let prior_manifest = fs::read(&manifest_path).unwrap();
+        fs::write(&apk, b"built with unmodeled global configuration").unwrap();
+        assert!(
+            publish_android_build_manifest_if_reusable(&layout, &apk, false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read(&manifest_path).unwrap(), prior_manifest);
+        assert!(
+            BuildArtifactManifest::read_verified(
+                &manifest_path,
+                &layout.root,
+                BuildPlatform::Android,
+                &key,
+            )
+            .is_err()
+        );
+        fs::write(&apk, b"apk bytes").unwrap();
 
         let unexpected = apk_output_dir.join("unexpected.apk");
         fs::write(&unexpected, b"extra output").unwrap();
