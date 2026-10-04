@@ -1,6 +1,6 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-04（Asia/Shanghai）。核查代码：`bbcf21e`（PR #310 squash merge）。
+更新日期：2026-10-04（Asia/Shanghai）。核查代码：`d5abe82`（PR #312 squash merge）。
 本轮核查时 `origin/main` 指向该提交；后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -90,6 +90,11 @@ build-script 声明/实际读集和网络/用户态文件系统跨平台对照�
 | G4 | 普通构建缓存复用、签名感知的 iOS physical build/run、受控 Android local custom/release build/run、受控 Android unsigned release build/run、受控 Android signing-sensitive frozen preview build、desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug live preview verified cache hit、Android 固定 Gradle wrapper checksum 与标准 wrapper distribution 内容 fingerprint、distribution/全局配置在 BuildKey 计划前及 Gradle 后重核验、本地 Gradle build logic cache bypass、普通 app Gradle script 保守静态 I/O marker cache bypass、未知 Gradle plugin signing behavior 保守 cache bypass、非标准/custom repository cache bypass、Gradle dependency verification SHA-256 metadata、动态/changing dependency cache bypass、NDK compiler-tool/sysroot/header、选定 SDK package、Java runtime 与 compiler/linker executable content fingerprint、Rust compiler selector environment/content inputs、Cargo build flags/profile override inputs、显式清理；T05 已覆盖外部 Cargo path package live watcher/index 并有一个大型输入集本机对照；T06 frozen build plan 按 Cargo package 声明对 workspace 与 external path package 的默认/自定义 build script 保守 bypass artifact cache reuse，`build=false` 不误触发 | 缓存输入遗漏、iOS physical live preview、Android 复杂/远端 signing cache hit 与 release preview cache hit、标准远端 repository runtime/state 和未被 marker 识别的 Gradle/plugin/build-script I/O、T05 build-script 实际读集/网络及用户态文件系统跨平台证据、跨平台性能对照、共享构建/预热、性能指标/预算和 Agent 基准 |
 
 G2/G4 补充：PR #295 对已知 Gradle user-home 配置与 Gradle/JVM 注入环境 fail-closed，只禁用复用并继续普通构建；PR #296 让 cache-disabled Android build/preview 不发布新的可复用 manifest；PR #298 扫描 wrapper distribution 的 `init.d` 自定义入口；PR #300 将标准 wrapper layout 下所有已安装 Gradle distribution 内容及相邻状态文件纳入 Android toolchain fingerprint/BuildKey；PR #302 在普通 build、matrix/live preview 的复用前及 Gradle 完成后重核验当前 user home、全局配置和 distribution fingerprint，变化时继续产出 APK 但不消费/发布旧 BuildKey manifest；PR #304 对本地 `buildSrc`/`build-logic` 自定义 Gradle plugin 直接 bypass cache reuse；PR #306 对 Android root 下非 `buildSrc`/`build-logic` 的 `.gradle`/`.gradle.kts` 脚本增加保守静态 marker gate，识别未建模的 provider/env、文件、网络、进程、`apply from` 或 `includeBuild` 入口时只 bypass cache reuse，并保留已建模的 GPUI 参数、NDK `source.properties` 与受控签名读取；PR #308 对无 signing 配置的 unsigned release APK 开放非 live BuildKey artifact cache hit，并对未知 Gradle plugin/alias/plugin-owned signing behavior 保守 bypass；PR #310 对非标准/custom repository 声明直接 bypass cache，标准 repository allowlist 保持模板 cache 路径。非标准布局、缺失安装或有界扫描失败只禁用 cache reuse；完整动态 Gradle/plugin I/O、未被 marker 识别的脚本行为、复杂/远端 signing、release preview 与远端仓库状态仍未闭合，相关工作保持 `in_progress`。
+
+PR #312 对 Android Gradle `buildscript` 中的 `classpath` 做保守插件 gate：只有字面量、固定版本的
+`com.android.tools.build:gradle:<version>` 保持 cache eligibility；未知坐标、动态版本、version-catalog
+或非字面量 classpath 只关闭 cache reuse，普通构建继续。该切片仍不闭合 plugin 实现的任意运行时 I/O、标准
+远端 repository runtime/state、复杂/远端 signing、release preview 或真实设备验收。
 
 ## 2. 相对上次审计的新合并
 
@@ -185,6 +190,7 @@ G2/G4 补充：PR #295 对已知 Gradle user-home 配置与 Gradle/JVM 注入环
 | `16083d0`（#306） | 对 Android root 下非 `buildSrc`/`build-logic` 的 `.gradle`/`.gradle.kts` 脚本执行保守静态扫描；未建模的 provider/env、文件读取、网络/进程、`apply from` 或 `includeBuild` marker 只关闭 cache reuse，普通 build/preview 继续；注释、字符串和普通 app source 不触发，GPUI ABI/输出目录/NDK `source.properties`/受控签名读取保留为已建模例外 | 不是 Gradle 解析器或运行时 I/O 追踪；未识别的 plugin/script I/O、远端 repository metadata/state、复杂 signing 与真实设备验收仍未闭合 |
 | `9d9cad5`（#308） | 无 signing 配置的 unsigned Android release APK 纳入非 live BuildKey cache reuse；未知 Gradle plugin/alias/plugin-owned signing behavior 保守关闭 cache reuse；release preview、复杂/远端 signing、敏感输入和普通 app 未建模 I/O 仍不复用 | 只覆盖静态可证明的 unsigned release artifact；不提供 release preview、custom/remote signing cache，不把未知 plugin 的静态 marker 当作完整运行时 I/O 追踪 |
 | `bbcf21e`（#310） | 对 Android Gradle `repositories {}` 做保守静态 gate；仅允许 `google()`、`mavenCentral()`、`gradlePluginPortal()`，自定义 `maven`、`mavenLocal`、`flatDir`、`exclusiveContent` 和其他 repository entry 只关闭 cache reuse，普通 build/preview 继续 | 不读取或 fingerprint 标准远端 repository runtime/state；标准仓库状态、未识别 repository/plugin I/O、复杂 signing 与真实设备验收仍未闭合 |
+| `d5abe82`（#312） | 对 Android Gradle `buildscript` 的 `classpath` 做保守插件 gate；固定版本的已知 AGP 坐标保持 cache eligibility，未知坐标、动态版本、version-catalog 或非字面量输入只关闭 cache reuse，普通构建继续 | 只覆盖静态可证明的 AGP classpath；不闭合 plugin 实现任意运行时 I/O、标准远端 repository runtime/state、复杂 signing 或 release preview |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -428,6 +434,8 @@ G2/G4 补充：PR #295 对已知 Gradle user-home 配置与 Gradle/JVM 注入环
 | PR #308 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `9d9cad5`；无版本发布/tag |
 | 本地运行时验证（PR #310） | 标准 Gradle repository allowlist 与自定义 maven/mavenLocal/flatDir/exclusiveContent bypass 回归通过；workspace 455 passed、1 个手动 benchmark ignored，clippy/build/Windows target check/fmt/design docs/package list 通过；本机 Android debug 与 unsigned release APK/ABI 检查、CLI miss→hit smoke 通过 |
 | PR #310 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `bbcf21e`；无版本发布/tag |
+| 本地运行时验证（PR #312） | 已知模板 AGP buildscript classpath 保持 cache eligible，未知坐标、动态版本、version-catalog 和非字面量 classpath bypass 回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/Windows target check/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging 与 CLI miss→hit smoke 通过，缓存 APK 含两个 ABI |
+| PR #312 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `d5abe82`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：

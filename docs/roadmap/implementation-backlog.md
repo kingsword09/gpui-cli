@@ -581,6 +581,8 @@ distribution 内容纳入 Android toolchain fingerprint，并对非标准布局/
 普通 build 与 matrix/live preview 的复用前及 Gradle 后重核验 distribution/global gate，变化时只保留普通 APK；
 #304 对本地 `buildSrc`/`build-logic` 自定义 Gradle plugin 输入直接 bypass cache reuse；#306 对普通
 #310 对 Android Gradle `repositories {}` 做保守静态 gate：仅允许 `google()`、`mavenCentral()`、`gradlePluginPortal()`，自定义 `maven`、`mavenLocal`、`flatDir`、`exclusiveContent` 和其他 repository entry 只关闭 cache reuse，普通 build/preview 继续；标准远端 repository runtime/state 仍未 fingerprint。
+#312 对 Android Gradle `buildscript` 的 `classpath` 做保守插件 gate：固定版本的已知
+`com.android.tools.build:gradle:<version>` 保持 cache eligibility；未知坐标、动态版本、version-catalog 或非字面量输入只关闭 cache reuse，普通构建继续。
 Android app Gradle script 的已知文件/环境/网络/进程 I/O marker 直接 bypass cache reuse，保留已建模
 GPUI/NDK/签名读取与普通构建路径；#308 又允许无 signing 配置的 unsigned release APK 在非 live
 build/run 中复用 verified artifact，并对未知 Gradle plugin/alias/plugin-owned signing behavior 保守 bypass。
@@ -975,6 +977,11 @@ signing behavior 只关闭 cache reuse；custom/remote signing、敏感输入和
 bypass。真实 smoke 已覆盖 debug 与 unsigned release 两种 miss→hit 及 ABI/verified manifest。
 
 #310 对 Android Gradle `repositories {}` 做保守静态 gate：只允许模板的标准 repository allowlist；自定义 maven/mavenLocal/flatDir/exclusiveContent 和其他 repository entry 只关闭 cache reuse，普通构建继续。该切片不读取或 fingerprint 标准远端 repository runtime/state，未识别 repository/plugin I/O 与复杂 signing 仍需后续闭合。
+
+#312 对 Android Gradle `buildscript` 中的 `classpath` 做保守插件 gate：只有字面量、固定版本的
+`com.android.tools.build:gradle:<version>` 坐标保持 cache eligibility；未知坐标、动态版本、version-catalog
+或非字面量 classpath 只关闭 cache reuse，普通构建继续。该切片不读取或 fingerprint plugin 实现的运行时
+I/O，不闭合标准远端 repository runtime/state、复杂/远端 signing 或 release preview。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
