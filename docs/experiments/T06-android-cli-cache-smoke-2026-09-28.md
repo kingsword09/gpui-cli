@@ -346,6 +346,21 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 该 gate 仍是保守静态 marker，不追踪文件系统状态、路径对象或文件内容的完整运行时读集，也不闭合标准远端
   repository runtime/state、复杂/远端 signing、release preview 或真实设备验收。
 
+## T06 Gradle NIO `Files` operation cache gate（2026-10-05）
+
+- PR #341（`892fc21`）将 Java NIO `Files` 的状态/属性查询、directory stream、读写和文件系统变更 API 纳入
+  Android Gradle app-script marker，覆盖 `Files.exists/isReadable/isWritable/isExecutable/isHidden`、size/time/
+  attribute/permission APIs、symbolic-link/link/directory/temp-file APIs、delete/move、byte channel/stream/read/write/
+  find/content-type APIs，以及 `FileSystems` store/root enumeration、`FileStore` attribute 和 `Path.toRealPath()`。
+- 这些入口沿用 receiver-call marker 规则，命中只关闭 artifact cache reuse，普通 Gradle 构建继续；注释和字符串
+  不触发，模板 clean task 的 `tasks.register`/`Delete::class` 不被新增 marker 误判。
+- 本地 workspace `456 passed, 1 ignored`，fmt/clippy/build/design docs/package list/diff check 全部通过；真实
+  Android debug/release packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release miss→hit smoke 通过。
+  PR/push 两套 workflow 最终全绿；push Windows 首轮既有 coordinator state-file 时序断言失败，按约定只重跑该
+  Windows job 后通过；无版本发布/tag。
+- 该切片仍是静态保守 marker，不等于 Gradle/plugin/provider 任意运行时 I/O 或完整输入闭包，也不覆盖标准远端
+  repository runtime/state、复杂/远端 signing、release preview 或真实设备验收。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -480,6 +495,11 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
   456 passed、1 ignored，fmt/clippy/build/design docs/package list、diff check、Android debug/release packaging、
   双 ABI 与 CLI debug/release miss→hit smoke 通过；PR/push 两套 Linux/macOS/Windows、desktop-template、
   android-template、baseline-driver 全绿；squash 为 `0e04377`，无版本发布或 tag。
+- PR #341 的 NIO `Files`/`FileSystem` 状态、属性、目录流、读写和 mutation marker，以及注释/字符串和模板
+  clean-task 排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list、diff
+  check、Android debug/release packaging、双 ABI 与 CLI debug/release miss→hit smoke 通过；PR/push 两套
+  Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿（push Windows 失败 job 定向
+  重跑后通过）；squash 为 `892fc21`，无版本发布或 tag。
 
 ## 未覆盖
 

@@ -1050,6 +1050,12 @@ marker，包括 `canRead/canWrite/canExecute`、大小/时间/空间查询、`li
 读集或完整 Gradle 输入闭包；标准远端 repository runtime/state、复杂/远端 signing、release preview 和真实
 设备验收仍未闭合。
 
+#341 扩展到 Java NIO `Files` 状态/属性查询、目录流、读写和文件系统变更 API，并覆盖
+`FileSystems.getFileStores()`/`getRootDirectories()`、`FileStore` attributes 与 `Path.toRealPath()`；方法入口
+通过 receiver-call marker 只关闭 cache reuse，普通构建继续。注释和字符串不触发。该静态 gate 不追踪任意
+Gradle/provider/plugin 运行时读集或完整 Gradle 输入闭包；标准远端 repository runtime/state、复杂/远端 signing、
+release preview 和真实设备验收仍未闭合。
+
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
 3. 缓存复用不复用 run/安装身份；调用者取消不杀其他 owner 的共享构建。
