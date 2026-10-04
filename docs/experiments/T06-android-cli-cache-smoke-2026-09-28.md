@@ -273,6 +273,13 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   与 CLI miss→hit smoke 通过。该静态 marker 不解析 Gradle source provider/runtime 文件集合；标准远端 repository
   runtime/state、复杂 signing、release preview 和真实设备验收仍未闭合。
 
+## T06 Gradle source-root DSL alias cache gate（2026-10-04）
+
+- PR #325（`1b765ee`）补齐 source-root 声明的替代 DSL 形式：`setSrcDirs(...)`、`srcDirs = ...`、Groovy
+  command-style `srcDir 'path'` 和 `srcDirs += ...` 现在只关闭 Android artifact cache reuse，普通构建继续。
+- 模板 `srcDirs(gpuiJniLibsDir)` 受控例外保持可复用；回归验证注释和字符串中的 marker 文本不会误触发。
+- 该 gate 仍是保守静态扫描，不追踪 source provider 的运行时目录/文件变化，也不构成完整 Gradle 输入闭包或设备验收。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
@@ -392,6 +399,7 @@ Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 - PR #320 的 `file(...)`/`files(...)` 未建模路径 bypass、GPUI build-dir/NDK path 例外与混合未知输入回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging、ABI 检查与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `822030c`，无版本发布或 tag。
 - PR #322 的未建模 `srcDir(...)`/`srcDirs(...)` bypass 与模板 JNI `gpui.jniLibsDir` 例外回归通过；workspace 456 passed、1 个手动 benchmark ignored，集成/协议测试、clippy/build/fmt/design docs/package list、diff check 通过；本机 Android debug/release packaging、ABI 检查与 CLI miss→hit smoke 通过，缓存 APK 含 arm64-v8a/x86_64；PR 与 push 两套 CI 全绿，squash 为 `dfc023c`，无版本发布或 tag。
 - 文档 PR #323 将审计基准更新至 `1475d24`，补齐 #322 的 source-root gate、模板 JNI 例外、本地验证和未闭合边界；文档检查、PR/push 两套 CI 全绿，squash 为 `1475d24`，无版本发布或 tag。
+- PR #325 的 `setSrcDirs(...)`、属性赋值、Groovy command-style source-root bypass、模板 JNI 例外与注释/字符串排除回归通过；workspace 456 passed、1 个手动 benchmark ignored，clippy/build/fmt/design docs/package list、diff check 通过。PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 最终全绿；PR run 首次 macOS 遇到既有 registry manifest 测试偶发失败，按 job 重跑通过，fail-fast 取消的 Linux/Windows jobs 也分别重跑通过；squash 为 `1b765ee`，无版本发布或 tag。
 
 ## 未覆盖
 
