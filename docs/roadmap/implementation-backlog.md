@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-05，主分支 `cc1da49`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-05，主分支 `8a4d4b4`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -1026,6 +1026,11 @@ signing、release preview 和真实设备验收未闭合。
 加入 Android Gradle app-script marker，限定与非限定类名均只关闭 cache reuse，普通构建继续；注释/字符串不触发。
 该静态 marker 不追踪构造对象后续 I/O 或完整 Gradle 运行时读集。远端 repository runtime/state、复杂 signing、
 release preview 和真实设备验收未闭合。
+
+#331 将 `ClassLoader` resource lookup、`ServiceLoader` 与 `Class.forName` 动态类加载入口纳入 Android
+Gradle app-script I/O marker；命中只关闭 cache reuse，普通构建继续，注释/字符串不触发。它不追踪加载后的任意
+I/O、plugin/runtime 行为或完整 Gradle 输入闭包；远端 repository runtime/state、复杂 signing、release preview
+和真实设备验收仍未闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
