@@ -1,7 +1,8 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-05（Asia/Shanghai）。核查代码：`be895ce`（PR #333 squash merge）。
-本轮核查时 `origin/main` 指向该提交；后续提交须重新核对，本文不是动态状态。
+更新日期：2026-10-05（Asia/Shanghai）。核查代码：`e8d70cd`（PR #335 squash merge）；本轮复核了
+其间的文档提交 `c218710`、`6c4cdca` 和实现提交 `e8d70cd`。当前 `origin/main` 指向该提交；
+后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -149,6 +150,12 @@ cache reuse 被关闭。检测要求方法调用后存在参数，普通 `from` 
 内容变化或完整 Gradle runtime I/O，标准远端 repository runtime/state、复杂 signing、release preview 和设备
 验收仍未闭合。
 
+PR #335 将 Java NIO/File 的派生路径入口 `FileSystems.getDefault().getPath(...)`、
+`File.getCanonicalFile()`、`File.getCanonicalPath()`、`File.getAbsolutePath()` 和 `File.toPath()` 纳入同一
+Android Gradle app-script 静态 marker；命中时只关闭 cache reuse，普通 Gradle 构建继续。回归覆盖限定/非限定
+形式以及注释和字符串排除。该 gate 不追踪派生路径对象后续读取、plugin/build-script 任意运行时 I/O 或完整
+Gradle 输入闭包；标准远端 repository runtime/state、复杂/远端 signing、release preview 和真实设备验收仍未闭合。
+
 ## 2. 相对上次审计的新合并
 
 ### T06 Android Gradle cache input closure updates
@@ -255,6 +262,7 @@ cache reuse 被关闭。检测要求方法调用后存在参数，普通 `from` 
 | `cc1da49`（#329） | 扩展 file marker 至 Java/Kotlin `File(...)`、`Paths.get(...)`、`Path.of(...)`（含限定与非限定形式）；仅关闭 cache reuse，普通构建继续，注释/字符串不触发 | 不追踪构造对象后续读取或 Gradle 完整运行时读集；远端仓库状态、复杂 signing 与设备验收仍未闭合 |
 | `8a4d4b4`（#331） | 扩展 Android Gradle app-script I/O marker 至 `ClassLoader` resource lookup、`ServiceLoader` 与 `Class.forName`；只关闭 cache reuse，普通构建继续，注释/字符串不触发 | 不追踪加载类后的任意 I/O、plugin/runtime 行为或完整 Gradle 输入闭包；远端仓库状态、复杂 signing 与设备验收仍未闭合 |
 | `be895ce`（#333） | 扩展 marker 至 `from(...)` 与 Groovy `from 'path'` file collection 输入，覆盖布局文件集合及 source-set；只关闭 cache reuse，普通构建继续 | 不追踪集合后续内容变化或完整 Gradle runtime I/O；远端仓库状态、复杂 signing 与设备验收仍未闭合 |
+| `e8d70cd`（#335） | 扩展 marker 至 `FileSystems.getDefault().getPath(...)`、`getCanonicalFile()`、`getCanonicalPath()`、`getAbsolutePath()` 和 `toPath()` 派生路径入口；只关闭 cache reuse，普通构建继续，限定/非限定形式均覆盖，注释和字符串不触发 | 不追踪派生路径对象后续读取或完整 Gradle runtime I/O；远端 repository runtime/state、复杂 signing、release preview 与设备验收仍未闭合 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -521,6 +529,8 @@ cache reuse 被关闭。检测要求方法调用后存在参数，普通 `from` 
 | PR #331 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `8a4d4b4`；无版本发布/tag |
 | 本地运行时验证（PR #333） | `from(...)` / Groovy `from 'path'` file collection 与 source-set 调用 bypass；普通变量名、注释/字符串排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs、Android debug/release packaging、ABI 与 CLI miss→hit smoke 通过 |
 | PR #333 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `be895ce`；无版本发布/tag |
+| 本地运行时验证（PR #335） | `FileSystems.getDefault().getPath(...)`、`getCanonicalFile()`、`getCanonicalPath()`、`getAbsolutePath()`、`toPath()` 派生路径 marker 与限定/非限定形式、注释/字符串排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list、diff check 通过；真实 Android debug/release packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release miss→hit smoke 通过 |
+| PR #335 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `e8d70cd`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：

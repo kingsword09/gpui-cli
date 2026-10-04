@@ -1037,6 +1037,12 @@ I/O、plugin/runtime 行为或完整 Gradle 输入闭包；远端 repository run
 和字符串不触发。该静态 gate 不追踪集合后续内容变化或完整 Gradle runtime I/O；远端 repository runtime/state、
 复杂 signing、release preview 和真实设备验收仍未闭合。
 
+#335 将 Java NIO/File 的派生路径入口 `FileSystems.getDefault().getPath(...)`、`getCanonicalFile()`、
+`getCanonicalPath()`、`getAbsolutePath()` 和 `toPath()` 纳入 Android Gradle app-script marker；命中只关闭
+cache reuse，普通构建继续，限定/非限定形式均覆盖，注释和字符串不触发。该静态 gate 不追踪派生路径对象
+后续读取或完整 Gradle runtime I/O；标准远端 repository runtime/state、复杂/远端 signing、release preview
+和真实设备验收仍未闭合。
+
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
 3. 缓存复用不复用 run/安装身份；调用者取消不杀其他 owner 的共享构建。
