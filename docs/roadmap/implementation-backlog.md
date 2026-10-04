@@ -580,6 +580,7 @@ Gradle wrapper distributions 的 `init.d` 并对自定义入口 bypass；#300 �
 distribution 内容纳入 Android toolchain fingerprint，并对非标准布局/缺失安装/有界扫描失败 bypass；#302 在
 普通 build 与 matrix/live preview 的复用前及 Gradle 后重核验 distribution/global gate，变化时只保留普通 APK；
 #304 对本地 `buildSrc`/`build-logic` 自定义 Gradle plugin 输入直接 bypass cache reuse；#306 对普通
+#310 对 Android Gradle `repositories {}` 做保守静态 gate：仅允许 `google()`、`mavenCentral()`、`gradlePluginPortal()`，自定义 `maven`、`mavenLocal`、`flatDir`、`exclusiveContent` 和其他 repository entry 只关闭 cache reuse，普通 build/preview 继续；标准远端 repository runtime/state 仍未 fingerprint。
 Android app Gradle script 的已知文件/环境/网络/进程 I/O marker 直接 bypass cache reuse，保留已建模
 GPUI/NDK/签名读取与普通构建路径；#308 又允许无 signing 配置的 unsigned release APK 在非 live
 build/run 中复用 verified artifact，并对未知 Gradle plugin/alias/plugin-owned signing behavior 保守 bypass。
@@ -968,10 +969,12 @@ I/O marker gate：未建模的 provider/env、文件读取、网络/进程、`ap
 和受控签名读取作为当前已建模例外，注释、字符串和普通 app source 不触发。该扫描不是完整
 Gradle 解析器或运行时读集追踪，未识别的 plugin/script I/O 与远端仓库状态仍需后续闭合。
 
-#308 对没有 signing 配置的 Android release variant 开放非 live artifact cache reuse；Gradle
-release preview 仍显式 bypass。`plugins {}` 中未知 plugin、version-catalog alias、plugin-owned
+#308 对没有 signing 配置的 Android release variant 开放非 live artifact cache reuse；Gradle release
+preview 仍显式 bypass。`plugins {}` 中未知 plugin、version-catalog alias、plugin-owned
 signing behavior 只关闭 cache reuse；custom/remote signing、敏感输入和未识别运行时 I/O 继续保守
 bypass。真实 smoke 已覆盖 debug 与 unsigned release 两种 miss→hit 及 ABI/verified manifest。
+
+#310 对 Android Gradle `repositories {}` 做保守静态 gate：只允许模板的标准 repository allowlist；自定义 maven/mavenLocal/flatDir/exclusiveContent 和其他 repository entry 只关闭 cache reuse，普通构建继续。该切片不读取或 fingerprint 标准远端 repository runtime/state，未识别 repository/plugin I/O 与复杂 signing 仍需后续闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
