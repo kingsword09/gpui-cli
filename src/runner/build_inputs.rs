@@ -2067,6 +2067,14 @@ const ANDROID_GRADLE_FILE_IO_IDENTIFIERS: &[&str] = &[
     "copy",
     "sync",
     "ant",
+    "ClassLoader",
+    "ServiceLoader",
+    "getResource",
+    "getResourceAsStream",
+    "getSystemResource",
+    "getSystemResourceAsStream",
+    "loadClass",
+    "forName",
 ];
 const ANDROID_GRADLE_NETWORK_IDENTIFIERS: &[&str] = &[
     "URL",
@@ -6292,6 +6300,11 @@ mod tests {
             "val value = Paths.get(configPath)",
             "val value = java.nio.file.Path.of(\"config.json\")",
             "val value = Path.of(configPath)",
+            "val value = javaClass.getResource(\"/config.properties\")",
+            "val value = javaClass.getResourceAsStream(\"/config.properties\")",
+            "val value = ClassLoader.getSystemResource(\"config.properties\")",
+            "val value = ServiceLoader.load(MyProvider::class.java)",
+            "val value = Class.forName(providerClassName)",
             "android { sourceSets { getByName(\"main\") { java.srcDir(\"src/generated/java\") } } }",
             "android { sourceSets { getByName(\"main\") { java.srcDirs(\"src/generated/java\", \"src/shared/java\") } } }",
             "android { sourceSets { getByName(\"main\") { java.setSrcDirs(listOf(\"src/generated/java\")) } } }",
@@ -6344,7 +6357,8 @@ mod tests {
                 // System.getenv("CUSTOM_INPUT") and URL("https://example.test")
                 // file 'comment-only'
                 // File("comment-only") and Paths.get("comment-only")
-                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\")"
+                // javaClass.getResource("comment-only") and ServiceLoader.load(Provider::class.java)
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\")"
             "#,
         )
         .unwrap();
