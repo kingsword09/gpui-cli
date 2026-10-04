@@ -1,9 +1,9 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-05（Asia/Shanghai）。核查代码：`892fc21`（PR #341 squash merge）；本轮复核了
+更新日期：2026-10-05（Asia/Shanghai）。核查代码：`70d7c5c`（PR #345 squash merge）；本轮复核了
 其间的文档提交 `c218710`、`6c4cdca`、`29ca7c4`、`e32ebb0`、`1dce78f`、`37adb4f`、`f497e4b`、
-`d144e61` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`。PR #343 仅校正状态基准；当前 `origin/main`
-指向 `d144e61`。后续提交须重新核对，本文不是动态状态。
+`d144e61`、`0525f25` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`、`70d7c5c`。PR #343/#344
+仅校正状态基准；当前 `origin/main` 指向 `70d7c5c`。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -171,6 +171,14 @@ PR #341 扩展到 Java NIO `Files` 状态/属性查询、目录流、读写和�
 Windows CI 中既有 coordinator 并发时序测试断言 state file 尚未出现而失败，单独重跑后通过。该 marker
 不构成任意 Gradle/provider/plugin 运行时 I/O 追踪、完整输入闭包或真实设备验收；标准远端 repository
 runtime/state、复杂/远端 signing 和 release preview 仍未闭合。
+
+PR #345 将 Java `ZipFile`/`JarFile`、ZIP/JAR 输入输出流及 `ZipFileSystemProvider` 构造入口加入 Android
+Gradle app-script 静态 I/O marker，并保留 `FileSystems.newFileSystem(...)` 覆盖。命中只关闭 cache reuse，普通
+构建继续；注释、字符串、普通 app source 和模板 clean task 不触发。workspace、Android debug/release 打包及
+CLI miss→hit smoke、fmt/clippy/build/design docs/package list/diff check 均通过；PR 与 push 两套
+Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI 全绿，squash merge
+`70d7c5c`。这不追踪归档对象后续 I/O，也不等于完整 Gradle/plugin 输入闭包或真实设备验收；标准远端
+repository runtime/state、复杂/远端 signing 与 release preview 仍未闭合。
 
 ## 2. 相对上次审计的新合并
 
@@ -553,6 +561,8 @@ runtime/state、复杂/远端 signing 和 release preview 仍未闭合。
 | PR #338 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `0e04377`；无版本发布/tag |
 | 本地运行时验证（PR #341） | Java NIO `Files` 状态/属性、目录流、读写/变更、`FileSystems` store/root 和 `Path.toRealPath()` marker 回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list、diff check、真实 Android debug/release packaging、双 ABI 和 CLI debug/release miss→hit smoke 通过；首轮 push Windows 的既有 coordinator 时序测试失败后只重跑该 job 并通过 |
 | PR #341 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；push Windows 失败 job 定向重跑后通过；squash merge `892fc21`；无版本发布/tag |
+| 本地运行时验证（PR #345） | ZIP/JAR file/stream constructor 与 `FileSystems.newFileSystem(...)` marker 回归通过；注释/字符串、普通 app source 和模板 clean task 排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list、diff check 通过；真实 Android debug/release packaging 与 CLI debug/release miss→hit smoke 通过 |
+| PR #345 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `70d7c5c`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：

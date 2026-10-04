@@ -361,6 +361,21 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 该切片仍是静态保守 marker，不等于 Gradle/plugin/provider 任意运行时 I/O 或完整输入闭包，也不覆盖标准远端
   repository runtime/state、复杂/远端 signing、release preview 或真实设备验收。
 
+## T06 Gradle ZIP/JAR archive constructor cache gate（2026-10-05）
+
+- PR #345（`70d7c5c`）将 `ZipFile`、`JarFile`、`ZipInputStream`、`JarInputStream`、`ZipOutputStream`、
+  `JarOutputStream` 和 `ZipFileSystemProvider` 的构造调用纳入 Android Gradle app-script 静态 I/O marker；
+  同一回归集覆盖 `FileSystems.newFileSystem(...)`。匹配只关闭 artifact cache reuse，普通构建继续。
+- 回归覆盖限定/非限定 archive type、注释/字符串排除、普通 `app/src/main` source 不扫描，以及模板
+  `tasks.register("clean", Delete::class) { delete(rootProject.layout.buildDirectory) }` 不误触发。
+- 本地 `cargo test --workspace --locked` 为 456 passed、1 ignored，integration/protocol 测试通过；
+  fmt/clippy/build/design docs/package list/diff check 通过。Android 模板 debug/release packaging 和 CLI
+  debug/release miss→hit smoke 通过，核对生成 APK 与目标 ABI。PR/push 两套 Linux/macOS/Windows、
+  desktop-template、android-template、baseline-driver 全部通过；squash merge `70d7c5c`，无版本发布/tag。
+- 这是构造器层的保守静态 gate；不跟踪 archive entry 枚举、对象后续 read/write、压缩流或任意
+  Gradle/plugin/provider runtime I/O，也不闭合标准远端 repository state、复杂/远端 signing、release preview
+  或真实 Android 设备验收。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
