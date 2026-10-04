@@ -2101,6 +2101,10 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         return true;
     }
 
+    if gradle_path_constructor_uses_unmodeled_path(source) {
+        return true;
+    }
+
     if gradle_source_root_api_uses_unmodeled_path(source) {
         return true;
     }
@@ -2168,6 +2172,49 @@ fn gradle_file_api_uses_unmodeled_path(source: &str) -> bool {
         }
     }
     false
+}
+
+fn gradle_path_constructor_uses_unmodeled_path(source: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            if identifier == "File" && gradle_call_has_opening_parenthesis(source, end) {
+                return true;
+            }
+            if (identifier == "Paths" && gradle_member_call_has_name(source, end, "get"))
+                || (identifier == "Path" && gradle_member_call_has_name(source, end, "of"))
+            {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_member_call_has_name(source: &str, member_owner_end: usize, member: &str) -> bool {
+    let Some(dot) = gradle_skip_trivia(source, member_owner_end) else {
+        return false;
+    };
+    if source.as_bytes().get(dot) != Some(&b'.') {
+        return false;
+    }
+    let Some(member_start) = gradle_skip_trivia(source, dot + 1) else {
+        return false;
+    };
+    let Some(member_end) = member_start.checked_add(member.len()) else {
+        return false;
+    };
+    source.get(member_start..member_end) == Some(member)
+        && gradle_call_has_opening_parenthesis(source, member_end)
 }
 
 fn gradle_source_root_api_uses_unmodeled_path(source: &str) -> bool {
@@ -6239,6 +6286,12 @@ mod tests {
             "val value = file 'config.json'",
             "val value = files 'config.json'",
             "android { sourceSets { main { java.srcDirs files 'src/generated/java' } } }",
+            "val value = File(\"config.json\")",
+            "val value = java.io.File(\"config.json\")",
+            "val value = java.nio.file.Paths.get(\"config.json\")",
+            "val value = Paths.get(configPath)",
+            "val value = java.nio.file.Path.of(\"config.json\")",
+            "val value = Path.of(configPath)",
             "android { sourceSets { getByName(\"main\") { java.srcDir(\"src/generated/java\") } } }",
             "android { sourceSets { getByName(\"main\") { java.srcDirs(\"src/generated/java\", \"src/shared/java\") } } }",
             "android { sourceSets { getByName(\"main\") { java.setSrcDirs(listOf(\"src/generated/java\")) } } }",
@@ -6290,7 +6343,8 @@ mod tests {
             r#"
                 // System.getenv("CUSTOM_INPUT") and URL("https://example.test")
                 // file 'comment-only'
-                val text = "file(\"config.json\").readText() file 'string-only'"
+                // File("comment-only") and Paths.get("comment-only")
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\")"
             "#,
         )
         .unwrap();
