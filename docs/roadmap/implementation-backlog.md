@@ -1056,6 +1056,14 @@ marker，包括 `canRead/canWrite/canExecute`、大小/时间/空间查询、`li
 Gradle/provider/plugin 运行时读集或完整 Gradle 输入闭包；标准远端 repository runtime/state、复杂/远端 signing、
 release preview 和真实设备验收仍未闭合。
 
+#345 将 Java `ZipFile`/`JarFile`、ZIP/JAR 输入输出流及 `ZipFileSystemProvider` 构造入口纳入同一 Android
+Gradle app-script marker，并覆盖 `FileSystems.newFileSystem(...)`；命中只关闭 cache reuse，普通构建继续。
+注释、字符串、普通 app source 和模板 clean task 不触发。workspace 456 passed、1 ignored，fmt/clippy/build/
+design docs/package list/diff check、Android debug/release packaging 与 CLI miss→hit smoke 通过；PR/push
+两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver CI 全绿，squash 为 `70d7c5c`。
+此静态 marker 不跟踪归档对象后续读取/写入、Gradle/plugin 任意运行时 I/O 或完整输入闭包；标准远端
+repository runtime/state、复杂/远端 signing、release preview 和真实设备验收仍未闭合，T06 保持 `in_progress`。
+
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
 3. 缓存复用不复用 run/安装身份；调用者取消不杀其他 owner 的共享构建。
