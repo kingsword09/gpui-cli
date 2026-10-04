@@ -2097,6 +2097,29 @@ const ANDROID_GRADLE_NETWORK_IDENTIFIERS: &[&str] = &[
     "DatagramSocket",
     "uri",
 ];
+const ANDROID_GRADLE_FILE_METADATA_IDENTIFIERS: &[&str] = &[
+    "canRead",
+    "canWrite",
+    "canExecute",
+    "isHidden",
+    "length",
+    "lastModified",
+    "getFreeSpace",
+    "getTotalSpace",
+    "getUsableSpace",
+    "list",
+    "createNewFile",
+    "mkdir",
+    "mkdirs",
+    "delete",
+    "deleteOnExit",
+    "renameTo",
+    "setLastModified",
+    "setReadOnly",
+    "setWritable",
+    "setReadable",
+    "setExecutable",
+];
 
 fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
     if gradle_provider_call_uses_unmodeled_value(
@@ -2124,6 +2147,10 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
     }
 
     if gradle_source_root_api_uses_unmodeled_path(source) {
+        return true;
+    }
+
+    if gradle_file_metadata_api_uses_unmodeled_path(source) {
         return true;
     }
 
@@ -2284,6 +2311,31 @@ fn gradle_source_root_api_uses_unmodeled_path(source: &str) -> bool {
                 if !managed_template_root {
                     return true;
                 }
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_file_metadata_api_uses_unmodeled_path(source: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        let bytes = source.as_bytes();
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            let receiver = source[..position].trim_end();
+            if ANDROID_GRADLE_FILE_METADATA_IDENTIFIERS.contains(&identifier)
+                && receiver.ends_with('.')
+                && gradle_call_has_opening_parenthesis(source, end)
+            {
+                return true;
             }
             cursor = end;
         } else {
@@ -6348,6 +6400,28 @@ mod tests {
             "val value = File(\"config.json\").getCanonicalPath()",
             "val value = File(\"config.json\").toPath()",
             "val value = File(\"config.json\").getAbsolutePath()",
+            "val value = File(\"config.json\").canRead()",
+            "val value = File(\"config.json\").canWrite()",
+            "val value = File(\"config.json\").canExecute()",
+            "val value = File(\"config.json\").isHidden()",
+            "val value = File(\"config.json\").length()",
+            "val value = File(\"config.json\").lastModified()",
+            "val value = File(\"config.json\").getFreeSpace()",
+            "val value = File(\"config.json\").getTotalSpace()",
+            "val value = File(\"config.json\").getUsableSpace()",
+            "val value = File(\"config\").list()",
+            "val value = File(\"config\").listFiles()",
+            "File(\"config.json\").createNewFile()",
+            "File(\"generated\").mkdir()",
+            "File(\"generated\").mkdirs()",
+            "File(\"config.json\").delete()",
+            "File(\"config.json\").deleteOnExit()",
+            "File(\"config.json\").renameTo(File(\"moved.json\"))",
+            "File(\"config.json\").setLastModified(timestamp)",
+            "File(\"config.json\").setReadOnly()",
+            "File(\"config.json\").setWritable(true)",
+            "File(\"config.json\").setReadable(true)",
+            "File(\"config.json\").setExecutable(true)",
             "val value = javaClass.getResource(\"/config.properties\")",
             "val value = javaClass.getResourceAsStream(\"/config.properties\")",
             "val value = ClassLoader.getSystemResource(\"config.properties\")",
@@ -6411,10 +6485,12 @@ mod tests {
                 // file 'comment-only'
                 // File("comment-only") and Paths.get("comment-only")
                 // File("comment-only").getCanonicalPath() and FileSystems.getDefault().getPath("comment-only")
+                // File("comment-only").listFiles() and File("comment-only").lastModified()
+                // File("comment-only").delete() and File("comment-only").canRead()
                 // javaClass.getResource("comment-only") and ServiceLoader.load(Provider::class.java)
                 // fileCollection.from("comment-only")
                 val from = "ordinary-variable"
-                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath()"
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete()"
             "#,
         )
         .unwrap();
@@ -6442,6 +6518,22 @@ mod tests {
                 keystoreProperties.load(FileInputStream("keystore.properties"))
                 val ndkDirectory = file("ndk")
                 ndkDirectory.resolve("source.properties").inputStream()
+            "#,
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
+
+        fs::write(
+            &script,
+            r#"
+                tasks.register("clean", Delete::class) {
+                    delete(rootProject.layout.buildDirectory)
+                }
             "#,
         )
         .unwrap();
