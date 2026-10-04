@@ -476,13 +476,14 @@ live preview builder 已接入 source-project target-specific output root，并�
 `BuildOutputLock`；#169 又让 desktop preview 通过独立 verified artifact manifest 在验证成功时
 跳过 Cargo；#171 又让 iOS simulator live preview 在同一语义下验证完整 `.app` bundle 并跳过
 rustup/Cargo/XcodeGen/`xcodebuild`；#173 又让 Android default-debug live preview 在同一语义下
-验证 JNI/APK 输出并跳过 rustup/cargo-ndk/Gradle；这仍不等于 iOS physical、Android release APK/
-复杂/远端 signing live-preview 命中、跨命令 ownership 或 coalescing。#205 已覆盖受控 Android
+验证 JNI/APK 输出并跳过 rustup/cargo-ndk/Gradle；这仍不等于 iOS physical、Android release
+preview/复杂或远端 signing live-preview 命中、跨命令 ownership 或 coalescing。#205 已覆盖受控 Android
 local custom/release signing 的非 live build/run 命中，#209 又覆盖显式 debug custom-signing live
 preview 的 manifest/coordinator 复用，#249 又允许静态可证明的 local release-only signing 配置复用
 debug preview：BuildKey 同时绑定 release signing fingerprint 与默认 debug keystore hash，复用仍需
-通过 verified JNI/APK manifest 和 coordinator 校验。release APK、默认 debug keystore 缺失或输入变化、
-复杂 DSL/插件/远端 signing 继续 bypass。#255 又让 Android Gradle root 内 Kotlin/Groovy/Java
+通过 verified JNI/APK manifest 和 coordinator 校验。signed release APK、默认 debug keystore 缺失或输入变化、
+复杂 DSL/插件/远端 signing 继续 bypass；#308 又让无 signing 配置的 unsigned release APK 在非 live
+build/run 中复用 verified artifact。#255 又让 Android Gradle root 内 Kotlin/Groovy/Java
 signing marker 命中 cache bypass，并在 `settings.gradle(.kts)` 声明 `includeBuild` 时保守禁用复用，
 避免 convention plugin 或外部 included build 改写 variant signing 却被静态识别为 default-debug；这
 只扩大 cache miss 范围，不阻止普通冻结构建，也不提供复杂/远端 signing cache。记录见
@@ -580,7 +581,8 @@ distribution 内容纳入 Android toolchain fingerprint，并对非标准布局/
 普通 build 与 matrix/live preview 的复用前及 Gradle 后重核验 distribution/global gate，变化时只保留普通 APK；
 #304 对本地 `buildSrc`/`build-logic` 自定义 Gradle plugin 输入直接 bypass cache reuse；#306 对普通
 Android app Gradle script 的已知文件/环境/网络/进程 I/O marker 直接 bypass cache reuse，保留已建模
-GPUI/NDK/签名读取与普通构建路径。
+GPUI/NDK/签名读取与普通构建路径；#308 又允许无 signing 配置的 unsigned release APK 在非 live
+build/run 中复用 verified artifact，并对未知 Gradle plugin/alias/plugin-owned signing behavior 保守 bypass。
 其他输入遗漏、
 跨命令共享构建和冻结执行边界仍有效，
 见[当前审计](current-status.md)。
@@ -595,8 +597,8 @@ Android default-debug 切片在 BuildKey 纳入 debug keystore 指纹并完整�
 允许命中；#205 又为受控 local custom/release signing 的非 live build/run 纳入签名输入摘要并
 允许命中；#209 又让显式 debug custom-signing live preview 纳入 signing fingerprint，并在
 verified manifest/coordinator 校验通过时命中；#249 又让受控 local release-only signing 配置的
-debug preview 同时绑定 release signing fingerprint 与默认 debug keystore hash；Android release APK、
-复杂/远端 signing 仍 bypass；记录见
+debug preview 同时绑定 release signing fingerprint 与默认 debug keystore hash；unsigned release APK
+的非 live cache hit 由 #308 补齐，signed release/复杂/远端 signing 仍 bypass；记录见
 [T06 Android debug manifest cache hit](../experiments/T06-android-debug-cache-hit-2026-09-28.md) 和
 [T06 Android signing BuildKey](../experiments/T06-android-signing-build-key-2026-09-30.md)。
 Android-template CI 另以真实 cargo-ndk 与 Gradle 构建最小 cdylib 两次，验证 Android CLI
@@ -965,6 +967,11 @@ I/O marker gate：未建模的 provider/env、文件读取、网络/进程、`ap
 入口只关闭 cache reuse，普通构建和 preview 继续；GPUI ABI/输出目录、NDK `source.properties`
 和受控签名读取作为当前已建模例外，注释、字符串和普通 app source 不触发。该扫描不是完整
 Gradle 解析器或运行时读集追踪，未识别的 plugin/script I/O 与远端仓库状态仍需后续闭合。
+
+#308 对没有 signing 配置的 Android release variant 开放非 live artifact cache reuse；Gradle
+release preview 仍显式 bypass。`plugins {}` 中未知 plugin、version-catalog alias、plugin-owned
+signing behavior 只关闭 cache reuse；custom/remote signing、敏感输入和未识别运行时 I/O 继续保守
+bypass。真实 smoke 已覆盖 debug 与 unsigned release 两种 miss→hit 及 ABI/verified manifest。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
