@@ -2020,6 +2020,7 @@ const ANDROID_GRADLE_FILE_IO_IDENTIFIERS: &[&str] = &[
     "FileWriter",
     "RandomAccessFile",
     "FileChannel",
+    "FileSystems",
     "Files",
     "fileTree",
     "zipTree",
@@ -2073,6 +2074,11 @@ const ANDROID_GRADLE_FILE_IO_IDENTIFIERS: &[&str] = &[
     "getResourceAsStream",
     "getSystemResource",
     "getSystemResourceAsStream",
+    "getPath",
+    "getCanonicalFile",
+    "getCanonicalPath",
+    "getAbsolutePath",
+    "toPath",
     "loadClass",
     "forName",
 ];
@@ -6334,8 +6340,14 @@ mod tests {
             "val value = java.io.File(\"config.json\")",
             "val value = java.nio.file.Paths.get(\"config.json\")",
             "val value = Paths.get(configPath)",
+            "val value = FileSystems.getDefault().getPath(\"config.json\")",
+            "val value = java.nio.file.FileSystems.getDefault().getPath(configPath)",
             "val value = java.nio.file.Path.of(\"config.json\")",
             "val value = Path.of(configPath)",
+            "val value = File(\"config.json\").getCanonicalFile()",
+            "val value = File(\"config.json\").getCanonicalPath()",
+            "val value = File(\"config.json\").toPath()",
+            "val value = File(\"config.json\").getAbsolutePath()",
             "val value = javaClass.getResource(\"/config.properties\")",
             "val value = javaClass.getResourceAsStream(\"/config.properties\")",
             "val value = ClassLoader.getSystemResource(\"config.properties\")",
@@ -6398,10 +6410,11 @@ mod tests {
                 // System.getenv("CUSTOM_INPUT") and URL("https://example.test")
                 // file 'comment-only'
                 // File("comment-only") and Paths.get("comment-only")
+                // File("comment-only").getCanonicalPath() and FileSystems.getDefault().getPath("comment-only")
                 // javaClass.getResource("comment-only") and ServiceLoader.load(Provider::class.java)
                 // fileCollection.from("comment-only")
                 val from = "ordinary-variable"
-                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\")"
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath()"
             "#,
         )
         .unwrap();
