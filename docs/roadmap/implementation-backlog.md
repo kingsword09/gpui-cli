@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-04，主分支 `c754013`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-04，主分支 `822030c`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -1001,6 +1001,11 @@ ValueSource 实现或 provider closure 的实际读集；标准远端 repository
 字面量、固定版本的 `com.android.tools.build:gradle:<version>` 坐标保持 cache eligibility；未知坐标和非字面量/
 catalog 值只关闭 cache reuse，普通构建继续。该切片不闭合 plugin 实现任意运行时 I/O、标准远端 repository
 runtime/state、复杂/远端 signing、release preview 或真实设备验收。
+
+#320 对 Android Gradle app script 的已知 I/O marker 增加通用 `file(...)`/`files(...)` 路径解析检测；未建模调用
+只关闭 cache reuse，普通构建继续。由已建模 `gpui.buildDir` 输入驱动的 build-directory 路径，以及配合
+`ANDROID_NDK_HOME`/`source.properties` 使用的模板路径保持可复用。marker 不跟踪解析后对象的后续使用，标准远端
+repository runtime/state、复杂/远端 signing、release preview 与真实设备验收仍未闭合。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
