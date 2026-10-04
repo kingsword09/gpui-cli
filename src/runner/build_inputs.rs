@@ -2157,7 +2157,7 @@ fn gradle_file_api_uses_unmodeled_path(source: &str) -> bool {
             }
             let identifier = &source[position..end];
             if matches!(identifier, "file" | "files")
-                && gradle_call_has_opening_parenthesis(source, end)
+                && gradle_file_call_has_path_argument(source, end)
                 && !gradle_file_call_is_managed(source, identifier, end)
             {
                 return true;
@@ -2228,6 +2228,17 @@ fn gradle_file_call_is_managed(source: &str, identifier: &str, method_end: usize
 fn gradle_call_has_opening_parenthesis(source: &str, method_end: usize) -> bool {
     gradle_skip_trivia(source, method_end).and_then(|opening| source.as_bytes().get(opening))
         == Some(&b'(')
+}
+
+fn gradle_file_call_has_path_argument(source: &str, method_end: usize) -> bool {
+    let Some(argument) = gradle_skip_trivia(source, method_end) else {
+        return false;
+    };
+    match source.as_bytes().get(argument) {
+        Some(b'(' | b'[' | b'{' | b'"' | b'\'') => true,
+        Some(byte) if is_gradle_identifier_start(*byte) => true,
+        _ => false,
+    }
 }
 
 fn gradle_call_has_exact_argument(source: &str, method_end: usize, expected: &str) -> bool {
@@ -6225,6 +6236,9 @@ mod tests {
             "val value = providers.gradleProperty(\"custom.input\")",
             "val value = file(\"config.json\")",
             "val value = files(\"config.json\")",
+            "val value = file 'config.json'",
+            "val value = files 'config.json'",
+            "android { sourceSets { main { java.srcDirs files 'src/generated/java' } } }",
             "android { sourceSets { getByName(\"main\") { java.srcDir(\"src/generated/java\") } } }",
             "android { sourceSets { getByName(\"main\") { java.srcDirs(\"src/generated/java\", \"src/shared/java\") } } }",
             "android { sourceSets { getByName(\"main\") { java.setSrcDirs(listOf(\"src/generated/java\")) } } }",
@@ -6275,7 +6289,8 @@ mod tests {
             &script,
             r#"
                 // System.getenv("CUSTOM_INPUT") and URL("https://example.test")
-                val text = "file(\"config.json\").readText()"
+                // file 'comment-only'
+                val text = "file(\"config.json\").readText() file 'string-only'"
             "#,
         )
         .unwrap();
