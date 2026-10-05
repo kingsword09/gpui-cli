@@ -2013,11 +2013,22 @@ fn is_android_gradle_app_script_input(path: &str) -> bool {
 const ANDROID_GRADLE_MANAGED_PROPERTIES: &[&str] =
     &["gpui.abis", "gpui.buildDir", "gpui.jniLibsDir"];
 const ANDROID_GRADLE_MANAGED_ENVIRONMENT: &[&str] = &["GPUI_ANDROID_ABIS", "ANDROID_NDK_HOME"];
+// Stream decorators can hide an external input behind an already-created stream value.
 const ANDROID_GRADLE_FILE_IO_IDENTIFIERS: &[&str] = &[
     "FileInputStream",
     "FileOutputStream",
     "FileReader",
     "FileWriter",
+    "BufferedInputStream",
+    "BufferedOutputStream",
+    "DataInputStream",
+    "DataOutputStream",
+    "ObjectInputStream",
+    "ObjectOutputStream",
+    "InputStreamReader",
+    "OutputStreamWriter",
+    "BufferedReader",
+    "BufferedWriter",
     "RandomAccessFile",
     "FileChannel",
     "AsynchronousFileChannel",
@@ -6905,6 +6916,51 @@ mod tests {
             android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn android_gradle_unmodeled_stream_apis_disable_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        let script = app.join("build.gradle.kts");
+
+        for source in [
+            "val type = BufferedInputStream::class.java",
+            "val value = BufferedInputStream(input)",
+            "val value = java.io.BufferedOutputStream(output)",
+            "val value = DataInputStream(input)",
+            "val value = java.io.DataOutputStream(output)",
+            "val value = ObjectInputStream(input)",
+            "val value = java.io.ObjectOutputStream(output)",
+            "val value = InputStreamReader(input)",
+            "val value = java.io.OutputStreamWriter(output)",
+            "val value = BufferedReader(reader)",
+            "val value = java.io.BufferedWriter(writer)",
+        ] {
+            fs::write(&script, source).unwrap();
+            let native = NativeInputs::scan(root.path()).unwrap();
+            let reason = android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .unwrap_or_else(|| panic!("stream wrapper constructor was missed: {source}"));
+            assert!(reason.contains(ANDROID_GRADLE_APP_SCRIPT_IO_CACHE_DISABLED_REASON));
+        }
+
+        fs::write(
+            &script,
+            r#"
+                // BufferedInputStream(input), DataOutputStream(output), and BufferedReader(reader)
+                val example = "ObjectInputStream(input) InputStreamReader(input) BufferedWriter(writer)"
+            "#,
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none(),
+            "comments and strings must not trigger the stream wrapper gate"
         );
     }
 
