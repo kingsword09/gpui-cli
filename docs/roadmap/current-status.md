@@ -1,9 +1,9 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-05（Asia/Shanghai）。核查代码：`4797ee1`（PR #367 squash merge）；本轮复核了
+更新日期：2026-10-05（Asia/Shanghai）。核查代码：`41a182e`（PR #369 squash merge）；本轮复核了
 其间的文档提交 `c218710`、`6c4cdca`、`29ca7c4`、`e32ebb0`、`1dce78f`、`37adb4f`、`f497e4b`、
-`d144e61`、`0525f25`、`338bcf0`、`032e9a9`、`1d7f832`、`17a225e`、`c4cc70f`、`b2901d4`、`9b37df6`、`1e12166`、`72e1590`、`9faacc4`、`58a8087`、`65f6385`、`28e652c`、`9199289` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`、`70d7c5c`、`4d8b251`、`7473a5b`、`dd316eb`、`90174a7`、`550732e`、`b7b1949`、`e0c36ed`。
-PR #343/#344/#346/#347/#348/#350/#351/#353/#354/#356/#358/#359/#361/#362/#364/#365/#367 仅校正或记录状态；当前 `origin/main` 指向 `4797ee1`。后续提交须重新核对，本文不是动态状态。
+`d144e61`、`0525f25`、`338bcf0`、`032e9a9`、`1d7f832`、`17a225e`、`c4cc70f`、`b2901d4`、`9b37df6`、`1e12166`、`72e1590`、`9faacc4`、`58a8087`、`65f6385`、`28e652c`、`9199289`、`4797ee1`、`e715ba6` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`、`70d7c5c`、`4d8b251`、`7473a5b`、`dd316eb`、`90174a7`、`550732e`、`b7b1949`、`e0c36ed`、`41a182e`。
+PR #343/#344/#346/#347/#348/#350/#351/#353/#354/#356/#358/#359/#361/#362/#364/#365/#367/#368 仅校正或记录状态；当前 `origin/main` 指向 `41a182e`。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -247,6 +247,18 @@ visitor：`AsynchronousFileChannel`、`SeekableByteChannel`、`FileSystemProvide
 普通 Gradle 构建。检测不判断异步操作/回调完成、provider 后端、遍历范围或实际文件集合；没有据此宣称完整
 Gradle 输入闭包。
 
+PR #369 补齐 Gradle 字符串内的表达式执行入口：双引号字符串（含三重双引号）中的 `${...}` 只关闭 Android
+artifact cache reuse，普通构建继续；转义后的字面文本、注释与模板简单 `$gpuiAbis` 引用保持原有策略。
+它不求值或追踪表达式，即使纯计算也保守 bypass。新增 native-input 回归先复现环境读取被漏过，再确认修复；
+workspace 共 490 passed、1 ignored（CLI 单元测试 457 passed），fmt/clippy/build/design docs/package list/
+diff check、Android debug/release packaging、双 ABI 和 CLI miss→hit smoke 均通过。真实 NDK/Gradle 对照
+保持源码及 BuildKey 相同，只将插值环境值从 `2.1.0` 改为 `2.2.0`，`aapt2` 确认 APK versionName 与内容
+hash 随之变化，两次均不发布 reusable manifest，原有 debug/release manifests 未被覆盖。
+PR/push 两套三 OS、desktop/android template 和 baseline-driver 首次全绿，squash 为 `41a182e`。
+这只补齐一类静态 cache gate；完整 Kotlin/Groovy 语义、Gradle/plugin 输入闭包和真实设备验收仍未闭合，
+T06 保持 `in_progress`。对照输入、hash 和 CI 链接见
+[T06 Android CLI cache smoke](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
+
 ## 2. 相对上次审计的新合并
 
 ### T06 Android Gradle cache input closure updates
@@ -362,6 +374,7 @@ Gradle 输入闭包。
 | `550732e`（#360） | 将 Java NIO `FileSystemProvider`、`DirectoryStream`、`SecureDirectoryStream` 类型/接口入口加入 Android Gradle app-script 静态 I/O marker；仅关闭 cache reuse | 不跟踪 provider 后端、stream 实际枚举的文件或完整 Gradle/plugin runtime I/O；远端仓库状态、复杂 signing、release preview 和真实设备验收仍未闭合 |
 | `b7b1949`（#363） | 将 `Files.walkFileTree` 与 Java NIO visitor/result/option/attributes 类型加入 Android Gradle app-script 静态 I/O marker；walk 与 visitor callback 入口仅关闭 cache reuse | 不评估遍历范围、visitor 实际访问文件集合或完整 Gradle/plugin runtime I/O；远端仓库状态、复杂 signing、release preview 和真实设备验收仍未闭合 |
 | `e0c36ed`（#366） | 将 `PathMatcher` 与 `FileSystem.getPathMatcher(...)` 加入 Android Gradle app-script 静态 I/O marker；matcher/type/factory 引用仅关闭 cache reuse | 不解析实际匹配路径或完整 Gradle/plugin 输入集合；远端仓库状态、复杂 signing、release preview 和设备验收仍未闭合 |
+| `41a182e`（#369） | 双引号字符串（含三重双引号）中的 `${...}` 表达式保守 bypass Android artifact reuse；真实同源码/同 BuildKey 环境切换对照确认 APK 版本与 hash 更新，且不发布可复用 manifest | 不求值表达式或追踪完整 Gradle I/O；简单 `$name` 保持现有策略，远端仓库状态、复杂 signing、release preview 和设备验收仍未闭合 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -650,6 +663,8 @@ Gradle 输入闭包。
 | PR #363 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `b7b1949`；无版本发布/tag |
 | 本地运行时验证（PR #366） | `PathMatcher` 与 `FileSystem.getPathMatcher` 限定/非限定 glob/pattern 回归通过，并覆盖注释、字符串、普通 app source 排除；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list/diff check、Android debug/release packaging、双 ABI 与 CLI debug/release miss→hit smoke 通过 |
 | PR #366 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过（首轮 Windows coordinator/mobile 时序用例短暂失败、fail-fast 取消 macOS job 后，按 job 定向重跑均通过）；squash merge `e0c36ed`；无版本发布/tag |
+| PR #369 本地验证 | workspace 490 passed、1 ignored（CLI 单元测试 457 passed），fmt/clippy/build/design docs/package list/diff check 通过；Android debug/release packaging、双 ABI 和 CLI miss→hit 通过；同源码/同 BuildKey 的 `2.1.0`→`2.2.0` 环境插值由 `aapt2` 核对 APK 版本，两次 bypass、不发布 manifest，已有 manifests 保留 |
+| PR #369 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 首次全部通过；squash merge `41a182e`；本轮未运行 GUI/设备验收 |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：

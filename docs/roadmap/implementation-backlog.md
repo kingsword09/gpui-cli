@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-05，主分支 `4797ee1`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-05，主分支 `41a182e`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -1114,6 +1114,17 @@ marker；matcher/type/factory 引用命中只关闭 cache reuse，普通构建�
 list/diff check、Android debug/release packaging、双 ABI 与 CLI miss→hit smoke 通过；PR/push 两套三 OS、
 desktop/android template、baseline-driver 最终全绿，squash 为 `e0c36ed`。不解析实际匹配路径或完整 Gradle/
 plugin 输入集合；复杂 signing、release preview、真实设备验收仍未闭合，T06 保持 `in_progress`。
+
+#369 对双引号字符串（含三重双引号）中的 `${...}` 表达式增加独立静态检查，避免 scanner 跳过字符串后漏掉
+环境或文件读取；只关闭 artifact cache reuse，普通 build/preview 继续。转义字面文本、注释与模板简单
+`$gpuiAbis` 引用保留原策略，纯表达式也保守 bypass。native-input 回归修复前失败、修复后通过；workspace
+490 passed、1 ignored（CLI 单元测试 457 passed），本地格式/clippy/build/docs/package/diff 检查及 Android
+debug/release packaging、双 ABI、CLI miss→hit 均通过。同源码/同 BuildKey 下仅切换插值环境值，真实 APK
+versionName 经 `aapt2` 确认从 `2.1.0` 更新为 `2.2.0`，hash 改变，两次均未发布可复用 manifest，已有 manifests
+未被覆盖。PR/push 两套三 OS、desktop/android template、baseline-driver 首次全绿，squash 为 `41a182e`。
+该检查不求值表达式、不构成完整 Kotlin/Groovy parser 或 Gradle/plugin 输入闭包；标准远端 repository 状态、
+复杂 signing、release preview、预热及真实设备验收仍未闭合，T06 保持 `in_progress`。详见
+[插值对照证据](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
