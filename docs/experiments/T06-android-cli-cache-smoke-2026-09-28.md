@@ -445,6 +445,21 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   Gradle/plugin/provider runtime I/O；标准远端 repository runtime/state、复杂/远端 signing、release preview 和
   真实 Android 设备验收仍未闭合。
 
+## T06 Gradle `Files.walkFileTree` cache gate（2026-10-05）
+
+- PR #363（`b7b1949`）将 `Files.walkFileTree`、`FileVisitor`、`SimpleFileVisitor`、`FileVisitResult`、
+  `FileVisitOption` 和 `BasicFileAttributes` 加入 Android Gradle app-script 静态 I/O marker；命中时仅关闭
+  artifact cache reuse，普通 Gradle 构建继续。
+- 回归覆盖 `FOLLOW_LINKS`、`SimpleFileVisitor.visitFile` callback、visitor 类型引用，以及注释、字符串和普通
+  `app/src/main` source 排除。Android debug/release packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release
+  miss→hit smoke 通过。
+- 本地 workspace `456 passed, 1 ignored`，fmt、clippy、build、design docs、package list、diff check 通过；
+  PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash merge
+  `b7b1949`，无版本发布/tag。
+- 该静态 marker 不解析 traversal root、选项运行时值、visitor 决策或实际访问文件集合，也不追踪完整
+  Gradle/plugin/provider runtime I/O；标准远端 repository runtime/state、复杂/远端 signing、release preview 和
+  真实 Android 设备验收仍未闭合。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 

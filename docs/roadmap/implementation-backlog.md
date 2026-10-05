@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-05，主分支 `9faacc4`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-05，主分支 `b7b1949`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -1099,6 +1099,14 @@ Gradle app-script 静态 I/O marker；命中仅关闭 cache reuse，普通构建
 check、Android debug/release packaging、双 ABI 与 CLI miss→hit smoke 通过；PR/push 两套三 OS、desktop/android
 template 和 baseline-driver 全绿，squash 为 `550732e`。不跟踪 provider 后端、stream 实际枚举文件或完整 Gradle/
 plugin I/O；复杂 signing、release preview、真实设备验收仍未闭合，T06 保持 `in_progress`。
+
+#363 将 `Files.walkFileTree`、`FileVisitor`、`SimpleFileVisitor`、`FileVisitResult`、`FileVisitOption` 和
+`BasicFileAttributes` 加入 Android Gradle app-script 静态 I/O marker；walk/visitor callback 命中只关闭 cache
+reuse，普通构建继续。回归覆盖 `FOLLOW_LINKS` 与 visitor callback、注释/字符串及普通 app source 排除。
+workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list/diff check、Android debug/release
+packaging、双 ABI 与 CLI miss→hit smoke 通过；PR/push 两套三 OS、desktop/android template、baseline-driver 全绿，
+squash 为 `b7b1949`。不评估遍历范围或 visitor 实际读集，也不闭合完整 Gradle/plugin I/O、复杂 signing、release
+preview 和设备验收；T06 保持 `in_progress`。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
