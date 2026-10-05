@@ -1,9 +1,9 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-05（Asia/Shanghai）。核查代码：`90174a7`（PR #357 squash merge）；本轮复核了
+更新日期：2026-10-05（Asia/Shanghai）。核查代码：`550732e`（PR #360 squash merge）；本轮复核了
 其间的文档提交 `c218710`、`6c4cdca`、`29ca7c4`、`e32ebb0`、`1dce78f`、`37adb4f`、`f497e4b`、
-`d144e61`、`0525f25`、`338bcf0`、`032e9a9`、`1d7f832`、`17a225e`、`c4cc70f`、`b2901d4`、`9b37df6`、`1e12166` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`、`70d7c5c`、`4d8b251`、`7473a5b`、`dd316eb`、`90174a7`。
-PR #343/#344/#346/#347/#348/#350/#351/#353/#354/#356/#358 仅校正或记录状态；当前 `origin/main` 指向 `1e12166`。后续提交须重新核对，本文不是动态状态。
+`d144e61`、`0525f25`、`338bcf0`、`032e9a9`、`1d7f832`、`17a225e`、`c4cc70f`、`b2901d4`、`9b37df6`、`1e12166`、`72e1590` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`、`70d7c5c`、`4d8b251`、`7473a5b`、`dd316eb`、`90174a7`、`550732e`。
+PR #343/#344/#346/#347/#348/#350/#351/#353/#354/#356/#358/#359 仅校正或记录状态；当前 `origin/main` 指向 `550732e`。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -215,9 +215,19 @@ PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、basel
 真实设备验收、标准远端 repository runtime/state、复杂/远端 signing 与 release preview 仍未闭合，T06 保持
 `in_progress`。
 
-G4 的 Android app-script 静态 I/O marker 现也覆盖 Java NIO 异步文件通道：`AsynchronousFileChannel` 和
-`SeekableByteChannel` 引用只使 artifact cache reuse bypass，不阻止普通 Gradle 构建。该检测不判断实际异步
-操作、回调完成或被访问文件集合；没有据此宣称完整 Gradle 输入闭包。
+PR #360 将 Java NIO `FileSystemProvider`、`DirectoryStream` 与 `SecureDirectoryStream` 加入 Android Gradle
+app-script 静态 I/O marker；命中类型/接口引用时只关闭 cache reuse，普通 Gradle 构建继续。回归覆盖 provider
+与 stream 使用，并确认注释、字符串和普通 app source 不触发。workspace 456 passed、1 ignored，fmt/clippy/build/
+design docs/package list/diff check、Android debug/release packaging、双 ABI 与 CLI debug/release miss→hit smoke
+通过；PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿，squash merge
+`550732e`。这是接口级静态 gate，不跟踪 provider 的实际后端、stream 迭代得到的文件或完整 Gradle/plugin I/O；
+真实设备验收、标准远端 repository runtime/state、复杂/远端 signing 和 release preview 仍未闭合，T06 保持
+`in_progress`。
+
+G4 的 Android app-script 静态 I/O marker 现也覆盖 Java NIO 异步文件通道与 provider/stream 接口：
+`AsynchronousFileChannel`、`SeekableByteChannel`、`FileSystemProvider`、`DirectoryStream` 和
+`SecureDirectoryStream` 引用只使 artifact cache reuse bypass，不阻止普通 Gradle 构建。该检测不判断异步
+操作/回调完成、provider 后端或被枚举文件集合；没有据此宣称完整 Gradle 输入闭包。
 
 ## 2. 相对上次审计的新合并
 
@@ -331,6 +341,7 @@ G4 的 Android app-script 静态 I/O marker 现也覆盖 Java NIO 异步文件�
 | `7473a5b`（#352） | 将 Java NIO `Path.toFile()` 加入 Android Gradle app-script 静态 file-I/O marker；限定/非限定形式命中，注释/字符串和普通 app source 排除；仅关闭 cache reuse，普通构建继续 | 不追踪派生 `File` 对象后续读写、Gradle/plugin 任意运行时 I/O 或完整输入闭包；远端 repository runtime/state、复杂 signing、release preview 与设备验收仍未闭合 |
 | `dd316eb`（#355） | 将 Java NIO `FileSystem`/`WatchService`/`WatchKey`/`WatchEvent`/`Watchable` 与 watcher factory/event-kind 入口加入 Android Gradle app-script 静态 I/O marker；仅关闭 cache reuse，普通构建继续 | 不追踪 watch 目标和事件的实际文件来源、Gradle/plugin 任意运行时 I/O 或完整输入闭包；远端 repository runtime/state、复杂 signing、release preview 与设备验收仍未闭合 |
 | `90174a7`（#357） | 将 `AsynchronousFileChannel`/`SeekableByteChannel` 类型与异步文件通道 factory 入口加入 Android Gradle app-script 静态 I/O marker；限定/非限定引用均只关闭 cache reuse | 不验证异步操作完成、回调或 channel 实际文件读集；不闭合 Gradle/plugin runtime I/O、远端仓库状态、复杂 signing、release preview 或设备验收 |
+| `550732e`（#360） | 将 Java NIO `FileSystemProvider`、`DirectoryStream`、`SecureDirectoryStream` 类型/接口入口加入 Android Gradle app-script 静态 I/O marker；仅关闭 cache reuse | 不跟踪 provider 后端、stream 实际枚举的文件或完整 Gradle/plugin runtime I/O；远端仓库状态、复杂 signing、release preview 和真实设备验收仍未闭合 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -613,6 +624,8 @@ G4 的 Android app-script 静态 I/O marker 现也覆盖 Java NIO 异步文件�
 | PR #355 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `dd316eb`；无版本发布/tag |
 | 本地运行时验证（PR #357） | `AsynchronousFileChannel`/`SeekableByteChannel` 限定/非限定类型与 factory marker 回归通过，并覆盖注释、字符串和普通 app source 排除；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list/diff check、Android debug/release packaging、双 ABI 与 CLI debug/release miss→hit smoke 通过 |
 | PR #357 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `90174a7`；无版本发布/tag |
+| 本地运行时验证（PR #360） | `FileSystemProvider`、`DirectoryStream`、`SecureDirectoryStream` marker 及限定引用/使用、注释/字符串和普通 app source 排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list/diff check、Android debug/release packaging、双 ABI 与 CLI debug/release miss→hit smoke 通过 |
+| PR #360 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `550732e`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：

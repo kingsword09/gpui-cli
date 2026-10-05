@@ -431,6 +431,20 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   Gradle/plugin/provider runtime I/O；远端 repository runtime/state、复杂/远端 signing、release preview 和真实
   Android 设备验收仍未闭合。
 
+## T06 Gradle NIO file-system provider/stream cache gate（2026-10-05）
+
+- PR #360（`550732e`）将 Java NIO `FileSystemProvider`、`DirectoryStream` 与 `SecureDirectoryStream` 类型引用
+  加入 Android Gradle app-script 静态 I/O marker；限定/非限定形式命中时只关闭 artifact cache reuse，普通
+  Gradle 构建继续。
+- 回归确认 provider/stream 接口和使用位置命中，注释、字符串及普通 app source 不触发。Android debug/release
+  packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release miss→hit smoke 通过。
+- 本地 workspace `456 passed, 1 ignored`，fmt、clippy、build、design docs、package list、diff check 通过；
+  PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash merge
+  `550732e`，无版本发布/tag。
+- 这是接口名级别的保守 marker；不跟踪实际 provider/backend、DirectoryStream 迭代返回的路径或完整
+  Gradle/plugin/provider runtime I/O；标准远端 repository runtime/state、复杂/远端 signing、release preview 和
+  真实 Android 设备验收仍未闭合。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
