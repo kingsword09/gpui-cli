@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-05，主分支 `76046a1`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-06，主分支 `18c719a`（PR #375 squash merge）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -1136,6 +1136,12 @@ native-input 回归先复现整份脚本例外误放行，再验证修复；work
 `4d4f863`。该检查不验证变量绑定或完整 Gradle/plugin 读集，真实设备、复杂 signing、release preview、预热和
 完整 T06 验收仍未闭合，T06 保持 `in_progress`；原始对照与探针修正记录见
 [stream 读取证据](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
+
+#375 将 Java buffered/data/object stream、reader/writer wrapper API 引用纳入 Android Gradle app-script 静态
+I/O marker；限定/非限定 API 引用和构造调用只关闭 artifact cache reuse，普通构建继续。回归覆盖类型引用和注释/
+字符串排除；workspace 459 passed、1 ignored，fmt/clippy/build/design docs/package list/diff check 通过。PR/push
+两套 Linux/macOS/Windows、desktop/android template 和 baseline-driver CI 全绿，squash 为 `18c719a`。这不追踪
+wrapper 底层 stream 来源或完整 Gradle/plugin I/O，T06 保持 `in_progress`；本轮未运行 GUI/设备验收。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
