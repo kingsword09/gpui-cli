@@ -445,6 +445,19 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   Gradle/plugin/provider runtime I/O；标准远端 repository runtime/state、复杂/远端 signing、release preview 和
   真实 Android 设备验收仍未闭合。
 
+## T06 Gradle PathMatcher cache gate（2026-10-05）
+
+- PR #366（`e0c36ed`）将 Java NIO `PathMatcher` 与 `FileSystem.getPathMatcher(...)` 加入 Android Gradle
+  app-script 静态 I/O marker；命中时仅关闭 artifact cache reuse，普通 Gradle 构建继续。
+- 回归覆盖 glob/pattern matcher、限定/非限定类型和 factory 引用；注释、字符串及普通 `app/src/main` source
+  不触发。Android debug/release packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release miss→hit smoke 通过。
+- 本地 workspace `456 passed, 1 ignored`，fmt、clippy、build、design docs、package list、diff check 通过；
+  PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 最终全绿；squash merge
+  `e0c36ed`，无版本发布/tag；首轮 Windows coordinator/mobile 时序失败与 fail-fast 取消的 macOS job 按 job 定向
+  重跑后通过。
+- 该静态 gate 不解析 matcher 实际匹配路径、pattern 的运行时来源或完整 Gradle/plugin/provider I/O；标准远端
+  repository runtime/state、复杂/远端 signing、release preview 和真实 Android 设备验收仍未闭合。
+
 ## T06 Gradle `Files.walkFileTree` cache gate（2026-10-05）
 
 - PR #363（`b7b1949`）将 `Files.walkFileTree`、`FileVisitor`、`SimpleFileVisitor`、`FileVisitResult`、
