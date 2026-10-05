@@ -2020,7 +2020,14 @@ const ANDROID_GRADLE_FILE_IO_IDENTIFIERS: &[&str] = &[
     "FileWriter",
     "RandomAccessFile",
     "FileChannel",
+    "FileSystem",
     "FileSystems",
+    "WatchService",
+    "WatchKey",
+    "WatchEvent",
+    "Watchable",
+    "StandardWatchEventKinds",
+    "newWatchService",
     "Files",
     "fileTree",
     "zipTree",
@@ -6484,6 +6491,10 @@ mod tests {
             "val value = File(\"config.json\").canRead()",
             "val value = path.toFile()",
             "val value = java.nio.file.Path.of(configPath).toFile()",
+            "val watcher: java.nio.file.WatchService = fileSystem.newWatchService()",
+            "val watcher: WatchService = FileSystems.getDefault().newWatchService()",
+            "val key: WatchKey = directory.register(watcher, StandardWatchEventKinds.ENTRY_MODIFY)",
+            "val changes: Iterable<WatchEvent<*>> = key.pollEvents()",
             "val value = File(\"config.json\").canWrite()",
             "val value = File(\"config.json\").canExecute()",
             "val value = File(\"config.json\").isHidden()",
@@ -6621,6 +6632,7 @@ mod tests {
                 // File("comment-only") and Paths.get("comment-only")
                 // File("comment-only").getCanonicalPath() and FileSystems.getDefault().getPath("comment-only")
                 // path.toFile() and Path.of("comment-only").toFile()
+                // FileSystem.newWatchService(), WatchService, WatchKey, WatchEvent, Watchable.register(), StandardWatchEventKinds.ENTRY_MODIFY
                 // File("comment-only").listFiles() and File("comment-only").lastModified()
                 // File("comment-only").delete() and File("comment-only").canRead()
                 // Files.isReadable(path) and Files.getLastModifiedTime(path) and Files.newDirectoryStream(path)
@@ -6630,7 +6642,7 @@ mod tests {
                 // javaClass.getResource("comment-only") and ServiceLoader.load(Provider::class.java)
                 // fileCollection.from("comment-only")
                 val from = "ordinary-variable"
-                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath() path.toFile() ZipFile(\"string-only.zip\") JarFile(\"string-only.jar\") Scanner(File(\"string-only.txt\")) PrintStream(\"string-only.txt\") PrintWriter(\"string-only.txt\")"
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath() path.toFile() FileSystem.newWatchService() WatchService WatchKey WatchEvent Watchable.register() StandardWatchEventKinds.ENTRY_MODIFY ZipFile(\"string-only.zip\") JarFile(\"string-only.jar\") Scanner(File(\"string-only.txt\")) PrintStream(\"string-only.txt\") PrintWriter(\"string-only.txt\")"
             "#,
         )
         .unwrap();
@@ -6641,6 +6653,23 @@ mod tests {
         fs::write(
             &ordinary_source,
             "class Ordinary { val value = System.getenv(\"CUSTOM_INPUT\") }\n",
+        )
+        .unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_none()
+        );
+
+        fs::write(
+            &script,
+            r#"
+                tasks.register("clean", Delete::class) {
+                    delete(rootProject.layout.buildDirectory)
+                }
+                val plainRegistration = tasks.register("probe")
+            "#,
         )
         .unwrap();
         let native = NativeInputs::scan(root.path()).unwrap();
