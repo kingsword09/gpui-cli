@@ -1,9 +1,9 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-05（Asia/Shanghai）。核查代码：`7473a5b`（PR #352 squash merge）；本轮复核了
+更新日期：2026-10-05（Asia/Shanghai）。核查代码：`dd316eb`（PR #355 squash merge）；本轮复核了
 其间的文档提交 `c218710`、`6c4cdca`、`29ca7c4`、`e32ebb0`、`1dce78f`、`37adb4f`、`f497e4b`、
-`d144e61`、`0525f25`、`338bcf0`、`032e9a9`、`1d7f832`、`17a225e`、`c4cc70f` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`、`70d7c5c`、`4d8b251`、`7473a5b`。
-PR #343/#344/#346/#347/#348/#350/#351/#353 仅校正或记录状态；当前 `origin/main` 指向 `c4cc70f`。后续提交须重新核对，本文不是动态状态。
+`d144e61`、`0525f25`、`338bcf0`、`032e9a9`、`1d7f832`、`17a225e`、`c4cc70f`、`b2901d4` 和实现提交 `e8d70cd`、`0e04377`、`892fc21`、`70d7c5c`、`4d8b251`、`7473a5b`、`dd316eb`。
+PR #343/#344/#346/#347/#348/#350/#351/#353/#354 仅校正或记录状态；当前 `origin/main` 指向 `dd316eb`。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -196,6 +196,16 @@ android-template、baseline-driver 全绿，squash merge `7473a5b`。这是静�
 读写、Gradle/plugin 任意运行时 I/O 或完整输入闭包；标准远端 repository runtime/state、复杂/远端 signing、
 release preview 和真实设备验收仍未闭合，T06 保持 `in_progress`。
 
+PR #355 将 Java NIO 文件系统观察入口纳入 Android Gradle app-script 静态 I/O marker，覆盖 `FileSystem`/
+`FileSystems`、`WatchService`、`WatchKey`、`WatchEvent`、`Watchable`、事件类型及 watcher factory；新入口命中时
+只关闭 cache reuse，普通 Gradle 构建继续。回归覆盖 watcher 创建/注册/事件读取，并确认注释、字符串、普通
+app source、普通 `tasks.register` 与模板 clean task 不误触发。workspace 456 passed、1 ignored，fmt/clippy/build/
+design docs/package list/diff check、Android debug/release packaging、双 ABI 与 CLI debug/release miss→hit smoke
+通过；PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿，squash merge
+`dd316eb`。这是保守静态 gate，不跟踪 watch 注册目标、事件来源或完整 Gradle/plugin/runtime I/O，也不构成真实
+设备验收；标准远端 repository runtime/state、复杂/远端 signing 和 release preview 仍未闭合，T06 保持
+`in_progress`。
+
 ## 2. 相对上次审计的新合并
 
 ### T06 Android Gradle cache input closure updates
@@ -306,6 +316,7 @@ release preview 和真实设备验收仍未闭合，T06 保持 `in_progress`。
 | `0e04377`（#338） | 扩展 marker 至 Java `File` 权限/元数据查询、目录枚举和创建/删除/重命名/权限变更 API；receiver 方法调用只关闭 cache reuse，普通构建继续，注释/字符串与模板 Gradle `Delete::class` clean task 不触发 | 不追踪文件系统状态或对象后续 I/O 的运行时读集；完整 Gradle 输入闭包、远端 repository runtime/state、复杂 signing、release preview 与设备验收仍未闭合 |
 | `892fc21`（#341） | 扩展 marker 至 NIO `Files` 状态/attribute query、directory stream、read/write/mutation、`FileSystems` store/root enumeration、`FileStore` attribute 和 `Path.toRealPath()`；仅关闭 cache reuse，普通构建继续 | 静态方法名称扫描不闭合任意运行时读集或完整 Gradle 输入；远端 repository runtime/state、复杂 signing、release preview 与设备验收仍未闭合 |
 | `7473a5b`（#352） | 将 Java NIO `Path.toFile()` 加入 Android Gradle app-script 静态 file-I/O marker；限定/非限定形式命中，注释/字符串和普通 app source 排除；仅关闭 cache reuse，普通构建继续 | 不追踪派生 `File` 对象后续读写、Gradle/plugin 任意运行时 I/O 或完整输入闭包；远端 repository runtime/state、复杂 signing、release preview 与设备验收仍未闭合 |
+| `dd316eb`（#355） | 将 Java NIO `FileSystem`/`WatchService`/`WatchKey`/`WatchEvent`/`Watchable` 与 watcher factory/event-kind 入口加入 Android Gradle app-script 静态 I/O marker；仅关闭 cache reuse，普通构建继续 | 不追踪 watch 目标和事件的实际文件来源、Gradle/plugin 任意运行时 I/O 或完整输入闭包；远端 repository runtime/state、复杂 signing、release preview 与设备验收仍未闭合 |
 
 代码入口：[check](../../src/commands/check.rs)、[matrix admission](../../src/runner/matrix_admission.rs)、
 [matrix executor](../../src/runner/matrix_executor.rs)、[mobile lifecycle adapter](../../src/runner/mobile_matrix.rs)、
@@ -348,7 +359,7 @@ release preview 和真实设备验收仍未闭合，T06 保持 `in_progress`。
 | G01 | planned | supervisor 计时已有；无应用 layout/paint/frame/CPU/GPU 指标与开销验收 |
 | G02 | planned | 无 perf 执行器、统计/可比性和性能预算判定 |
 | T05 | in_progress | `src/devserver/inputs.rs` 有路径/hash/mtime/大小/file identity 索引；watcher 回调只标 dirty，rename/delete 双向失效，overflow/incomplete rename/目录与文件读取竞态回退；live session watcher 增量刷新，build/observe 全量稳定核验；4096×8 KiB 合成集 release 对照 10 warmup + 30 runs，wrong_revision_acceptance=0。剩余：外部 Cargo path dependency/build-script 声明读集、自动网络文件系统降级，以及非 macOS/其他文件系统对照 |
-| T06 | in_progress | desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug preview 缓存与 cache clean，普通 build/run 及受支持的 live preview 已接入同 key coordinator、verified manifest、caller-cancel、显式 Cancelled/Partial 状态和 owner heartbeat/fencing；physical iOS build/run 与受控 Android local custom/release build/run 已按签名输入决定 manifest 复用；无 signing 配置的 unsigned Android release non-live build/run 也已命中 verified artifact cache；Android wrapper checksum、标准 wrapper distribution 内容 fingerprint 与 Gradle dependency verification metadata 纳入 BuildKey/cache policy，缺失/无效/非标准布局/有界扫描失败时 cache bypass，复用前及 Gradle 后的 distribution/global gate 重核验已接入普通 build 与 matrix/live preview，变化时保留普通 APK 但不消费/发布旧 manifest；本地 buildSrc/build-logic 直接 bypass cache reuse；普通 app Gradle script 已增加保守静态 I/O marker bypass，覆盖路径构造、file collection/source-root、类/资源 lookup、Java `File` 状态/元数据/目录枚举/变更 API、NIO `Files`/`FileSystem` 状态/属性/流/读写/变更 API 和 `Path.toFile()`，未知 plugin/alias/plugin-owned signing behavior 与 custom repository 也保守 bypass，已建模 GPUI/NDK/签名读取保留 cache eligibility；相对 `GRADLE_USER_HOME` preview 保守 bypass，Android preview policy 与 build key 共享输入采集；动态/changing Gradle dependency 也只绕过 cache reuse、不阻止构建；NDK host compiler/linker/tool、sysroot 与 Clang builtin headers、选定 SDK package content 纳入 Android toolchain fingerprint；release preview、signed/复杂/远端 signing 仍 bypass，BuildKey output ownership record 已落地；Partial 仅为不可复用的诊断终态；未识别的 Gradle/plugin/repository I/O、标准远端 repository runtime/state、完整任意 app build-script I/O 仍未闭合，预热未实现 |
+| T06 | in_progress | desktop/iOS simulator/Android default-debug/显式 debug custom-signing/release-only signing debug preview 缓存与 cache clean，普通 build/run 及受支持的 live preview 已接入同 key coordinator、verified manifest、caller-cancel、显式 Cancelled/Partial 状态和 owner heartbeat/fencing；physical iOS build/run 与受控 Android local custom/release build/run 已按签名输入决定 manifest 复用；无 signing 配置的 unsigned Android release non-live build/run 也已命中 verified artifact cache；Android wrapper checksum、标准 wrapper distribution 内容 fingerprint 与 Gradle dependency verification metadata 纳入 BuildKey/cache policy，缺失/无效/非标准布局/有界扫描失败时 cache bypass，复用前及 Gradle 后的 distribution/global gate 重核验已接入普通 build 与 matrix/live preview，变化时保留普通 APK 但不消费/发布旧 manifest；本地 buildSrc/build-logic 直接 bypass cache reuse；普通 app Gradle script 已增加保守静态 I/O marker bypass，覆盖路径构造、file collection/source-root、类/资源 lookup、Java `File` 状态/元数据/目录枚举/变更 API、NIO `Files`/`FileSystem` 状态/属性/流/读写/变更 API、`Path.toFile()` 和 WatchService/文件系统观察入口，未知 plugin/alias/plugin-owned signing behavior 与 custom repository 也保守 bypass，已建模 GPUI/NDK/签名读取保留 cache eligibility；相对 `GRADLE_USER_HOME` preview 保守 bypass，Android preview policy 与 build key 共享输入采集；动态/changing Gradle dependency 也只绕过 cache reuse、不阻止构建；NDK host compiler/linker/tool、sysroot 与 Clang builtin headers、选定 SDK package content 纳入 Android toolchain fingerprint；release preview、signed/复杂/远端 signing 仍 bypass，BuildKey output ownership record 已落地；Partial 仅为不可复用的诊断终态；未识别的 Gradle/plugin/repository I/O、标准远端 repository runtime/state、完整任意 app build-script I/O 仍未闭合，预热未实现 |
 | Q02 | planned | 仅有 12 项任务设计；无可执行评分器和固定预算对照实验 |
 | G03 | planned | 无 GPU capture/analysis provider 闭环；可选 |
 | M06 | planned | 无远程 runner、传输和断线恢复；可选 |
@@ -584,6 +595,8 @@ release preview 和真实设备验收仍未闭合，T06 保持 `in_progress`。
 | PR #349 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `4d8b251`；无版本发布/tag |
 | 本地运行时验证（PR #352） | `Path.toFile()` 限定/非限定 marker 与注释/字符串、普通 app source 排除回归通过；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list/diff check、Android debug/release packaging、双 ABI 与 CLI debug/release miss→hit smoke 通过 |
 | PR #352 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `7473a5b`；无版本发布/tag |
+| 本地运行时验证（PR #355） | NIO watcher 创建、目录注册、事件读取 marker 回归通过，并覆盖注释/字符串、普通 app source、Gradle task registration/clean task 排除；workspace 456 passed、1 ignored，fmt/clippy/build/design docs/package list/diff check、Android debug/release packaging、双 ABI 与 CLI debug/release miss→hit smoke 通过 |
+| PR #355 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `dd316eb`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0、wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
