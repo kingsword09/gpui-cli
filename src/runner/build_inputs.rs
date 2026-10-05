@@ -2192,6 +2192,14 @@ const ANDROID_GRADLE_FILE_BACKED_CONSTRUCTOR_IDENTIFIERS: &[&str] =
     &["Scanner", "PrintStream", "PrintWriter"];
 
 fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
+    // The code-token checks below skip strings, but ${...} expressions can
+    // execute arbitrary reads during configuration. Treat their evaluation as
+    // unmodeled even when it happens to be pure. Simple $name references keep
+    // the existing policy for the code that supplies their values.
+    if gradle_contains_expression_interpolation(source) {
+        return true;
+    }
+
     if gradle_provider_call_uses_unmodeled_value(
         source,
         "gradleProperty",
@@ -2272,6 +2280,41 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         gradle_contains_identifier(source, identifier)
             && !android_gradle_identifier_is_managed_io(source, identifier)
     })
+}
+
+fn gradle_contains_expression_interpolation(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while let Some(position) = gradle_skip_trivia(source, cursor) {
+        match bytes.get(position) {
+            Some(b'\'') => {
+                let Some(end) = gradle_skip_string(source, position) else {
+                    break;
+                };
+                cursor = end;
+            }
+            Some(b'"') => {
+                let triple = bytes.get(position..position + 3) == Some(b"\"\"\"");
+                let width = if triple { 3 } else { 1 };
+                cursor = position + width;
+                while cursor < bytes.len() {
+                    if !triple && bytes[cursor] == b'\\' {
+                        cursor += 2;
+                    } else if bytes.get(cursor..cursor + width) == Some(&b"\"\"\""[..width]) {
+                        cursor += width;
+                        break;
+                    } else if bytes.get(cursor..cursor + 2) == Some(b"${") {
+                        return true;
+                    } else {
+                        cursor += 1;
+                    }
+                }
+            }
+            Some(_) => cursor = position + 1,
+            None => break,
+        }
+    }
+    false
 }
 
 fn gradle_file_api_uses_unmodeled_path(source: &str) -> bool {
@@ -6740,6 +6783,84 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn android_gradle_interpolated_expressions_disable_only_cache_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+
+        for filename in ["build.gradle.kts", "build.gradle"] {
+            let script = app.join(filename);
+            for source in [
+                r#"println("env=${System.getenv("GPUI_INTERPOLATED_INPUT")}")"#,
+                r#"println("file=${File("config.json").readText()}")"#,
+                r#"println("provider=${providers.environmentVariable("GPUI_INTERPOLATED_INPUT").get()}")"#,
+                r#"println("""raw=${System.getenv("GPUI_INTERPOLATED_INPUT")}""")"#,
+                r#"println("nested=${if (true) "${customInput()}" else ""}")"#,
+                r#"println("computed=${customInput()}")"#,
+                r#"println("backslash=\\${customInput()}")"#,
+                r#"println("literal=\${example} active=${customInput()}")"#,
+            ] {
+                fs::write(&script, source).unwrap();
+                let native = NativeInputs::scan(root.path()).unwrap();
+                let reason =
+                    android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                        .unwrap()
+                        .unwrap_or_else(|| {
+                            panic!("interpolation was missed in {filename}: {source}")
+                        });
+                assert!(reason.contains(ANDROID_GRADLE_APP_SCRIPT_IO_CACHE_DISABLED_REASON));
+                assert!(reason.contains(filename));
+                assert!(!reason.contains("GPUI_INTERPOLATED_INPUT"));
+            }
+
+            for source in [
+                r#"println("plain System.getenv(\"EXAMPLE\")")"#,
+                r#"println("literal=\${System.getenv(\"EXAMPLE\")}")"#,
+                r#"println("ABI: $gpuiAbis")"#,
+                r#"// println("${customInput()}")
+                    /* outer /* println("${customInput()}") */ comment */
+                    println("plain")"#,
+            ] {
+                fs::write(&script, source).unwrap();
+                let native = NativeInputs::scan(root.path()).unwrap();
+                assert!(
+                    android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                        .unwrap()
+                        .is_none(),
+                    "literal text disabled cache reuse in {filename}: {source}"
+                );
+            }
+            fs::remove_file(script).unwrap();
+        }
+
+        let script = app.join("build.gradle.kts");
+        fs::write(&script, r#"println("""raw=\${customInput()}""")"#).unwrap();
+        let native = NativeInputs::scan(root.path()).unwrap();
+        assert!(
+            android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                .unwrap()
+                .is_some(),
+            "backslashes do not escape interpolation in Kotlin raw strings"
+        );
+        fs::remove_file(script).unwrap();
+
+        let script = app.join("build.gradle");
+        for source in [
+            r#"println('literal ${System.getenv("EXAMPLE")}')"#,
+            r#"println('''literal ${System.getenv("EXAMPLE")}''')"#,
+        ] {
+            fs::write(&script, source).unwrap();
+            let native = NativeInputs::scan(root.path()).unwrap();
+            assert!(
+                android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                    .unwrap()
+                    .is_none(),
+                "Groovy single-quoted text disabled cache reuse: {source}"
+            );
+        }
     }
 
     #[test]
