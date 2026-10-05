@@ -388,6 +388,20 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
 - 静态构造器 gate 不追踪对象构造后的读取/写入或完整 Gradle/plugin/provider runtime I/O；远端 repository
   runtime/state、复杂/远端 signing、release preview 和真实设备验收仍未闭合。
 
+## T06 Gradle `Path.toFile()` cache gate（2026-10-05）
+
+- PR #352（`7473a5b`）将 Java NIO `Path.toFile()` 加入 Android Gradle app-script 静态 file-I/O marker，覆盖
+  限定与非限定形式；命中时只关闭 artifact cache reuse，普通 Gradle 构建继续。
+- 回归确认 `path.toFile()` 与 `java.nio.file.Path.of(...).toFile()` 命中，注释、字符串和普通 `app/src/main`
+  source 不触发；真实 Android debug/release packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release
+  miss→hit cache smoke 通过。
+- 本地 workspace `456 passed, 1 ignored`，fmt、clippy、build、design docs、package list、diff check 通过；
+  PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash merge
+  `7473a5b`，无版本发布/tag。
+- 该静态 marker 只扩大保守 gate 集合，不追踪派生 `File` 对象后续读取/写入、Gradle/plugin/provider 任意运行时
+  I/O 或完整输入闭包；标准远端 repository runtime/state、复杂/远端 signing、release preview 和真实 Android
+  设备验收仍未闭合。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 
