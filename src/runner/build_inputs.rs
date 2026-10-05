@@ -2235,6 +2235,10 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         return true;
     }
 
+    if gradle_properties_api_uses_unmodeled_io(source) {
+        return true;
+    }
+
     if gradle_source_root_api_uses_unmodeled_path(source) {
         return true;
     }
@@ -2291,6 +2295,137 @@ fn contains_android_gradle_unmodeled_io(source: &str) -> bool {
         gradle_contains_identifier(source, identifier)
             && !android_gradle_identifier_is_managed_io(source, identifier)
     })
+}
+
+fn gradle_properties_api_uses_unmodeled_io(source: &str) -> bool {
+    let mut cursor = 0;
+    let bytes = source.as_bytes();
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            if matches!(identifier, "load" | "loadFromXML" | "store" | "storeToXML") {
+                if identifier == "load"
+                    && gradle_managed_keystore_properties_load(source, position, end)
+                {
+                    cursor = end;
+                    continue;
+                }
+                if identifier == "load" && gradle_managed_ndk_properties_load(source, position, end)
+                {
+                    cursor = end;
+                    continue;
+                }
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_managed_ndk_properties_load(source: &str, load_start: usize, load_end: usize) -> bool {
+    let Some(opening) = gradle_skip_trivia(source, load_end) else {
+        return false;
+    };
+    if source.as_bytes().get(opening) != Some(&b'(') {
+        return false;
+    }
+    let Some(argument) = gradle_skip_trivia(source, opening + 1) else {
+        return false;
+    };
+    if source.get(argument..argument + 2) != Some("it")
+        || gradle_skip_trivia(source, argument + 2)
+            .and_then(|position| source.as_bytes().get(position))
+            != Some(&b')')
+    {
+        return false;
+    }
+    let Some(closing) = gradle_skip_trivia(source, argument + 2) else {
+        return false;
+    };
+    let Some(lambda_close) = gradle_skip_trivia(source, closing + 1) else {
+        return false;
+    };
+    if source.as_bytes().get(lambda_close) != Some(&b'}') {
+        return false;
+    }
+
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &source[position..end] == "ndkDirectory"
+                && let Some(stream_end) = gradle_managed_ndk_stream_end(source, end)
+                && let Some(use_end) = gradle_member_identifier_end(source, stream_end, "use")
+                && let Some(use_opening) = gradle_skip_trivia(source, use_end)
+                && bytes.get(use_opening) == Some(&b'{')
+                && gradle_skip_trivia(source, use_opening + 1) == Some(load_start)
+            {
+                return true;
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    false
+}
+
+fn gradle_managed_keystore_properties_load(
+    source: &str,
+    method_start: usize,
+    method_end: usize,
+) -> bool {
+    let receiver = source[..method_start].trim_end();
+    let Some(receiver) = receiver.strip_suffix('.') else {
+        return false;
+    };
+    let receiver = receiver.trim_end();
+    let Some(receiver_start) = receiver.len().checked_sub("keystoreProperties".len()) else {
+        return false;
+    };
+    if receiver.get(receiver_start..) != Some("keystoreProperties")
+        || receiver[..receiver_start]
+            .trim_end()
+            .bytes()
+            .next_back()
+            .is_some_and(|byte| is_gradle_identifier_continue(byte) || byte == b'.')
+    {
+        return false;
+    }
+
+    let Some(opening) = gradle_skip_trivia(source, method_end) else {
+        return false;
+    };
+    if source.as_bytes().get(opening) != Some(&b'(') {
+        return false;
+    }
+    let Some(argument) = gradle_skip_trivia(source, opening + 1) else {
+        return false;
+    };
+    let Some(file_input_stream_end) = argument
+        .checked_add("FileInputStream".len())
+        .filter(|end| source.get(argument..*end) == Some("FileInputStream"))
+    else {
+        return false;
+    };
+    let Some(stream_end) =
+        gradle_single_string_call_end(source, file_input_stream_end, "keystore.properties")
+    else {
+        return false;
+    };
+    gradle_skip_trivia(source, stream_end).and_then(|closing| source.as_bytes().get(closing))
+        == Some(&b')')
 }
 
 fn gradle_contains_expression_interpolation(source: &str) -> bool {
@@ -6987,6 +7122,15 @@ mod tests {
             r#"FileInputStream("extra.properties")"#,
             r#"java.io.FileInputStream(configPath)"#,
             r#"FileInputStream("keystore.properties" + suffix)"#,
+            r#"otherProperties.load(propertiesInput)"#,
+            r#"keystoreProperties.load(otherInput)"#,
+            r#"other.keystoreProperties.load(FileInputStream("keystore.properties"))"#,
+            r#"foo_keystoreProperties.load(FileInputStream("keystore.properties"))"#,
+            r#"otherProperties.loadFromXML(propertiesInput)"#,
+            r#"otherProperties.store(outputStream, "comment")"#,
+            r#"otherProperties.storeToXML(outputStream, "comment")"#,
+            r#"val loader = properties::load"#,
+            r#"val props = java.util.Properties().apply { load(propertiesInput) }"#,
             r#"val reader = otherDirectory::inputStream"#,
             "import java.io.FileInputStream as ExternalStream\nExternalStream(configPath)",
         ] {
@@ -7004,6 +7148,8 @@ mod tests {
         for extra in [
             "",
             "import java.io.FileInputStream\n",
+            r#"// properties.load(otherInput) and properties.store(output, "comment")
+                val text = "load(otherInput) loadFromXML(input) store(output, comment) storeToXML(output)""#,
             r#"ndkDirectory /* receiver */ . resolve ( "source.properties" ) /* stream */ . inputStream ( )"#,
             r#"FileInputStream(/* source */ "keystore.properties" /* end */)"#,
             r#"java.io.FileInputStream('keystore.properties')"#,
