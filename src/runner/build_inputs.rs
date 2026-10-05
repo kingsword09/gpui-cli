@@ -2024,6 +2024,9 @@ const ANDROID_GRADLE_FILE_IO_IDENTIFIERS: &[&str] = &[
     "SeekableByteChannel",
     "FileSystem",
     "FileSystems",
+    "FileSystemProvider",
+    "DirectoryStream",
+    "SecureDirectoryStream",
     "WatchService",
     "WatchKey",
     "WatchEvent",
@@ -6493,6 +6496,9 @@ mod tests {
             "val channel = AsynchronousFileChannel.open(path, StandardOpenOption.READ)",
             "val channel: java.nio.channels.AsynchronousFileChannel = AsynchronousFileChannel.open(path, options)",
             "val channel: SeekableByteChannel = customChannel",
+            "val provider: java.nio.file.spi.FileSystemProvider = path.fileSystem.provider()",
+            "val entries: DirectoryStream<Path> = provider.newDirectoryStream(path, filter)",
+            "val secureEntries: SecureDirectoryStream<Path> = secureDirectoryStream",
             "val value = File(\"config.json\").canRead()",
             "val value = path.toFile()",
             "val value = java.nio.file.Path.of(configPath).toFile()",
@@ -6639,6 +6645,7 @@ mod tests {
                 // path.toFile() and Path.of("comment-only").toFile()
                 // FileSystem.newWatchService(), WatchService, WatchKey, WatchEvent, Watchable.register(), StandardWatchEventKinds.ENTRY_MODIFY
                 // AsynchronousFileChannel.open(path, options) and SeekableByteChannel
+                // FileSystemProvider, DirectoryStream, SecureDirectoryStream
                 // File("comment-only").listFiles() and File("comment-only").lastModified()
                 // File("comment-only").delete() and File("comment-only").canRead()
                 // Files.isReadable(path) and Files.getLastModifiedTime(path) and Files.newDirectoryStream(path)
@@ -6648,7 +6655,7 @@ mod tests {
                 // javaClass.getResource("comment-only") and ServiceLoader.load(Provider::class.java)
                 // fileCollection.from("comment-only")
                 val from = "ordinary-variable"
-                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath() path.toFile() FileSystem.newWatchService() WatchService WatchKey WatchEvent Watchable.register() StandardWatchEventKinds.ENTRY_MODIFY AsynchronousFileChannel.open(path, options) SeekableByteChannel ZipFile(\"string-only.zip\") JarFile(\"string-only.jar\") Scanner(File(\"string-only.txt\")) PrintStream(\"string-only.txt\") PrintWriter(\"string-only.txt\")"
+                val text = "file(\"config.json\").readText() file 'string-only' File(\"string-only\") Path.of(\"string-only\") Class.forName(\"string-only\") from(\"string-only\") File(\"string-only\").toPath() File(\"string-only\").listFiles() File(\"string-only\").delete() Files.isReadable(path) Files.newDirectoryStream(path) Files.move(source, target) path.toRealPath() path.toFile() FileSystem.newWatchService() WatchService WatchKey WatchEvent Watchable.register() StandardWatchEventKinds.ENTRY_MODIFY AsynchronousFileChannel.open(path, options) SeekableByteChannel FileSystemProvider DirectoryStream SecureDirectoryStream ZipFile(\"string-only.zip\") JarFile(\"string-only.jar\") Scanner(File(\"string-only.txt\")) PrintStream(\"string-only.txt\") PrintWriter(\"string-only.txt\")"
             "#,
         )
         .unwrap();
@@ -6658,7 +6665,7 @@ mod tests {
         fs::create_dir_all(ordinary_source.parent().unwrap()).unwrap();
         fs::write(
             &ordinary_source,
-            "class Ordinary { val value = System.getenv(\"CUSTOM_INPUT\") }\n",
+            "class Ordinary { val value = System.getenv(\"CUSTOM_INPUT\"); val provider: FileSystemProvider? = null; val stream: DirectoryStream<*>? = null }\n",
         )
         .unwrap();
         let native = NativeInputs::scan(root.path()).unwrap();
