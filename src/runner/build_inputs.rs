@@ -2583,15 +2583,138 @@ fn android_gradle_identifier_is_managed_io(source: &str, identifier: &str) -> bo
     match identifier {
         "FileInputStream" => {
             gradle_contains_identifier_sequence(source, &["keystoreProperties", "load"])
-                && gradle_call_has_string_argument(source, "FileInputStream", "keystore.properties")
+                && gradle_file_input_stream_calls_are_managed(source)
         }
         "inputStream" => {
-            source.contains("ANDROID_NDK_HOME")
-                && source.contains("ndkDirectory")
-                && gradle_call_has_string_argument(source, "resolve", "source.properties")
+            gradle_call_has_string_argument(source, "environmentVariable", "ANDROID_NDK_HOME")
+                && gradle_ndk_input_stream_calls_are_managed(source)
         }
         _ => false,
     }
+}
+
+// An exception covers each specific read, not every use of an I/O identifier
+// in a script that happens to contain one managed read.
+fn gradle_file_input_stream_calls_are_managed(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut found_call = false;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            if &source[position..end] == "FileInputStream" {
+                if let Some(closing) =
+                    gradle_single_string_call_end(source, end, "keystore.properties")
+                {
+                    found_call = true;
+                    cursor = closing;
+                    continue;
+                }
+                if !gradle_is_plain_import(source, position, "java.io.FileInputStream") {
+                    return false;
+                }
+            }
+            cursor = end;
+        } else {
+            cursor = position + 1;
+        }
+    }
+    found_call
+}
+
+fn gradle_ndk_input_stream_calls_are_managed(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut found_call = false;
+    let mut previous_is_dot = false;
+    while let Some(position) = gradle_next_code_position(source, cursor) {
+        if is_gradle_identifier_start(bytes[position]) {
+            let mut end = position + 1;
+            while end < bytes.len() && is_gradle_identifier_continue(bytes[end]) {
+                end += 1;
+            }
+            let identifier = &source[position..end];
+            if identifier == "ndkDirectory"
+                && !previous_is_dot
+                && let Some(closing) = gradle_managed_ndk_stream_end(source, end)
+            {
+                found_call = true;
+                cursor = closing;
+                previous_is_dot = false;
+                continue;
+            }
+            if identifier == "inputStream"
+                && !gradle_is_plain_import(source, position, "kotlin.io.inputStream")
+            {
+                return false;
+            }
+            cursor = end;
+            previous_is_dot = false;
+        } else {
+            previous_is_dot = bytes[position] == b'.';
+            cursor = position + 1;
+        }
+    }
+    found_call
+}
+
+fn gradle_managed_ndk_stream_end(source: &str, receiver_end: usize) -> Option<usize> {
+    let resolve = gradle_member_identifier_end(source, receiver_end, "resolve")?;
+    let resolved = gradle_single_string_call_end(source, resolve, "source.properties")?;
+    let stream = gradle_member_identifier_end(source, resolved, "inputStream")?;
+    let opening = gradle_skip_trivia(source, stream)?;
+    if source.as_bytes().get(opening) != Some(&b'(') {
+        return None;
+    }
+    let closing = gradle_skip_trivia(source, opening + 1)?;
+    (source.as_bytes().get(closing) == Some(&b')')).then_some(closing + 1)
+}
+
+fn gradle_member_identifier_end(source: &str, receiver_end: usize, member: &str) -> Option<usize> {
+    let dot = gradle_skip_trivia(source, receiver_end)?;
+    if source.as_bytes().get(dot) != Some(&b'.') {
+        return None;
+    }
+    let start = gradle_skip_trivia(source, dot + 1)?;
+    let end = start.checked_add(member.len())?;
+    (source.get(start..end) == Some(member)).then_some(end)
+}
+
+fn gradle_single_string_call_end(source: &str, method_end: usize, expected: &str) -> Option<usize> {
+    let opening = gradle_skip_trivia(source, method_end)?;
+    if source.as_bytes().get(opening) != Some(&b'(') {
+        return None;
+    }
+    let argument = gradle_skip_trivia(source, opening + 1)?;
+    if gradle_string_literal_at(source, argument)? != expected {
+        return None;
+    }
+    let literal_end = gradle_skip_string(source, argument)?;
+    let closing = gradle_skip_trivia(source, literal_end)?;
+    (source.as_bytes().get(closing) == Some(&b')')).then_some(closing + 1)
+}
+
+fn gradle_is_plain_import(source: &str, position: usize, qualified_name: &str) -> bool {
+    let start = source[..position]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let end = source[position..]
+        .find('\n')
+        .map_or(source.len(), |newline| position + newline);
+    let line = &source[start..end];
+    if !line.trim_start().starts_with("import") {
+        return false;
+    }
+    let mut code = String::new();
+    let mut cursor = 0;
+    while let Some(position) = gradle_next_code_position(line, cursor) {
+        code.push(line.as_bytes()[position] as char);
+        cursor = position + 1;
+    }
+    code.trim_end_matches(';') == format!("import{qualified_name}")
 }
 
 fn gradle_provider_call_uses_unmodeled_value(
@@ -6783,6 +6906,64 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn managed_android_gradle_reads_do_not_allow_other_stream_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("mobile/android/gradle/app");
+        fs::create_dir_all(&app).unwrap();
+        let script = app.join("build.gradle.kts");
+        let managed = r#"
+            val ndkHome = providers.environmentVariable("ANDROID_NDK_HOME")
+            val ndkDirectory = file(ndkHome.get())
+            ndkDirectory.resolve("source.properties").inputStream().use { load(it) }
+            val keystoreProperties = java.util.Properties()
+            keystoreProperties.load(FileInputStream("keystore.properties"))
+        "#;
+
+        for extra in [
+            r#"ndkDirectory.resolve("extra.properties").inputStream()"#,
+            r#"otherDirectory.resolve("source.properties").inputStream()"#,
+            r#"other.ndkDirectory.resolve("source.properties").inputStream()"#,
+            r#"ndkDirectory.resolve("source.properties" + suffix).inputStream()"#,
+            r#"ndkDirectory.resolve(configPath).inputStream()"#,
+            r#"FileInputStream("extra.properties")"#,
+            r#"java.io.FileInputStream(configPath)"#,
+            r#"FileInputStream("keystore.properties" + suffix)"#,
+            r#"val reader = otherDirectory::inputStream"#,
+            "import java.io.FileInputStream as ExternalStream\nExternalStream(configPath)",
+        ] {
+            for source in [format!("{managed}\n{extra}"), format!("{extra}\n{managed}")] {
+                fs::write(&script, &source).unwrap();
+                let native = NativeInputs::scan(root.path()).unwrap();
+                let reason =
+                    android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("managed read allowed another input: {extra}"));
+                assert!(reason.contains(ANDROID_GRADLE_APP_SCRIPT_IO_CACHE_DISABLED_REASON));
+            }
+        }
+
+        for extra in [
+            "",
+            "import java.io.FileInputStream\n",
+            r#"ndkDirectory /* receiver */ . resolve ( "source.properties" ) /* stream */ . inputStream ( )"#,
+            r#"FileInputStream(/* source */ "keystore.properties" /* end */)"#,
+            r#"java.io.FileInputStream('keystore.properties')"#,
+            r#"// ndkDirectory.resolve("extra.properties").inputStream()
+                /* FileInputStream("extra.properties") */
+                val text = "FileInputStream(\"example\") otherDirectory.inputStream()""#,
+        ] {
+            fs::write(&script, format!("{extra}\n{managed}")).unwrap();
+            let native = NativeInputs::scan(root.path()).unwrap();
+            assert!(
+                android_gradle_app_script_io_cache_disabled_reason(root.path(), &native)
+                    .unwrap()
+                    .is_none(),
+                "managed or inert stream input disabled cache reuse: {extra}"
+            );
+        }
     }
 
     #[test]
