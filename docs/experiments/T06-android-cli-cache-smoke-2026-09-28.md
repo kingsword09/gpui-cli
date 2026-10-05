@@ -417,6 +417,20 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   任意运行时 I/O/完整输入闭包；标准远端 repository runtime/state、复杂/远端 signing、release preview 和真实
   Android 设备验收仍未闭合。
 
+## T06 Gradle asynchronous file channel cache gate（2026-10-05）
+
+- PR #357（`90174a7`）将 Java NIO `AsynchronousFileChannel` 与 `SeekableByteChannel` 类型及
+  `AsynchronousFileChannel.open(...)` factory 入口加入 Android Gradle app-script 静态 I/O marker；命中只关闭
+  artifact cache reuse，普通 Gradle 构建继续。
+- 回归覆盖限定/非限定类型和 factory 引用，注释、字符串及普通 `app/src/main` source 不触发。Android debug/
+  release packaging、`arm64-v8a`/`x86_64` ABI 与 CLI debug/release miss→hit cache smoke 通过。
+- 本地 workspace `456 passed, 1 ignored`，fmt、clippy、build、design docs、package list、diff check 通过；
+  PR/push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全绿；squash merge
+  `90174a7`，无版本发布/tag。
+- 静态 marker 不验证异步 operation/callback 完成，也不提取 channel 实际访问的文件集合或完整
+  Gradle/plugin/provider runtime I/O；远端 repository runtime/state、复杂/远端 signing、release preview 和真实
+  Android 设备验收仍未闭合。
+
 该 smoke 在真实 Android SDK/NDK、cargo-ndk 与 Gradle 下验证 CLI 首次构建和同 BuildKey 第二次命中；
 Rust app 使用最小 cdylib fixture，不编译 GPUI UI。
 

@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-05，主分支 `dd316eb`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-05，主分支 `90174a7`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -1085,6 +1085,13 @@ clean task 不触发。workspace 456 passed、1 ignored，fmt/clippy/build/desig
 debug/release packaging、双 ABI 与 CLI miss→hit smoke 通过；PR/push 两套三 OS 与 desktop/android template、
 baseline-driver 全绿，squash 为 `dd316eb`。不跟踪 watch 目标/事件实际来源或完整 Gradle/plugin I/O；远端
 repository/signing/release-preview 和真实设备验收仍未闭合，T06 保持 `in_progress`。
+
+#357 将 Java NIO `AsynchronousFileChannel` 与 `SeekableByteChannel` 类型/factory 入口纳入 Android Gradle
+app-script 静态 I/O marker；限定/非限定引用命中时只关闭 cache reuse，普通构建继续。回归覆盖 factory 和类型
+引用，并确认注释、字符串与普通 app source 不触发。workspace 456 passed、1 ignored，fmt/clippy/build/design
+docs/package list/diff check、Android debug/release packaging、双 ABI 与 CLI miss→hit smoke 通过；PR/push 两套
+三 OS、desktop/android template 和 baseline-driver 全绿，squash 为 `90174a7`。不验证异步操作完成/回调或实际
+文件读集，也不闭合完整 Gradle/plugin I/O、复杂 signing、release preview 和设备验收；T06 保持 `in_progress`。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。
