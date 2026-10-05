@@ -445,6 +445,39 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   Gradle/plugin/provider runtime I/O；标准远端 repository runtime/state、复杂/远端 signing、release preview 和
   真实 Android 设备验收仍未闭合。
 
+## T06 Gradle 字符串表达式插值 cache gate（2026-10-05）
+
+- PR #369（`41a182e`；本地验证代码 `25dbeb5`）补齐字符串内的执行入口：双引号字符串（含三重双引号）中的
+  `${...}` 不再被 code-token scanner 当作纯文本略过。发现表达式后仅关闭 Android artifact cache reuse，
+  普通 build/preview 仍可继续。检查器不执行或解析表达式，即使计算是纯函数也保守 bypass；简单 `$name`
+  引用保持现有声明检查策略，这不是完整 Kotlin/Groovy parser 或任意 Gradle I/O 追踪。
+- 新增 native-input 回归覆盖 `.gradle.kts`/`.gradle` 的环境、文件、provider 和嵌套插值；普通字符串的
+  escaped dollar、注释、单引号文本和模板 `$gpuiAbis` 仍可复用。Kotlin raw string 中的反斜杠不会隐藏
+  `${...}`。新增回归在修复前因漏过 `System.getenv(...)` 失败，修复后通过。
+- 本机 macOS 15.6.1 / Apple M2 / arm64，rustc 1.97.1、cargo-ndk 4.1.2、NDK 27.2.12479018、Gradle 9.4.1。
+  `cargo test --workspace --locked` 共 490 passed、1 ignored（CLI 单元测试 457 passed）；fmt、workspace clippy、
+  build、design docs、package list 和 diff check 通过。标准 Android debug/release packaging、双 ABI 与 CLI 两种
+  variant 的 miss→hit smoke 通过。
+- 在同一最小 cdylib fixture 中将 `versionName` 设为 `"${System.getenv("GPUI_INTERPOLATED_VERSION")}"`，
+  保持源码不变，分别用环境值 `2.1.0` 和 `2.2.0` 执行真实 `gpui build android`。两次 BuildKey 均为
+  `802cf6e92edf52cfccef7ff59102a41e7e267814f58f8c000503892558c8d66d`，均报告 app-script I/O cache miss；
+  `aapt2 dump badging` 验证 APK 内的版本号随环境变化，两张 APK 均包含 `arm64-v8a`/`x86_64`。
+
+| 插值环境值 / APK versionName | APK SHA-256 | 可复用 manifest |
+| --- | --- | --- |
+| `2.1.0` | `aefc3b7bf5d178f96598c9b6cec790ad31e8f037688b35f3d25e578ee3305dee` | 未发布 |
+| `2.2.0` | `896ea340718f466b4a6e0eb7b56e315b47a31299366bf9e86a81082a7a31a8da` | 未发布 |
+
+- 对照前已有的 debug/release artifact manifests 内容未变化。原始日志、临时 probe、`aapt2` 输出和
+  `interpolation-apk-evidence.json` 位于本机 `/tmp/gpui-gradle-interpolation-qa928E/`，不是发布产物。
+- PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 均首次通过；
+  [PR workflow](https://github.com/kingsword09/gpui-cli/actions/runs/37263082897) 与
+  [push workflow](https://github.com/kingsword09/gpui-cli/actions/runs/37263052355) 绑定 head `25dbeb5`，
+  squash merge 为 `41a182e`。
+- 该对照仅覆盖本机真实 NDK/Gradle 打包与缓存策略；没有运行 GPUI renderer、GUI 或 Android 设备。
+  完整 Gradle/plugin 输入闭包、标准远端 repository runtime/state、复杂 signing、release preview 和 T06 的
+  其他验收仍未闭合，T06 保持 `in_progress`。
+
 ## T06 Gradle PathMatcher cache gate（2026-10-05）
 
 - PR #366（`e0c36ed`）将 Java NIO `PathMatcher` 与 `FileSystem.getPathMatcher(...)` 加入 Android Gradle
