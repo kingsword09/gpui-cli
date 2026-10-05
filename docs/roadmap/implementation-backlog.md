@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-05，主分支 `51d7dca`。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-05，主分支 `4d4f863`。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -50,7 +50,7 @@
 | Q01 | G3 | core | M | F01, O04, S04, M01 | C-02, O-01, O-11, S-03, M-01, M-02, R-04 | planned |
 | G01 | G4 | core | L | F01, P01, O01 | P-03, P-04 | planned |
 | G02 | G4 | core | L | G01, S04, M04, M03 | P-05, P-06 | planned |
-| T05 | G4 | core | M | F01, M04 | T-08, T-09, P-02 | planned |
+| T05 | G4 | core | M | F01, M04 | T-08, T-09, P-02 | in_progress |
 | T06 | G4 | core | L | T05, M04 | T-10, M-08, P-02 | in_progress |
 | Q02 | G4 | core | M | F01, A02, M02 | A-07, A-08 | planned |
 | G03 | G4 | optional | L | G01, M03, O03, S04 | P-07, P-08 | planned |
@@ -1125,6 +1125,17 @@ versionName 经 `aapt2` 确认从 `2.1.0` 更新为 `2.2.0`，hash 改变，两�
 该检查不求值表达式、不构成完整 Kotlin/Groovy parser 或 Gradle/plugin 输入闭包；标准远端 repository 状态、
 复杂 signing、release preview、预热及真实设备验收仍未闭合，T06 保持 `in_progress`。详见
 [插值对照证据](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
+
+#372 将受控 stream 读取例外限制到每次调用：NDK 的字面 `source.properties` resolve/inputStream 链与
+签名上下文中单一字面 `keystore.properties` 的 `FileInputStream` 仍可复用；其他文件、receiver、动态参数、
+方法引用或 alias import 只关闭 cache reuse。普通 import、注释/空白和重复受控读取保持原策略，普通构建继续。
+native-input 回归先复现整份脚本例外误放行，再验证修复；workspace 491 passed、1 ignored（CLI 458 passed），
+本地检查和 Android debug/release packaging、双 ABI、CLI miss→hit 通过。相同源码/BuildKey 下，仅修改项目外
+测试文件，`aapt2` 即确认真实 APK 版本从 `3.1.0` 更新为 `3.2.0`，hash 改变，两次均未发布 manifest，
+旧 manifests 保留。PR/push 两套三 OS、desktop/android template、baseline-driver 首次全绿，squash 为
+`4d4f863`。该检查不验证变量绑定或完整 Gradle/plugin 读集，真实设备、复杂 signing、release preview、预热和
+完整 T06 验收仍未闭合，T06 保持 `in_progress`；原始对照与探针修正记录见
+[stream 读取证据](../experiments/T06-android-cli-cache-smoke-2026-09-28.md)。
 
 1. 相同 key 在途构建合并引用，验证已完成 manifest/文件大小/hash 才命中。
 2. 失败/取消/缺产物不缓存；更改工具链/features/锁文件/环境/ABI 均失效。

@@ -445,6 +445,42 @@ dependency verification metadata，并把严格校验状态作为 cache reuse �
   Gradle/plugin/provider runtime I/O；标准远端 repository runtime/state、复杂/远端 signing、release preview 和
   真实 Android 设备验收仍未闭合。
 
+## T06 受控 Gradle stream 读取例外收窄（2026-10-05）
+
+- PR #372（`4d4f863`；验证 head `57170eb`）将 NDK 与签名读取例外限制到每次具体调用，避免一个受控读取
+  放行同脚本里的其他 `inputStream`/`FileInputStream`。NDK 只接受
+  `ndkDirectory.resolve("source.properties").inputStream()` 的字面调用形式；签名上下文的 `FileInputStream`
+  必须只有一个字面 `keystore.properties` 参数。其他 receiver、文件、拼接路径、方法引用和 alias import
+  只关闭 artifact cache reuse，普通构建继续；普通 import、注释/空白和重复受控调用保留原策略。
+- native-input 回归在修复前确认 `ndkDirectory.resolve("extra.properties").inputStream()` 被错误放行；
+  修复后覆盖额外读取位于受控调用之前/之后、不同 receiver、动态参数、方法引用和 alias import。
+  workspace 491 passed、1 ignored（CLI 单元测试 458 passed），fmt、workspace clippy、build、design docs、
+  package list、diff check 均通过。rebase 期间只有 #370/#371 文档变化，实现 blob
+  `f158ba6605fead8b990115cbba3595b646dc5191` 保持一致。
+- 本机沿用 macOS 15.6.1 / Apple M2 / arm64、rustc 1.97.1、cargo-ndk 4.1.2、NDK 27.2.12479018 与
+  Gradle 9.4.1。标准 Android debug/release packaging、双 ABI 与 CLI debug/release miss→hit 均通过。
+- 真实外部文件对照在最小 cdylib fixture 中保留模板的 NDK 读取，再通过同一个 `ndkDirectory.resolve(...)`
+  和 `inputStream()` 读取项目外的受控测试 properties 文件，用其 `version` 设置 APK versionName。源码不变，
+  文件内容依次为 `version=3.1.0`、`version=3.2.0`；两次 BuildKey 均为
+  `5992e6ab1d758f15df749a21c53c44ef89ceb99ecafc6954f58eb83f6da2c637`。两次均触发 app-script I/O bypass，
+  `aapt2 dump badging` 确认版本随文件变化，两张 APK 均包含 `arm64-v8a`/`x86_64`。
+
+| 外部文件 version / APK versionName | APK SHA-256 | 可复用 manifest |
+| --- | --- | --- |
+| `3.1.0` | `e5ecf62eb7ec61d670f4f209b8001f464079d28eb4bd7ddd49b46ffaefaa226f` | 未发布 |
+| `3.2.0` | `5a976ed74e4197ec88fdfaaef5992c029086d8907b3ef46a7c8cd4829e2b889c` | 未发布 |
+
+- 已有 debug/release artifact manifests 内容未变化。原始日志、临时 probe、`aapt2` 输出与
+  `external-read-apk-evidence.json` 位于本机 `/tmp/gpui-managed-gradle-S7qrTj/`。首轮临时脚本使用的
+  `java.util.Properties` 被 Gradle 的 `java` accessor 遮蔽，改用模板已导入的 `Properties` 后重跑通过；
+  产品实现未变，原始编译失败日志保留为 `android-probe-initial-failure.log`。
+- [PR workflow](https://github.com/kingsword09/gpui-cli/actions/runs/37307514132) 与
+  [push workflow](https://github.com/kingsword09/gpui-cli/actions/runs/37307504963) 的三 OS、desktop/android template、
+  baseline-driver 均首次通过，绑定 head `57170eb`，squash merge 为 `4d4f863`。
+- 本轮验证的是静态调用形式与本机 NDK/Gradle 打包；不验证变量绑定、任意 Gradle/plugin 运行时读集或
+  GPUI renderer/GUI/真实设备。标准远端 repository 状态、复杂 signing、release preview、预热和完整
+  T06 验收仍未闭合，T06 保持 `in_progress`。
+
 ## T06 Gradle 字符串表达式插值 cache gate（2026-10-05）
 
 - PR #369（`41a182e`；本地验证代码 `25dbeb5`）补齐字符串内的执行入口：双引号字符串（含三重双引号）中的
