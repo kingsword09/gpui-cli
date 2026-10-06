@@ -90,7 +90,7 @@ T-01/T-02/T-03 或 G0 已整体通过。
 | --- | --- | --- |
 | 实现 | 已按 `expected.version` 解析命令版本；不带版本要求的命令仍只看可用性；project-selected Gradle wrapper 做精确比对，固定模板 AGP 9.1.0 + Gradle 9.4.1 建立 Java 17 最低规则，未知组合保留 Unknown。修正 iOS 单字符串 host、adb version expectation，并读取 SDK platform/build-tools、NDK metadata 和项目 Rust minimum；Android selected-device 现在比较 `Device.arch` 与配置的 `GPUI_ANDROID_ABIS`，缺失架构保持 Unknown | 本轮接入 Android ABI match/mismatch/unknown 判定；跨平台规则/CI、动态兼容和完整秘密筛除边界仍需核验，未建模 AGP/Gradle 组合继续保持 Unknown |
 | 本地测试 | 修复前定向子进程回归确认为 exit 0 + 畸形 Rust 版本误报 Pass；本轮 `cargo test --locked --bin gpui toolchain::` 得 35 passed、10 ignored，doctor ABI 判定 7 passed；默认并行 workspace 首次为 485 passed、3 个既有 process-tree 测试超时，三个失败项逐个串行复跑通过；随后 `cargo test --workspace --locked -- --test-threads=1` 得 488 passed、0 failed、11 ignored，且 `cargo fmt --check`、`git diff --check` 通过 | 默认并行失败保存在 `artifacts/acceptance/1c0a4cb/T-01/macos-arm64/attempt-05/`；串行完整结果及日志在 `attempt-06/`；其它 T01/T02/T03 证据见 `attempt-03`、`T-02/attempt-02`、`T-03/attempt-02`至`attempt-06`；均为未合并工作区证据 |
-| CI | 当前分支无本次实现对应的 CI 结果；本地通过不代替 Linux/macOS/Windows、生成模板和工具链 job | 本轮由用户授权创建 PR、推送并在必需检查通过及审查要求满足后 squash merge；不能使用 merge commit 或 rebase merge |
+| CI | PR #380 首轮：macOS workspace test/clippy 通过，但 `cargo x check-design-docs` 因链接到 ignored artifact 路径失败；Linux/Windows matrix 被 fail-fast 取消；desktop-template、android-template、baseline-driver 通过 | 已将本机 evidence 链接替换为仓库内摘要 `docs/experiments/T01-doctor-closeout-2026-10-06.md`；修复提交后必须等三 OS、模板和 baseline-driver 全部通过，再 squash merge。不能使用 merge commit 或 rebase merge |
 | 原生验收 | 已在 macOS arm64 对 desktop-only、iOS-only、Android-only 生成项目及非项目显式 target 跑 doctor；最终 desktop/iOS/Android 项目均返回 0，Android 实际核对 platform 34、可用 build-tools、NDK 27.2.12479018、Gradle 9.4.1、AGP 9.1.0、Java 21.0.8。iOS 22 台 simulator 中两个 selector 解析到不同设备且未启动；Android 发现 3 台 stopped AVD，两个 selector 解析到 Pixel_9_Pro / Pixel_9a；Pixel_9_Pro 在 `arm64-v8a` 构建 ABI 下通过，在 `x86_64` 构建 ABI 下 required check 失败，调用前后 AVD 均保持 stopped。`adb devices -l` 无连接设备；临时 SDK canary 未泄露；错误 compileSdk、缺 build-tools、无 NDK metadata、Java 11 均拒绝 | T-01/T-02 原始证据见 `artifacts/acceptance/1c0a4cb/T-01/macos-arm64/attempt-03/`、`T-02/macos-arm64/attempt-02/`；iOS selector、Android AVD selector、ABI target 缺失和 ABI match/mismatch 分别见 `T-03/macos-arm64/attempt-02/`、`attempt-04/`、`attempt-03/`、`attempt-06/`。仍需 CI、Linux/Windows、真实 x86/unknown ABI 或 physical Android device 验收，不宣称整个 T-01/T-03 通过 |
 
 本轮已补两个 iOS selector、两个 Android AVD selector、required Android ABI target 缺失
@@ -111,15 +111,16 @@ F01 无硬依赖。责任子例：P-01 的 L0 supervisor span/失败样本、P-0
 | 实现 | 基线脚本夹具补 `gpui-dev` feature；status predicate 对 `build`/`running` transitional null 安全；self-test 保持通过 | `scripts/live-baseline.py`、`cargo fmt --check`、`python3 -m py_compile scripts/live-baseline.py` |
 | 本地测试 | macOS arm64 实跑 counter、login-invalid、list-scroll；每个 10 warmup + 30 measurement，共 120 样本、1515 spans；失败 30、恢复样本 30，span 无负时长；串行完整 workspace 488 passed、11 ignored，另外 32 个测试目标通过；clippy/build/fmt/design docs/diff check 通过。默认并行 workspace 的 3 个 process-tree timeout 单列在 T01 `attempt-05` | F01 数据见 `artifacts/acceptance/1c0a4cb/F01/macos-arm64/attempt-03/`；当前 workspace 回归见 T01 `attempt-06/`；失败尝试 `attempt-01`/`attempt-02` 保留原始原因 |
 | CI | 当前未提交，尚无本轮 CI artifact；需要 Linux/macOS/Windows 与 baseline-driver job | 等待恢复条件：提交进入 CI/review；本地 evidence 不代替 CI |
-| GUI/设备/native | 尝试在 macOS arm64 生成 Counter 项目执行 `gpui run desktop --live`；180s 内仍在首轮 `cargo.build`，没有窗口注册，因此 screenshot/semantics 未运行。headless Cargo/supervisor 只关闭 L0 责任子例 | L2/L3 仍 `not_run/unavailable`，不能晋升 F01 `done`；恢复条件是可完成的原生构建/可用窗口环境 |
+| GUI/设备/native | attempt-04 首轮构建超 180s 未注册窗口；本轮隔离重跑 8m 内完成 macOS Counter `cargo.build`、window registration 和 responsive heartbeat。`capture.window` observation succeeded，PNG 149×164、6,109 bytes、`freshness.source=current`/`assets=applied`；GPUI semantics 返回 `a11y_inactive`，screenshot-only click 以 `stale_observation` 拒绝。受控 `compile_error!` build b3 failed，恢复后 build b4 / run r2 responsive | 当前只关闭正常 window、window capture、编译失败和恢复子例；P-01 仍缺 cancel/superseded/native install failure 与无障碍激活验收，`presented_frame_id=null` 不证明 GPU present；不能晋升 F01 `done` |
 
-F01 本轮可本机执行的 headless 子例已收口；真实 macOS live 变体的 `attempt-04/result.json`
-已复核：180s deadline 内仍在首轮 `cargo.build`，未注册窗口，故 screenshot/semantics 为
-`not_run/unavailable`。本次还观察到既有 desktop、iOS simulator、Android AVD 的长运行
-`gpui run --live` 进程，未触碰这些进程；它们不是本次夹具验收证据。
+F01 本轮复核了 attempt-04，并新增隔离的 attempt-05：上次因首次编译时间较长未到窗口；本次
+成功注册 macOS generated Counter 窗口并取得当前 run/source 的 window screenshot。语义仍因
+`a11y_inactive` 不可用，window capture 与 scene/present 不等价；受控 compile_error build 失败，
+还原源码后新的 run responsive。既有 desktop、iOS simulator、Android AVD 长运行 live 进程未触碰；
+本次仅在临时 project 启动的 PID 36629 已在验收完成后由本轮停止。
 
 F01 与 T01 均无硬前置。本轮将已实现的 T01 doctor 和 F01 baseline-driver 差异送入 PR，等待 CI 与
-必要审查；F01 仍要可完成的原生构建/GUI，T01 的真实 x86/unknown ABI 或 physical-device 变体仍缺证据。清单中的
+必要审查；F01 的 P-01 GUI 窗口/截图/失败恢复已有局部证据，仍缺取消、superseded、native install failure 与无障碍激活；T01 的真实 x86/unknown ABI 或 physical-device 变体仍缺证据。清单中的
 P01 硬依赖 F01+T01，T02 硬依赖 F01；其它核心项的依赖链也未满足。当前没有可安全启动的
 下一项，不能以现有下游实现绕过前置。PR 必需 CI 全绿、审查条件满足后使用 squash merge；合并后
 复核基线并更新父任务证据/状态。F01 重跑 P-01 时隔离使用 fixture 项目且不终止已有 live 进程；
