@@ -159,6 +159,7 @@ jobs:
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
           yes | sdkmanager --licenses >/dev/null || true
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          bash templates/android/gradle/gradlew --version
       - name: Run Android ABI doctor evidence on x86_64 emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
