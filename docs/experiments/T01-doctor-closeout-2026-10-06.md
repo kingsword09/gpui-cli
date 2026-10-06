@@ -79,3 +79,28 @@ stderr 与保存的环境摘要未发现 canary 值。
 `artifacts/acceptance/7336d74/T-01/linux-amd64/attempt-01/`。该容器证据关闭 Linux host
 责任变体，但不代替 Windows 工具版本矩阵、真实 x86/unknown Android ABI、physical device
 或未建模 AGP/Gradle 组合；这些仍按恢复条件保持未收口。
+
+## 三平台 GitHub host evidence（PR #386，主线 squash `3772750`）
+
+PR #386 将 `scripts/doctor-host-evidence.py` 接入 `check` matrix。每个真实 GitHub
+Linux/macOS/Windows runner 都生成同一格式的 explicit/project-default desktop doctor
+报告、工具版本和 commands JSON，并上传 `doctor-host-<os>` artifact；脚本设置 secret
+canary 但只保存白名单环境摘要，报告、stderr 和 artifact 均确认 canary absent。
+
+push workflow run
+[37516723480](https://github.com/kingsword09/gpui-cli/actions/runs/37516723480) 与 PR
+workflow run
+[37516731735](https://github.com/kingsword09/gpui-cli/actions/runs/37516731735) 的三平台
+check、template、baseline-driver 均通过。push artifacts 为：
+
+- `doctor-host-ubuntu-latest`：Ubuntu 24.04 x86_64，`rustc/cargo 1.99.0`，Debian
+  `cc 13.3.0`；显式和项目默认 target 均为 desktop，required 全 pass，可选 Xcode
+  capture warning，overall warning。
+- `doctor-host-macos-latest`：Darwin arm64，Apple clang 21.0.0；显式和项目默认 target
+  均 pass，required 全 pass，可选 Xcode capture pass，overall pass。
+- `doctor-host-windows-latest`：Windows AMD64，MinGW `cc 15.2.0`；显式和项目默认 target
+  均为 desktop，required 全 pass，可选 Xcode capture warning，overall warning。
+
+这些 artifact 关闭 T-01 的真实 Linux/Windows host doctor responsibility，仍不等于真实
+Android x86/unknown ABI、physical device、移动 GUI/语义或 AGP/Gradle 全组合验收。artifact
+下载记录只保留在 GitHub run；本地复核摘要保存在 `/tmp/gpui-doctor-ci386/`，不写入仓库。

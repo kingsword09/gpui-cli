@@ -1,12 +1,12 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-07（Asia/Shanghai）。执行基线：`783a3bc`（PR #385 后路线证据更新）；相较
+更新日期：2026-10-07（Asia/Shanghai）。执行基线：`3772750`（PR #386 squash merge）；相较
 实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
 iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection、
-required nonzero/malformed-version responsibility 变体。
+required nonzero/malformed-version responsibility 变体和三平台 host doctor artifacts。
 当前分支为 `main`，工作区干净。T01/F01/P01 仍保持 `in_progress`；T01 host-smoke 已通过
-design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge；PR #384/#385
-分别 squash 为 `285893f`/`287c3c7`。
+design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge；PR #384/#385/#386
+分别 squash 为 `285893f`/`287c3c7`/`3772750`。
 
 ## 1. 文档职责与纠偏原因
 
@@ -35,7 +35,7 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | F01 · T01 的 CLI responsibility 已收口到真实 native helper 变体：required `cc` nonzero 与 `rustc` exit-0 malformed version 均在本机 4 项 `doctor_cli` 和两套 Linux/macOS/Windows workflow 通过；主线 `7336d74` 又在 Ubuntu 24.04/Linux x86_64 容器完成显式/项目默认 desktop doctor，required checks 全部 pass、可选 Xcode capture 为 warning、秘密 canary 未泄露。T01 仍缺 Windows 工具版本矩阵、x86/unknown ABI、physical-device 与未建模兼容边界，恢复条件已记录；当前转回 F01，先处理 macOS GUI/scene/present 与 P-02 联合对照，不把 `a11y_inactive`/`presented_frame_id=null` 当通过。P01 仍需 F01+T01 |
+| 当前执行游标 | F01 · T01 的 CLI/native host responsibility 已收口：required `cc` nonzero 与 `rustc` exit-0 malformed version 在本机 4 项 `doctor_cli` 和两套 Linux/macOS/Windows workflow 通过；PR #386 又在真实 GitHub Linux/macOS/Windows runners 上传 explicit/project-default doctor artifacts，required checks 全 pass、移动 checks 隔离、secret canary absent。主线 `7336d74` 还在 Ubuntu 24.04/Linux x86_64 容器完成显式/项目默认 desktop doctor。T01 仍缺 x86/unknown ABI、physical-device 与未建模兼容边界，恢复条件已记录；当前转回 F01，先处理 macOS GUI/scene/present 与 P-02 联合对照，不把 `a11y_inactive`/`presented_frame_id=null` 当通过。P01 仍需 F01+T01 |
 | 首批候选 | F01 继续核对既有 attempt-05/06/07 和模板新基线，选择可重跑的 scene/present 或语义证据缺口；T01 外部 runner/device 可用后恢复其责任矩阵 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
