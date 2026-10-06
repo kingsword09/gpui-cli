@@ -2,11 +2,14 @@
 
 当前功能以项目 [README](../README.md) 和代码为准；设计草案不代表已实现。
 
-接续开发先读[当前进度与接续记录](roadmap/current-status.md)：核查至 2026-09-29
-主分支 `a1395d3`，包含全部 35 项任务、最近合并、旧问题处置和验证边界。
+接续开发先读[当前进度与接续记录](roadmap/current-status.md)并核对提交，再读
+[收口执行计划](roadmap/closeout-plan.md)中的整体推进循环、执行游标和下一候选；其中第 6 节
+提供可直接交给其他 Agent 的整体 Prompt。代码基线与验证范围
+以状态文档为准，不从历史设计日期或最近 PR 主题选择新切片。
 
 ## 后续路线与可执行计划
 
+- [整体推进与 Agent 交接](roadmap/closeout-plan.md)：自动选题/收口循环、游标、等待条件、候选队列和整体 Prompt。
 - [Agent-native 跨平台开发总路线](ROADMAP-agent-native-development.md)：目标、现状、架构、G0–G4 门槛。
 - [35 项实施工作包](roadmap/implementation-backlog.md)：依赖、代码落点、PR 拆分、验收与回退。
 - [68 项验收与实验操作单](roadmap/acceptance-matrix.md)：故障注入、证据、平台/CI 层级及12项 Agent 基准。
