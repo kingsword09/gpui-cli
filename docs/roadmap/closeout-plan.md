@@ -35,7 +35,7 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | F01 · T01 的 CLI responsibility 已收口到真实 native helper 变体：required `cc` nonzero 与 `rustc` exit-0 malformed version 均在本机 4 项 `doctor_cli` 和两套 Linux/macOS/Windows workflow 通过。T01 仍缺真实 Linux/Windows 工具版本矩阵、x86/unknown ABI、physical-device 与未建模兼容边界，恢复条件已记录；当前转回 F01，先处理 macOS GUI/scene/present 与 P-02 联合对照，不把 `a11y_inactive`/`presented_frame_id=null` 当通过。P01 仍需 F01+T01 |
+| 当前执行游标 | F01 · T01 的 CLI responsibility 已收口到真实 native helper 变体：required `cc` nonzero 与 `rustc` exit-0 malformed version 均在本机 4 项 `doctor_cli` 和两套 Linux/macOS/Windows workflow 通过；主线 `7336d74` 又在 Ubuntu 24.04/Linux x86_64 容器完成显式/项目默认 desktop doctor，required checks 全部 pass、可选 Xcode capture 为 warning、秘密 canary 未泄露。T01 仍缺 Windows 工具版本矩阵、x86/unknown ABI、physical-device 与未建模兼容边界，恢复条件已记录；当前转回 F01，先处理 macOS GUI/scene/present 与 P-02 联合对照，不把 `a11y_inactive`/`presented_frame_id=null` 当通过。P01 仍需 F01+T01 |
 | 首批候选 | F01 继续核对既有 attempt-05/06/07 和模板新基线，选择可重跑的 scene/present 或语义证据缺口；T01 外部 runner/device 可用后恢复其责任矩阵 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
@@ -69,9 +69,9 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 
 | 维度 | 本轮登记 |
 | --- | --- |
-| 已有证据 | F01 macOS arm64 已完成三夹具 10 warmup + 30 measurement、failure/recovery、cancel/superseded/native-install-failure responsibility；原始 attempt-05/06/07 和 `F01-p01-closeout-2026-10-06.md` 已记录窗口截图、span 与 cleanup |
+| 已有证据 | F01 macOS arm64 已完成三夹具 10 warmup + 30 measurement、failure/recovery、cancel/superseded/native-install-failure responsibility；原始 attempt-05/06/07 和 `F01-p01-closeout-2026-10-06.md` 已记录窗口截图、span 与 cleanup。主线 `7336d74` 的 attempt-10 又复跑真实 `capture.window` metadata（scene epoch/source/assets freshness）和 semantics `a11y_inactive`，没有新增可下载 PNG artifact |
 | 剩余实现 | 先复核 scene readback、presented frame、语义导出和 P-02 联合对照的实际代码/证据边界；不把缺失 provider 的 `a11y_inactive` 或 `presented_frame_id=null` 伪造为通过 |
-| 本地测试 | 选择一个隔离 generated Counter/LoginForm/VirtualList 重跑，保存 command、environment、span、截图/树 hash；若能力不可用，记录最小上游/恢复条件 |
+| 本地测试 | 已在独立 generated Counter 中重跑 live build/run、window observe 和 semantics observe；证据保存 command/status/operation JSON、artifact hash 与能力错误。若能力不可用，记录最小上游/恢复条件；下一步只补 scene/present 或 P-02 responsibility，不重复制造同一 `a11y_inactive` 结果 |
 | CI/GUI 责任 | 现有 workflow/template CI 只证明构建和测试路径，不替代真实 GUI/scene/semantic/device；跨平台 GUI/device 与 T05/T06 联合对照仍未闭合 |
 | 有界出口 | 关闭一个可复现的 scene/present/semantic responsibility variant，或记录明确外部阻塞与恢复条件；随后回看 F01 父任务，不晋升 F01/P01 |
 

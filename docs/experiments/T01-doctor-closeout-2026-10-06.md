@@ -56,3 +56,26 @@ job 被 fail-fast 取消，没有 Windows 失败结论。模板与 baseline-driv
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --locked`、`cargo fmt --check` 和 `git diff --check` 通过。
 
 这组结果来自含未提交 parser 修复的 macOS arm64 工作区；不是 CI，也不能替代 Linux/Windows doctor 验收。修复推送后需要绑定新 head 的完整 CI 结果。
+
+## Linux x86_64 host doctor responsibility（主线 `7336d74`）
+
+为补齐真实 Linux host responsibility，在 Ubuntu 24.04 用户态的 `rust:latest` Linux
+x86_64 容器中从当前主线构建 `gpui`，再运行显式 target 和生成项目默认 target：
+
+```text
+gpui doctor --json --target desktop
+gpui init doctor-linux-probe --targets linux
+cd doctor-linux-probe && gpui doctor --json
+```
+
+环境为 Linux kernel `6.17.4-orbstack`、x86_64、`rustc/cargo 1.99.0`、`rustup 1.29.1`
+和 Debian GCC `cc 14.2.0`。两份报告的 required checks（Rust、Cargo、rustup、host
+platform、C compiler）均为 `pass`；可选 `capture.xcode_gpu_tools` 为 `warning`，整体为
+`warning`，且 desktop report 没有 Android/iOS checks。显式 target 的 source 为 `cli`，
+项目默认 target 的 source 为 `project`。设置 `GPUI_DOCTOR_SECRET_CANARY` 后扫描报告、
+stderr 与保存的环境摘要未发现 canary 值。
+
+原始摘要、JSON、命令 stderr、生成项目和工具版本保存在 ignored 证据目录：
+`artifacts/acceptance/7336d74/T-01/linux-amd64/attempt-01/`。该容器证据关闭 Linux host
+责任变体，但不代替 Windows 工具版本矩阵、真实 x86/unknown Android ABI、physical device
+或未建模 AGP/Gradle 组合；这些仍按恢复条件保持未收口。
