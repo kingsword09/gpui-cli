@@ -1,11 +1,10 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-06（Asia/Shanghai）。执行基线：`f8192d6`（PR #380 squash merge）；相较
-实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor 与 F01 baseline-driver。
-当前分支 `codex/f01-p01-closeout` 的 PR #381 head `5a9cf9b` 包含 F01/P-01 接续证据、iOS-safe
-backtrace 模板修复与路线记录，正在等待 design-doc/CI/review。T01/F01/P01 仍保持 `in_progress`；
-PR #381 必须等 design-doc、三平台 CI、模板和
-baseline-driver 检查通过后使用 squash merge。
+更新日期：2026-10-07（Asia/Shanghai）。执行基线：`306c070`（PR #381 squash merge）；相较
+实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
+iOS-safe backtrace 模板修复和 F01/P-01 native-install-failure 证据。当前分支为 `main`，
+工作区新增 T01 doctor CLI host-smoke 验收切片，尚未绑定 PR/CI。T01/F01/P01 仍保持
+`in_progress`；本切片必须等 design-doc、三平台 workspace CI 和 review 后使用 squash merge。
 
 ## 1. 文档职责与纠偏原因
 
@@ -34,8 +33,8 @@ baseline-driver 检查通过后使用 squash merge。
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | F01 · P-01 macOS cancel/superseded/native-install-failure responsibility variants 已有隔离证据；模板新增 iOS-safe `backtrace 0.3.76` snapshot 后，iOS simulator Rust check、Xcode build、受控 `ios.install` failure、cleanup/lease/device 状态均已取得。当前等待新模板变更的 design-doc/CI/review/merge；T01 已随 PR #380 squash 合并但仍缺跨平台/真实 x86 或 unknown ABI 设备变体和父任务验收；P01 需 F01+T01，T02 需 F01 |
-| 首批候选 | F01 当前等待新模板 CI/review/merge；等待期间继续核对可独立推进的 T01 Linux/Windows/ABI responsibility variants，不越过 P01/F01 硬依赖 |
+| 当前执行游标 | T01 · doctor CLI host-smoke integration test 已在本机 macOS 通过：生成 desktop-only 项目并执行 `doctor --json --target desktop`，schema v2、显式 target、required pass 和移动工具链隔离均核对。等待新 PR 的三平台 workspace CI/review；T01 仍缺真实 Linux/Windows host doctor 工具矩阵、x86/unknown ABI、physical-device 与未建模兼容边界；F01/P01 已回到等待/后续联合证据，P01 仍需 F01+T01 |
+| 首批候选 | T01 当前可执行；先收口三平台 CLI host smoke，再按可用环境处理 T-02/T-03 responsibility variants，不越过 P01/F01 硬依赖 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
@@ -46,11 +45,23 @@ baseline-driver 检查通过后使用 squash merge。
 | --- | --- |
 | 实现缺口 | 已以内嵌 `vendor/backtrace-0.3.76` 兼容快照收口；cfg 差异限定为 macOS dyld library enumerator，许可证、上游 commit 和 PATCHES 已记录 |
 | 本地测试缺口 | 已重新生成隔离项目；`cargo check --target aarch64-apple-ios-sim`、Xcode Debug build、受控 `ios.install` exit 73、未安装 app、lease owner 释放和 simulator 删除均有证据 |
-| CI 缺口 | 已在 `.github/workflows/ci.yml` 增加 macOS desktop-template job 的 iOS simulator Rust check；新 head 尚未运行，不能把本地结果当 CI 通过 |
+| CI 缺口 | PR #381 已在 macOS desktop-template job 实际运行 iOS simulator Rust check，push/PR 两套 workflow 的 Linux/macOS/Windows、template、baseline-driver 均通过；该变更已合并为 `306c070` |
 | GUI/设备缺口 | 本轮临时 simulator 已 shutdown/delete；本地责任变体已关闭。真实 iOS GUI/输入/语义及物理设备仍不在此出口 |
 | acceptance / 依赖 | P-01 native-install-failure responsibility variant；F01 无硬前置，P01 仍要求 F01+T01；不宣称 P-01、F01 或 G0 完成 |
 | 非目标 | 不在本轮扩展 accessibility、scene/present、移动语义/输入、真机或完整 iOS CI；不改上游 gpui API 语义 |
 | 有界出口 | 已取得 install-failure + cleanup 证据；下一步只需新模板 CI/design-doc/review/merge，随后复核 F01/P-01 父任务剩余项并选择下一依赖可满足候选 |
+
+### 下一执行卡：T01 doctor CLI host-smoke
+
+| 维度 | 本轮登记 |
+| --- | --- |
+| 实现缺口 | 将 target-aware doctor 通过真实 CLI 调用接入 integration test：生成 desktop-only 项目，显式运行 `doctor --json --target desktop`，验证 schema v2、target source、required pass 和不引入 Android/iOS checks |
+| 本地测试缺口 | macOS arm64 已通过 `cargo test --locked --test doctor_cli -- --nocapture`；需保留 stdout/stderr/exit 语义并执行适用 workspace 回归 |
+| CI 缺口 | 需由本轮新 PR 的 Linux/macOS/Windows `check` matrix 实际运行 `doctor_cli`；本机结果不等于三平台通过 |
+| GUI/设备缺口 | 本切片不声称 GUI/device；真实 Linux/Windows host doctor、Android x86/unknown ABI 和 physical device 继续作为 T-01/T-03 后续责任 |
+| acceptance / 依赖 | T-01 的 T-01/T-02 CLI host responsibility slice；无硬前置；不晋升 T01 或 G0 |
+| 非目标 | 不自动安装工具链，不修改 SDK/许可/签名，不把 CI hosted runner 当作完整 native device 验收 |
+| 有界出口 | 三平台 required workspace checks 通过并合并后，更新 T01 证据；若某平台 host 工具缺失，记录 required/unavailable 真实结果和恢复条件，继续下一个独立候选 |
 
 领取任务后，将游标更新为任务 ID、本轮剩余项、执行阶段和下一动作；收口后移到下一任务。
 设备、权限、review/merge 或 CI 等待必须另记恢复条件，不能让一个等待项卡住整个路线。
@@ -124,7 +135,7 @@ F01 无硬依赖。责任子例：P-01 的 L0 supervisor span/失败样本、P-0
 | --- | --- | --- |
 | 实现 | 基线脚本夹具补 `gpui-dev` feature；status predicate 对 `build`/`running` transitional null 安全；self-test 保持通过 | `scripts/live-baseline.py`、`cargo fmt --check`、`python3 -m py_compile scripts/live-baseline.py` |
 | 本地测试 | macOS arm64 实跑 counter、login-invalid、list-scroll；每个 10 warmup + 30 measurement，共 120 样本、1515 spans；失败 30、恢复样本 30，span 无负时长；本轮完整 workspace 489 主二进制测试通过、12 ignored，integration/protocol/xtask 目标通过；clippy/build/fmt/design docs/diff check 通过。默认并行 workspace 的 3 个 process-tree timeout 单列在 T01 `attempt-05` | F01 数据见 `artifacts/acceptance/1c0a4cb/F01/macos-arm64/attempt-03/`；本轮完整 workspace 回归见 `T-01/attempt-07`；P-01 GUI/span 原始证据见 F01 `attempt-06/attempt-07`；失败尝试 `attempt-01`/`attempt-02` 保留原始原因 |
-| CI | PR #380 squash 前所有 Linux/macOS/Windows、desktop-template、android-template、baseline-driver jobs 均通过；workspace 包含 live failure/recovery/supersession integration test，baseline-driver self-test 通过 | CI runs `37436523210`、`37436528816` 已绑定 squash 前 head；P-01 当前 GUI/native attempt 的 artifact 尚未进入新 CI 运行，不能据此声称完整 F01 CI 收口 |
+| CI | PR #381 push/PR 两套 workflow 的 Linux/macOS/Windows、desktop-template（含 iOS simulator target check）、android-template、baseline-driver jobs 均通过；workspace 包含 live failure/recovery/supersession integration test | CI runs `37489285440`、`37489277701` 已绑定合并前 head；P-01 当前 GUI/native 证据仍为本机责任变体，不把 hosted CI 当完整 F01 GUI/device 收口 |
 | GUI/设备/native | attempt-05 注册 responsive macOS Counter 窗口并成功 `capture.window`；语义 `a11y_inactive`，截图来源/资源 current；受控 compile_error build b3 failed 后 build b4/run r2 responsive。attempt-06 在 responsive 窗口运行的 cargo.build b6 经本 session `q` 取消，父/子 span 均 `cancelled`。attempt-07 系统 `/tmp` generated project 中 build b4 被源码更新 supersede，后续 build b9 成功并恢复 responsive；窗口 PNG 51,105 bytes，scene/source/assets matches，但 `presented_frame_id=null`。stable retry semantics 返回 `runtime_unavailable`。修复模板 backtrace snapshot 后的 iOS simulator 重跑中，cargo target check、Xcode build 成功，受控 `simctl install` exit 73 进入 `ios.install`，app 未安装、lease owner 释放、临时 simulator 删除 | cancel/superseded/native-install-failure 已关闭 macOS 本地 responsibility variants；新模板 CI/review/merge、完整 F01/P-01 父任务、真实语义/输入/scene/present 和跨平台 GUI/device 仍未收口。完整 details 和 artifact 路径见 `docs/experiments/F01-p01-closeout-2026-10-06.md`；不能晋升 F01 `done` |
 
 F01 本轮复核 attempt-04/05，并新增隔离 attempt-06/07 和修复后的独立 simulator 重跑：关闭 macOS
@@ -132,11 +143,11 @@ cancel/superseded/native-install-failure responsibility variants 并确认语义
 仓库内原有 desktop/iOS/Android 长运行 live 进程未触碰；本轮启动的临时 desktop 和 simulator
 session 均已停止并删除。
 
-F01 与 T01 均无硬前置。PR #380 已 squash 合并并复核新基线；本轮已关闭 P-01 的三个 macOS
-隔离 responsibility variants，但 F01/P-01 父任务仍等待新模板 CI/review/merge，并缺 P-02
-联合对照、真实语义/输入/scene/present 和跨平台 GUI/device 证据。P01 硬依赖 F01+T01，T02
-硬依赖 F01；其它核心项依赖未满足，不绕过前置。下一动作是为本记录开 PR，等待新 head 的
-design-doc/三平台/template/baseline-driver CI 与 review，然后复核父任务出口并选择下一候选。
+F01 与 T01 均无硬前置。PR #381 已 squash 合并并复核新基线；本轮已关闭 P-01 的三个 macOS
+隔离 responsibility variants，但 F01/P-01 父任务仍缺 P-02 联合对照、真实语义/输入/scene/present
+和跨平台 GUI/device 证据。当前游标转为 T01 doctor CLI host-smoke；P01 硬依赖 F01+T01，T02
+硬依赖 F01；其它核心项依赖未满足，不绕过前置。下一动作是为 T01 切片开 PR，等待新 head 的
+design-doc/三平台 workspace CI 与 review，然后复核 T01 responsibility 出口并选择下一候选。
 
 ## 3. 自动选择、执行、收口循环
 
