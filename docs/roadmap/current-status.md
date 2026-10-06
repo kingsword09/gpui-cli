@@ -8,7 +8,8 @@ successful-version probe 和三平台 host evidence。当前分支为 `main`，�
 PR #383 已以 squash 合并为 `757f05b`，PR #384 已以 squash 合并为 `285893f`，PR #385 已以
 squash 合并为 `287c3c7`，PR #386 已以 squash 合并为 `3772750`；两套三平台 workspace/template/
 baseline-driver CI 与 doctor-host artifacts 全绿。T01/F01/P01
-父状态未晋升。
+父状态未晋升；PR #387 又合并 Windows coordinator test deadline 修复为 `2a54083`，修复后主线
+workflow run `37521989971` 的 Linux/macOS/Windows、desktop/android template 和 baseline-driver 全绿。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -428,7 +429,7 @@ T06 保持 `in_progress`。
 | ID | 状态 | 已实现 / 剩余边界 |
 | --- | --- | --- |
 | F01 | in_progress | 三种严格 fixture、单调 span、有界日志、macOS headless live 驱动器已实跑每 fixture 10 次预热 + 30 次测量，保留 LoginForm 编译失败/恢复样本；PR #380 squash 合并后，本轮在隔离 generated Counter 项目关闭 P-01 macOS cancel、superseded 和 native-install-failure 责任变体，保存 `cancelled`/`superseded` spans、窗口截图、受控 `ios.install` exit 73、未安装 app、lease owner 释放和临时 simulator 删除证据；主线 `7336d74` 又复跑真实 `capture.window`（PNG metadata、scene epoch、source/assets freshness）及 semantics `a11y_inactive`，没有把 `presented_frame_id=null` 或空语义树当通过；模板新增带许可证的 iOS-safe `backtrace 0.3.76` 快照，iOS simulator Rust check/Xcode build 已通过。剩余：P-02 T05/T06 联合对照、scene readback/verified present/完整语义与 action、跨平台 GUI/device 证据 |
-| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时；`doctor_cli` integration test 已通过真实 CLI 生成 desktop-only 项目，覆盖显式 target、项目默认 target 和非项目 host-only，并核对 schema v2、required pass/可选 warning 与移动工具链隔离。PR #384 的 native `cc` nonzero helper 验证 required probe failure；PR #385 的 native `rustc` exit-0 畸形版本 helper 验证版本解析 failure，两个变体均在两套 Linux/macOS/Windows workflow 通过。PR #386 又在真实 GitHub Linux/macOS/Windows runners 上传 explicit/project-default desktop doctor artifacts：required 全 pass、target source 正确、移动 checks 隔离、secret canary absent；Windows 实际 MinGW `cc 15.2.0`，Linux `cc 13.3.0`，macOS Apple clang 21.0.0。另在主线 `7336d74` 的 Ubuntu 24.04/Linux x86_64 容器中构建当前 CLI，显式/项目默认 desktop doctor 的 required checks 均通过、可选 Xcode capture 为 warning、秘密 canary 未泄露。T-03 又以 22 台可用 iOS simulator 中的两个 selector 核对名称+runtime 与 UDID 解析，并对 ARM64 AVD 验证匹配与 x86_64 配置不匹配。PR #380 补上 Ubuntu `cc (Ubuntu …) 13.3.0` 版本行解析，并以 squash merge 合并为 `f8192d6`；PR #381/382/383/384/385/386 三平台/template/baseline-driver CI 全绿，最新主线为 `3772750`。剩余：真实 x86/未知 ABI 设备及 physical-device 选择、未建模 AGP/Gradle 组合边界验收 |
+| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时；`doctor_cli` integration test 已通过真实 CLI 生成 desktop-only 项目，覆盖显式 target、项目默认 target 和非项目 host-only，并核对 schema v2、required pass/可选 warning 与移动工具链隔离。PR #384 的 native `cc` nonzero helper 验证 required probe failure；PR #385 的 native `rustc` exit-0 畸形版本 helper 验证版本解析 failure，两个变体均在两套 Linux/macOS/Windows workflow 通过。PR #386 又在真实 GitHub Linux/macOS/Windows runners 上传 explicit/project-default desktop doctor artifacts：required 全 pass、target source 正确、移动 checks 隔离、secret canary absent；Windows 实际 MinGW `cc 15.2.0`，Linux `cc 13.3.0`，macOS Apple clang 21.0.0。另在主线 `7336d74` 的 Ubuntu 24.04/Linux x86_64 容器中构建当前 CLI，显式/项目默认 desktop doctor 的 required checks 均通过、可选 Xcode capture 为 warning、秘密 canary 未泄露。T-03 又以 22 台可用 iOS simulator 中的两个 selector 核对名称+runtime 与 UDID 解析，并对 ARM64 AVD 验证匹配与 x86_64 配置不匹配。PR #380 补上 Ubuntu `cc (Ubuntu …) 13.3.0` 版本行解析，并以 squash merge 合并为 `f8192d6`；PR #381/382/383/384/385/386 三平台/template/baseline-driver CI 全绿，PR #387 修复 coordinator Windows 时序 deadline 并以 `2a54083` 合并，修复后主线 run `37521989971` 全绿；最新主线为 `2a54083`。剩余：真实 x86/未知 ABI 设备及 physical-device 选择、未建模 AGP/Gradle 组合边界验收 |
 | P01 | in_progress | 有真实 macOS PoC；cancel/superseded/native-install-failure 变体已有隔离窗口、span、iOS simulator build/install-failure、cleanup/lease/device 证据，`7336d74` 复跑确认 window capture metadata 与 semantics `a11y_inactive`；scene readback、verified present、完整语义/action、完整设备证据和父任务 CI/review 仍有限 |
 | T02 | in_progress | 模板 manifest、嵌入内容摘要、增平台保护；真实历史内容的稳定取得仍不贯通 |
 | F02 | in_progress | 独立 protocol crate、v2、请求关联和 feature 边界；无在线 v1 兼容/事件投影，runtime 仍在模板内 |
@@ -752,7 +753,7 @@ cleanup-finalized report evidence 接线，
 
 ## 5.1 本轮接续与下一动作
 
-- 基线/当前提交：`origin/main`=`3772750`，工作区干净；PR #384/#385/#386 已 squash 合并。
+- 基线/当前提交：`origin/main`=`2a54083`，工作区干净；PR #384/#385/#386/#387 已 squash 合并。
 - 已关闭的 T01 responsibility：真实 CLI 的 required `cc` nonzero、`rustc` exit-0 畸形版本，以及
   GitHub Linux/macOS/Windows host doctor artifacts；本地 `doctor_cli` 4 passed，相关两套 workflow 全绿。
 - T01 剩余：真实 x86/unknown ABI 或 physical Android device、

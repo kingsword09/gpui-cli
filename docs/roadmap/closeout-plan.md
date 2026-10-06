@@ -1,12 +1,13 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-07（Asia/Shanghai）。执行基线：`3772750`（PR #386 squash merge）；相较
+更新日期：2026-10-07（Asia/Shanghai）。执行基线：`2a54083`（PR #387 squash merge）；相较
 实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
 iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection、
-required nonzero/malformed-version responsibility 变体和三平台 host doctor artifacts。
+required nonzero/malformed-version responsibility 变体、三平台 host doctor artifacts，以及
+Windows coordinator state publish deadline 测试稳定性修复。
 当前分支为 `main`，工作区干净。T01/F01/P01 仍保持 `in_progress`；T01 host-smoke 已通过
 design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge；PR #384/#385/#386
-分别 squash 为 `285893f`/`287c3c7`/`3772750`。
+分别 squash 为 `285893f`/`287c3c7`/`3772750`/`2a54083`。
 
 ## 1. 文档职责与纠偏原因
 
@@ -35,8 +36,8 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | F01 · T01 的 CLI/native host responsibility 已收口：required `cc` nonzero 与 `rustc` exit-0 malformed version 在本机 4 项 `doctor_cli` 和两套 Linux/macOS/Windows workflow 通过；PR #386 又在真实 GitHub Linux/macOS/Windows runners 上传 explicit/project-default doctor artifacts，required checks 全 pass、移动 checks 隔离、secret canary absent。主线 `7336d74` 还在 Ubuntu 24.04/Linux x86_64 容器完成显式/项目默认 desktop doctor。T01 仍缺 x86/unknown ABI、physical-device 与未建模兼容边界，恢复条件已记录；当前转回 F01，先处理 macOS GUI/scene/present 与 P-02 联合对照，不把 `a11y_inactive`/`presented_frame_id=null` 当通过。P01 仍需 F01+T01 |
-| 首批候选 | F01 继续核对既有 attempt-05/06/07 和模板新基线，选择可重跑的 scene/present 或语义证据缺口；T01 外部 runner/device 可用后恢复其责任矩阵 |
+| 当前执行游标 | T01 host responsibility 已收口到真实 GitHub Linux/macOS/Windows doctor artifacts；PR #387 修复 `same_key_builders_share_one_in_flight_attempt` Windows runner 的 500ms state-file polling flake，已 squash 为 `2a54083`，修复后主线 run `37521989971` 的三平台 check、templates、baseline-driver 全绿。当前剩余路线没有可无外部前置完成的整体验收：T01 需真实 x86/unknown ABI AVD 或 physical Android device、未建模 AGP/Gradle 组合责任；F01/P-01 需 scene readback/verified present/AccessKit semantics/action 与 P-02 T05/T06 联合对照。条件恢复前保持 `in_progress`，不晋升父状态。 |
+| 首批候选 | 若接入真实 x86/unknown ABI AVD 或 physical Android device，恢复 T01 的 T-03；若 GPUI backend/AccessKit 提供所需 scene/present/semantics 能力，恢复 F01/P-01 联合出口；否则仅接受用户明确提供的可用验收环境或上游能力变化 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
@@ -63,7 +64,7 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | GUI/设备缺口 | 本切片不声称 GUI/device；真实 Linux/Windows host doctor、Android x86/unknown ABI 和 physical device 继续作为 T-01/T-03 后续责任 |
 | acceptance / 依赖 | T-01 的 T-01 CLI target-selection/host-only responsibility slice；无硬前置；不晋升 T01 或 G0 |
 | 非目标 | 不自动安装工具链，不修改 SDK/许可/签名，不把 CI hosted runner 当作完整 native device 验收 |
-| 有界出口 | host-smoke、required nonzero 和 malformed-successful-version CLI responsibility 已收口；T-02/T-03 的真实 Linux/Windows 工具、x86/unknown ABI、physical device 和 AGP/Gradle 边界仍需对应环境。环境缺失时保持 required/unavailable 记录并切回 F01 等独立候选，不晋升 T01 |
+| 有界出口 | host-smoke、required nonzero/malformed-successful-version 与 GitHub Linux/macOS/Windows host evidence 已收口；T-03 的 x86/unknown ABI、physical device 和 AGP/Gradle 边界仍需对应环境/兼容数据。环境缺失时保持 required/unavailable 记录，不晋升 T01 |
 
 ### 当前执行卡：F01 GUI/scene/present 与 P-02 联合对照
 
@@ -74,6 +75,17 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 本地测试 | 已在独立 generated Counter 中重跑 live build/run、window observe 和 semantics observe；证据保存 command/status/operation JSON、artifact hash 与能力错误。若能力不可用，记录最小上游/恢复条件；下一步只补 scene/present 或 P-02 responsibility，不重复制造同一 `a11y_inactive` 结果 |
 | CI/GUI 责任 | 现有 workflow/template CI 只证明构建和测试路径，不替代真实 GUI/scene/semantic/device；跨平台 GUI/device 与 T05/T06 联合对照仍未闭合 |
 | 有界出口 | 关闭一个可复现的 scene/present/semantic responsibility variant，或记录明确外部阻塞与恢复条件；随后回看 F01 父任务，不晋升 F01/P01 |
+
+### T01 继续执行卡：GitHub Android x86_64 AVD ABI
+
+| 维度 | 开始前 gap / 变体 |
+| --- | --- |
+| 实现 | `doctor` 已按已选 Android device 的 `Device.arch` 与 `GPUI_ANDROID_ABIS` 判定 match/mismatch/unknown；不扩展支持 ABI 或修改 production policy |
+| 本地测试 | 本机只有 ARM64 AVD 且无 `adb` physical device；L0 已覆盖 unknown。计划新增可本机运行的 evidence script，验证连接的 emulator ABI 并保存真实 `doctor` report；当前本机环境不能执行 x86 emulator |
+| CI | 新增 Ubuntu runner 安装 x86_64 system image、启动 Android emulator、构建 CLI、上传环境/命令/report artifact；要求绑定提交的 job/run，不以 emulator 创建成功代替 doctor report |
+| GUI/设备验收 | `T-03` 真实 x86_64 AVD required match pass + 同一设备以 arm64-only `GPUI_ANDROID_ABIS` mismatch fail；验证 emulator 仍启动且没有改 SDK/许可/签名。unknown ABI 和 physical device 保留独立缺口 |
+| 依赖/非目标 | T01 无硬依赖；不改 ABI policy，不跑 app build/install，不启动 physical device，不改 AGP/Gradle 兼容表 |
+| 本轮有界出口 | 取得真实 x86_64 AVD 的 match/mismatch JSON、设备 ABI、命令/退出码、CI artifact 与两套 workflow；合并后同步 T01 行和 T-03 证据，再继续核对物理设备/unknown ABI/兼容边界是否还需外部条件 |
 
 领取任务后，将游标更新为任务 ID、本轮剩余项、执行阶段和下一动作；收口后移到下一任务。
 设备、权限、review/merge 或 CI 等待必须另记恢复条件，不能让一个等待项卡住整个路线。
