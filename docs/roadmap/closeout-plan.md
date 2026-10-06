@@ -1,12 +1,12 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-07（Asia/Shanghai）。执行基线：`3772750`（PR #386 squash merge）；相较
+更新日期：2026-10-07（Asia/Shanghai）。执行基线：`8511e16`（PR #387 后路线证据更新）；相较
 实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
 iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection、
 required nonzero/malformed-version responsibility 变体和三平台 host doctor artifacts。
 当前分支为 `main`，工作区干净。T01/F01/P01 仍保持 `in_progress`；T01 host-smoke 已通过
-design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge；PR #384/#385/#386
-分别 squash 为 `285893f`/`287c3c7`/`3772750`。
+design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge；PR #384/#385/#386/#387
+分别 squash 为 `285893f`/`287c3c7`/`3772750`/`2a54083`；主线路线证据 run `37535113112` 全绿。
 
 ## 1. 文档职责与纠偏原因
 
