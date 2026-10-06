@@ -12,6 +12,7 @@ pub enum RequirementKind {
     Directory,
     Environment,
     HostPlatform,
+    ProjectMetadata,
     RustTarget,
 }
 
@@ -63,6 +64,16 @@ pub struct Context {
     #[serde(default)]
     pub project_agp: Option<String>,
     #[serde(default)]
+    pub project_rust_version: Option<String>,
+    #[serde(default)]
+    pub android_compile_sdk: Option<String>,
+    #[serde(default)]
+    pub android_build_tools: Option<String>,
+    #[serde(default)]
+    pub android_gradle_version: Option<String>,
+    #[serde(default)]
+    pub android_project: bool,
+    #[serde(default)]
     pub project_targets: Vec<Target>,
 }
 
@@ -77,7 +88,7 @@ impl Context {
 }
 
 pub fn requirements_for(context: &Context, target: Target) -> Result<Vec<Requirement>> {
-    let mut requirements = rust_requirements(target);
+    let mut requirements = rust_requirements(target, context.project_rust_version.as_deref());
     match target {
         Target::Desktop => requirements.extend(desktop_requirements(context)),
         Target::Ios => requirements.extend(ios_requirements(context)),
@@ -86,7 +97,11 @@ pub fn requirements_for(context: &Context, target: Target) -> Result<Vec<Require
     Ok(requirements)
 }
 
-fn rust_requirements(target: Target) -> Vec<Requirement> {
+fn rust_requirements(target: Target, minimum_version: Option<&str>) -> Vec<Requirement> {
+    let rustc_expected = minimum_version.map_or_else(
+        || json!({"executable": true, "version": "parseable"}),
+        |minimum| json!({"executable": true, "version": "parseable", "minimum": minimum}),
+    );
     vec![
         command_requirement(
             "rust.rustc",
@@ -94,7 +109,7 @@ fn rust_requirements(target: Target) -> Vec<Requirement> {
             "rustc",
             CommandSpec::new("rustc", &["-vV"]),
             true,
-            json!({"executable": true, "version": "parseable"}),
+            rustc_expected,
             vec![],
         ),
         command_requirement(
@@ -238,14 +253,19 @@ fn android_requirements(context: &Context) -> Result<Vec<Requirement>> {
             "Android SDK",
             &["ANDROID_HOME", "ANDROID_SDK_ROOT"],
             true,
-            json!({"directory": true, "platforms": "project-selected"}),
+            json!({
+                "directory": true,
+                "platform": context.android_compile_sdk,
+                "build_tools": context.android_build_tools,
+                "project_configured": context.android_project,
+            }),
         ),
         environment_requirement(
             "android.ndk",
             "Android NDK",
             &["ANDROID_NDK_HOME", "NDK_HOME"],
             true,
-            json!({"directory": true, "version": "project-selected"}),
+            json!({"directory": true, "version": "reported"}),
         ),
         command_requirement(
             "android.adb",
@@ -253,7 +273,7 @@ fn android_requirements(context: &Context) -> Result<Vec<Requirement>> {
             "adb",
             CommandSpec::new("adb", &["version"]),
             true,
-            json!({"executable": true, "device": "selected-or-reported"}),
+            json!({"executable": true, "version": "reported"}),
             vec![],
         ),
         command_requirement(
@@ -262,7 +282,13 @@ fn android_requirements(context: &Context) -> Result<Vec<Requirement>> {
             "java",
             CommandSpec::new("java", &["-version"]),
             true,
-            json!({"executable": true, "version": "AGP-compatible"}),
+            json!({
+                "executable": true,
+                "version": "AGP-compatible",
+                "agp_version": context.project_agp,
+                "gradle_version": context.android_gradle_version,
+                "minimum_java_major": android_minimum_java_major(context),
+            }),
             vec![],
         ),
         command_requirement(
@@ -271,7 +297,11 @@ fn android_requirements(context: &Context) -> Result<Vec<Requirement>> {
             "Gradle wrapper",
             CommandSpec::new("./gradlew", &["--version"]),
             true,
-            json!({"wrapper": true, "version": "project-selected"}),
+            json!({
+                "wrapper": true,
+                "version": "project-selected",
+                "selected_version": context.android_gradle_version,
+            }),
             vec![],
         ),
     ];
@@ -279,7 +309,7 @@ fn android_requirements(context: &Context) -> Result<Vec<Requirement>> {
         requirements.push(Requirement {
             id: "android.agp".into(),
             target: Target::Android,
-            kind: RequirementKind::Command,
+            kind: RequirementKind::ProjectMetadata,
             label: "Android Gradle Plugin".into(),
             required: true,
             expected: json!({"version": agp}),
@@ -295,6 +325,18 @@ fn android_requirements(context: &Context) -> Result<Vec<Requirement>> {
         ));
     }
     Ok(requirements)
+}
+
+fn android_minimum_java_major(context: &Context) -> Option<u64> {
+    match (
+        context.project_agp.as_deref(),
+        context.android_gradle_version.as_deref(),
+    ) {
+        // This is the pinned template combination. Other AGP/Gradle pairs
+        // remain unknown until their compatibility range is explicitly modeled.
+        (Some("9.1.0"), Some("9.4.1")) => Some(17),
+        _ => None,
+    }
 }
 
 fn android_rust_target(abi: &str) -> Result<&'static str> {
@@ -420,9 +462,20 @@ mod tests {
     fn android_rules_follow_selected_abis_and_agp() {
         let mut context = Context::for_host("linux");
         context.android_abis = vec!["arm64-v8a".into(), "x86_64".into()];
-        context.project_agp = Some("8.9.0".into());
+        context.project_agp = Some("9.1.0".into());
+        context.android_compile_sdk = Some("34".into());
+        context.android_build_tools = Some("35.0.0".into());
+        context.android_gradle_version = Some("9.4.1".into());
+        context.android_project = true;
         let requirements = requirements_for(&context, Target::Android).unwrap();
         assert!(requirements.iter().any(|item| item.id == "android.agp"));
+        assert_eq!(
+            requirements
+                .iter()
+                .find(|item| item.id == "android.agp")
+                .map(|item| item.kind.clone()),
+            Some(RequirementKind::ProjectMetadata)
+        );
         assert_eq!(
             requirements
                 .iter()
@@ -447,6 +500,39 @@ mod tests {
                 .count(),
             2
         );
+        assert_eq!(
+            requirements
+                .iter()
+                .find(|item| item.id == "android.adb")
+                .map(|item| item.expected.clone()),
+            Some(json!({"executable": true, "version": "reported"}))
+        );
+        assert_eq!(
+            requirements
+                .iter()
+                .find(|item| item.id == "android.sdk")
+                .map(|item| item.expected["requirements"].clone()),
+            Some(json!({
+                "directory": true,
+                "platform": "34",
+                "build_tools": "35.0.0",
+                "project_configured": true
+            }))
+        );
+        assert_eq!(
+            requirements
+                .iter()
+                .find(|item| item.id == "android.gradle")
+                .map(|item| item.expected["selected_version"].clone()),
+            Some(json!("9.4.1"))
+        );
+        assert_eq!(
+            requirements
+                .iter()
+                .find(|item| item.id == "android.java")
+                .map(|item| item.expected["minimum_java_major"].clone()),
+            Some(json!(17))
+        );
     }
 
     #[test]
@@ -455,6 +541,37 @@ mod tests {
         context.android_abis = vec!["mips".into()];
         let error = requirements_for(&context, Target::Android).unwrap_err();
         assert!(error.to_string().contains("unknown Android ABI"));
+    }
+
+    #[test]
+    fn rust_minimum_is_attached_only_when_project_declares_one() {
+        let mut context = Context::for_host("macos");
+        context.project_rust_version = Some("1.97".into());
+        let requirements = requirements_for(&context, Target::Desktop).unwrap();
+        let rustc = requirements
+            .iter()
+            .find(|item| item.id == "rust.rustc")
+            .unwrap();
+        let cargo = requirements
+            .iter()
+            .find(|item| item.id == "rust.cargo")
+            .unwrap();
+        assert_eq!(rustc.expected["minimum"], "1.97");
+        assert!(cargo.expected.get("minimum").is_none());
+    }
+
+    #[test]
+    fn unknown_agp_gradle_pair_has_no_invented_java_minimum() {
+        let mut context = Context::for_host("macos");
+        context.project_agp = Some("8.9.0".into());
+        context.android_gradle_version = Some("8.11.1".into());
+        let requirements = requirements_for(&context, Target::Android).unwrap();
+        let java = requirements
+            .iter()
+            .find(|item| item.id == "android.java")
+            .unwrap();
+
+        assert!(java.expected["minimum_java_major"].is_null());
     }
 
     #[test]
