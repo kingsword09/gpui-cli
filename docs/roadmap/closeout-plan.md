@@ -56,10 +56,10 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 维度 | 本轮登记 |
 | --- | --- |
 | 实现缺口 | 将 target-aware doctor 通过真实 CLI 调用接入 integration test：生成 desktop-only 项目，显式运行 `doctor --json --target desktop`，验证 schema v2、target source、required pass 和不引入 Android/iOS checks |
-| 本地测试缺口 | macOS arm64 已通过 `cargo test --locked --test doctor_cli -- --nocapture`（2 passed），覆盖显式 target、项目默认 target 和非项目 host-only；需保留 stdout/stderr/exit 语义并执行适用 workspace 回归 |
+| 本地测试缺口 | macOS arm64 已通过 `cargo test --locked --test doctor_cli -- --nocapture`；需保留 stdout/stderr/exit 语义并执行适用 workspace 回归 |
 | CI 缺口 | 已由 PR #382 两套 workflow 实际运行 Linux/macOS/Windows `check` matrix；run `37496876490`、`37496869916` 全部通过并 squash 为 `9e6ef64` |
 | GUI/设备缺口 | 本切片不声称 GUI/device；真实 Linux/Windows host doctor、Android x86/unknown ABI 和 physical device 继续作为 T-01/T-03 后续责任 |
-| acceptance / 依赖 | T-01 的 T-01 CLI target-selection/host-only responsibility slice；无硬前置；不晋升 T01 或 G0 |
+| acceptance / 依赖 | T-01 的 T-01/T-02 CLI host responsibility slice；无硬前置；不晋升 T01 或 G0 |
 | 非目标 | 不自动安装工具链，不修改 SDK/许可/签名，不把 CI hosted runner 当作完整 native device 验收 |
 | 有界出口 | host-smoke 已收口；下一步只处理 T-02/T-03 的真实工具/设备责任变体，若平台或设备缺失则记录 required/unavailable 结果和恢复条件，继续下一个独立候选 |
 

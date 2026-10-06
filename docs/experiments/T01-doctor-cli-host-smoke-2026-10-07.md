@@ -4,9 +4,8 @@
 
 ## 范围
 
-该切片把 doctor 从 Rust 单元/规则测试推进到真实 CLI 调用。测试覆盖生成项目的显式
-target、项目默认 target，以及没有 `gpui.toml` 的 host-only 目录；生成项目路径先执行
-`gpui init`，再从项目目录执行：
+该切片把 doctor 从 Rust 单元/规则测试推进到真实 CLI 调用。测试在临时目录执行
+`gpui init` 生成 desktop-only 项目，再从项目目录执行：
 
 ```text
 gpui doctor --json --target desktop
@@ -19,7 +18,7 @@ gpui doctor --json --target desktop
 ## 本地结果
 
 - 命令：`cargo test --locked --test doctor_cli -- --nocapture`
-- macOS arm64：2 passed，exit 0；hosted runner 缺少可选 capture provider 时整体可为 `warning`，但 required checks 必须全部 `pass`。
+- macOS arm64：1 passed，exit 0；hosted runner 缺少可选 capture provider 时整体可为 `warning`，但 required checks 必须全部 `pass`。
 - 生成项目使用 `--targets macos`，doctor 使用显式 `--target desktop`；required Rust、host
   platform 和 C compiler checks 全部通过，移动工具链未进入报告。
 
