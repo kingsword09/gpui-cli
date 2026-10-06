@@ -3,8 +3,9 @@
 use serde_json::Value;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock};
 
 fn assert_success(output: &Output, context: &str) {
     assert!(
@@ -37,6 +38,28 @@ fn doctor_with_path(root: &Path, args: &[&str], path: &Path) -> Output {
         .env("PATH", path_value)
         .output()
         .unwrap()
+}
+
+fn compile_native_helper(root: &Path, name: &str, source: &str) -> PathBuf {
+    static RUSTC_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = RUSTC_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let source_path = root.join(format!("{name}-shim.rs"));
+    fs::write(&source_path, source).unwrap();
+    let shim_dir = root.join("shims");
+    let shim = shim_dir.join(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    });
+    let rustc_status = Command::new("rustc")
+        .arg("--edition=2021")
+        .arg(source_path)
+        .arg("-o")
+        .arg(&shim)
+        .status()
+        .unwrap();
+    assert!(rustc_status.success(), "failed to compile {name} shim");
+    shim
 }
 
 fn assert_desktop_report(report: &Value, source: &str, project_present: bool) {
@@ -109,17 +132,7 @@ fn doctor_cli_reports_a_nonzero_required_probe() {
     // shim (`.cmd` on Windows or a shell script on Unix) would therefore not
     // exercise the probe consistently.  Compile a tiny native executable
     // with the same Rust toolchain that is running this test instead.
-    let shim_source = dir.path().join("cc-shim.rs");
-    fs::write(&shim_source, "fn main() { std::process::exit(42); }\n").unwrap();
-    let shim = shim_dir.join(if cfg!(windows) { "cc.exe" } else { "cc" });
-    let rustc_status = Command::new("rustc")
-        .arg("--edition=2021")
-        .arg(&shim_source)
-        .arg("-o")
-        .arg(&shim)
-        .status()
-        .unwrap();
-    assert!(rustc_status.success(), "failed to compile cc shim");
+    compile_native_helper(dir.path(), "cc", "fn main() { std::process::exit(42); }\n");
 
     let output = doctor_with_path(
         dir.path(),
@@ -138,4 +151,36 @@ fn doctor_cli_reports_a_nonzero_required_probe() {
             .unwrap()["status"],
         "fail"
     );
+}
+
+#[test]
+fn doctor_cli_rejects_an_unparseable_successful_version_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim_dir = dir.path().join("shims");
+    fs::create_dir(&shim_dir).unwrap();
+
+    // Keep the helper native for the same reason as the nonzero probe above:
+    // `Command::new` does not invoke a platform shell.
+    compile_native_helper(
+        dir.path(),
+        "rustc",
+        "fn main() { print!(\"rustc definitely-not-a-version\\n\"); }\n",
+    );
+
+    let output = doctor_with_path(
+        dir.path(),
+        &["doctor", "--json", "--target", "desktop"],
+        &shim_dir,
+    );
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["overall"], "fail");
+    let rustc_check = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "rust.rustc")
+        .unwrap();
+    assert_eq!(rustc_check["status"], "fail");
+    assert!(rustc_check["reason"].as_str().unwrap().contains("version"));
 }
