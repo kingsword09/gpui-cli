@@ -1,7 +1,8 @@
 # T01 doctor CLI host smoke（2026-10-07）
 
 状态：本地与两套三平台 CI 切片通过，PR #382 已 squash 合并为 `9e6ef64`，PR #383 的
-target-selection 扩展已 squash 合并为 `757f05b`；不晋升 T01 或 G0。
+target-selection 扩展已 squash 合并为 `757f05b`；本轮新增 required `cc` nonzero shim
+责任切片，等待新 PR 的三平台 CI；不晋升 T01 或 G0。
 
 ## 范围
 
@@ -13,14 +14,15 @@ target、项目默认 target，以及没有 `gpui.toml` 的 host-only 目录；�
 gpui doctor --json --target desktop
 ```
 
-断言 schema v2、显式 target/source、overall `pass`、所有 required check 为 `pass`，以及
+断言 schema v2、显式 target/source、overall `pass` 或可选工具缺失时的 `warning`、所有 required check 为 `pass`，以及
 报告不包含 Android/iOS checks。测试不构建生成项目，不启动窗口，也不自动安装 SDK、许可或
-设备；它验证 doctor 的命令边界和 target-aware 选择。
+设备；它验证 doctor 的命令边界和 target-aware 选择。另一个用例只在 PATH 前置目录注入
+返回非零的 `cc` shim，要求 doctor 返回 exit 1 和 required `desktop.c_compiler=fail`。
 
 ## 本地结果
 
 - 命令：`cargo test --locked --test doctor_cli -- --nocapture`
-- macOS arm64：2 passed，exit 0；hosted runner 缺少可选 capture provider 时整体可为 `warning`，但 required checks 必须全部 `pass`。
+- macOS arm64：3 passed，exit 0；hosted runner 缺少可选 capture provider 时整体可为 `warning`，但 required checks 必须全部 `pass`；`cc` nonzero shim 变体返回 exit 1 且没有误报 pass。
 - 生成项目使用 `--targets macos`，doctor 使用显式 `--target desktop`；required Rust、host
   platform 和 C compiler checks 全部通过，移动工具链未进入报告。
 
