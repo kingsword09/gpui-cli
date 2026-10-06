@@ -21,6 +21,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo x check-design-docs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Build CLI for host doctor evidence
+        run: cargo build --locked --bin gpui
+      - name: Run host doctor evidence
+        run: python scripts/doctor-host-evidence.py --gpui target/debug/gpui --output doctor-host-evidence
+      - name: Upload host doctor evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doctor-host-${{ matrix.os }}
+          path: doctor-host-evidence/
+          if-no-files-found: warn
 
   baseline-driver:
     runs-on: ubuntu-latest
