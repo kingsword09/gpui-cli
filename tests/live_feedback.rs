@@ -156,12 +156,24 @@ fn real_live_build_failure_recovery_supersession_crash_and_event_follow() {
     assert_eq!(failed["running"]["run_id"], run);
     assert_eq!(failed["running"]["pid"], pid);
     assert_eq!(failed["stale"], true);
-    let diagnostics = fixture.query(&["diagnostics", "--json"]);
-    let records = diagnostics["result"]["diagnostics"].as_array().unwrap();
-    let error = records
-        .iter()
-        .find(|d| d["diagnostic"]["code"] == "E0308")
-        .unwrap();
+    // The build terminal state can be published a few milliseconds before
+    // the diagnostics index is updated on a busy hosted runner.  Poll the
+    // bounded diagnostics endpoint instead of assuming both events arrive in
+    // the same status response.
+    let diagnostics_deadline = Instant::now() + Duration::from_secs(30);
+    let error = loop {
+        let diagnostics = fixture.query(&["diagnostics", "--json"]);
+        let records = diagnostics["result"]["diagnostics"].as_array().unwrap();
+        if let Some(error) = records.iter().find(|d| d["diagnostic"]["code"] == "E0308") {
+            break error.clone();
+        }
+        assert!(
+            Instant::now() < diagnostics_deadline,
+            "E0308 diagnostic was not published; status={failed}; diagnostics={diagnostics}; trace={}",
+            fixture.trace()
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
     assert!(
         error["diagnostic"]["spans"]
             .as_array()
