@@ -1665,13 +1665,15 @@ mod tests {
         });
 
         let state_path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
-        for _ in 0..100 {
-            if state_path.is_file() {
-                break;
-            }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !state_path.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "coordinator leader did not publish state: {}",
+                state_path.display()
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(state_path.is_file());
 
         let second_layout = layout.clone();
         let second_key = key.clone();
@@ -2197,13 +2199,15 @@ mod tests {
         });
 
         let state_path = layout.root.join(BUILD_COORDINATOR_STATE_FILE);
-        for _ in 0..100 {
-            if state_path.is_file() {
-                break;
-            }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !state_path.is_file() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "coordinator leader did not publish state: {}",
+                state_path.display()
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(state_path.is_file());
 
         let preview_layout = layout.clone();
         let preview_key = key.clone();
