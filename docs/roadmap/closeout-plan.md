@@ -1,12 +1,13 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-07（Asia/Shanghai）。执行基线：`8511e16`（PR #387 后路线证据更新）；相较
-实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
+更新日期：2026-10-07（Asia/Shanghai）。执行基线：`f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）；相较
+历史实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
 iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection、
-required nonzero/malformed-version responsibility 变体和三平台 host doctor artifacts。
+required nonzero/malformed-version responsibility 变体和三平台 host doctor artifacts；PR #389
+修复 live diagnostics 测试等待异步发布的时序边界并已 squash 合并。
 当前分支为 `main`，工作区干净。T01/F01/P01 仍保持 `in_progress`；T01 host-smoke 已通过
 design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge；PR #384/#385/#386/#387
-分别 squash 为 `285893f`/`287c3c7`/`3772750`/`2a54083`；主线路线证据 run `37535113112` 全绿。
+分别 squash 为 `285893f`/`287c3c7`/`3772750`/`2a54083`；PR #389 squash 为 `f38d9df`；主线路线证据 run `37540497454` 全绿。
 
 ## 1. 文档职责与纠偏原因
 
@@ -35,8 +36,8 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | T01 host responsibility 已收口到真实 GitHub Linux/macOS/Windows doctor artifacts；PR #387 修复 Windows coordinator test flake 并以 `2a54083` 合并，主线 run `37521989971` 全绿。PR #388 的 x86_64 emulator ABI slice 已实现脚本/CI，但两套 run `37532395454`/`37532401654` 因 hosted emulator `sys.boot_completed` 长时间为空而取消，未取得 match/mismatch report；等待能完成 x86_64 AVD boot 的 runner 或真实设备。F01/P-01 仍需 scene readback/verified present/AccessKit semantics/action 与 P-02 T05/T06 联合对照。条件恢复前保持 `in_progress`，不晋升父状态。 |
-| 首批候选 | PR #388 等待 x86_64 AVD boot 条件恢复后直接重跑；若接入真实 x86/unknown ABI AVD 或 physical device，恢复 T01 T-03；若 GPUI backend/AccessKit 提供 scene/present/semantics 能力，恢复 F01/P-01 联合出口 |
+| 当前执行游标 | T01 host responsibility 已收口到真实 GitHub Linux/macOS/Windows doctor artifacts；PR #387 修复 Windows coordinator test flake 并以 `2a54083` 合并，PR #389 修复 live diagnostics 异步发布等待并以 `f38d9df` 合并，主线 run `37540497454` 全绿。PR #388 的 x86_64 emulator ABI slice 已实现脚本/CI，但两套 run `37532395454`/`37532401654` 因 hosted emulator `sys.boot_completed` 长时间为空而取消，未取得 match/mismatch report；等待能完成 x86_64 AVD boot 的 runner 或真实设备。F01/P-01 仍需 scene readback/verified present/AccessKit semantics/action 与 P-02 T05/T06 联合对照。条件恢复前保持 `in_progress`，不晋升父状态。 |
+| 首批候选 | PR #388 保持 open，等待 x86_64 AVD boot 条件恢复后直接重跑；若接入真实 x86/unknown ABI AVD 或 physical device，恢复 T01 T-03；若 GPUI backend/AccessKit 提供 scene/present/semantics 能力，恢复 F01/P-01 联合出口 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
@@ -119,7 +120,7 @@ T01 的用例层级为 L0/L1，不额外要求 GPU 渲染；真实 SDK/设备选
 
 ### 2.2 本轮工作卡：T01 版本判定切片
 
-基线：当前 `main`/`origin/main`=`1c0a4cb`，工作区干净；`852ddec` 到当前基线只有
+历史工作卡基线：`main`/`origin/main`=`1c0a4cb`，工作区干净；`852ddec` 到当前基线只有
 路线文档变化。硬依赖：无。验收责任：T-02 的命令成功、畸形版本、有效版本分类；不宣称
 T-01/T-02/T-03 或 G0 已整体通过。
 
@@ -139,7 +140,7 @@ T-01/T-02/T-03 或 G0 已整体通过。
 
 ### 2.3 F01 headless 基线工作卡与交接
 
-基线：领取时 `main`/`origin/main`=`1c0a4cb`，当前工作区含 T01 未提交实现和 F01 驱动修复；
+历史工作卡基线：领取时 `main`/`origin/main`=`1c0a4cb`，当前工作区含 T01 未提交实现和 F01 驱动修复；
 F01 无硬依赖。责任子例：P-01 的 L0 supervisor span/失败样本、P-02 的固定 fixture 与
 10+30 样本；不承担 T05/T06 索引/缓存联合对照，也不把 headless 结果当作 L2 UI 通过。
 

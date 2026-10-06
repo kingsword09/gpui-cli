@@ -1,14 +1,15 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-07（Asia/Shanghai）。合并代码审计基线仍为 `852ddec`（PR #377 squash merge）；
-流程记录已合并至 `8511e16`（PR #386/387 后路线证据更新），其中包含 T01 doctor、F01 baseline-driver、
+更新日期：2026-10-07（Asia/Shanghai）。当前实现与审计核对基线为 `f38d9df`（PR #389 squash merge）；
+此前 `852ddec` 仍作为 PR #377 的历史代码审计基线保留。流程记录已更新至 `f38d9df`（PR #386–#389 后路线证据），其中包含 T01 doctor、F01 baseline-driver、
 Ubuntu `cc --version` 解析修复、iOS-safe backtrace 模板修复及 F01/P-01 native-install-failure
 证据、T01 doctor CLI host-smoke、target-selection、required nonzero probe、malformed
 successful-version probe 和三平台 host evidence。当前分支为 `main`，工作区干净；PR #382 已以 squash 合并为 `9e6ef64`，
 PR #383 已以 squash 合并为 `757f05b`，PR #384 已以 squash 合并为 `285893f`，PR #385 已以
 squash 合并为 `287c3c7`，PR #386 已以 squash 合并为 `3772750`，PR #387 已以 squash 合并为
-`2a54083`；主线 run `37535113112` 的三平台 workspace/template/baseline-driver CI 全绿，doctor-host
-artifacts 仍绑定 PR #386 runs。T01/F01/P01
+`2a54083`，以及 PR #389 对 live diagnostics 异步发布等待的修复并 squash 为 `f38d9df`；主线 run
+`37540497454` 的三平台 workspace/template/baseline-driver CI 全绿，doctor-host artifacts 仍绑定
+PR #386 runs。T01/F01/P01
 父状态未晋升。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
@@ -429,7 +430,7 @@ T06 保持 `in_progress`。
 | ID | 状态 | 已实现 / 剩余边界 |
 | --- | --- | --- |
 | F01 | in_progress | 三种严格 fixture、单调 span、有界日志、macOS headless live 驱动器已实跑每 fixture 10 次预热 + 30 次测量，保留 LoginForm 编译失败/恢复样本；PR #380 squash 合并后，本轮在隔离 generated Counter 项目关闭 P-01 macOS cancel、superseded 和 native-install-failure 责任变体，保存 `cancelled`/`superseded` spans、窗口截图、受控 `ios.install` exit 73、未安装 app、lease owner 释放和临时 simulator 删除证据；主线 `7336d74` 又复跑真实 `capture.window`（PNG metadata、scene epoch、source/assets freshness）及 semantics `a11y_inactive`，没有把 `presented_frame_id=null` 或空语义树当通过；模板新增带许可证的 iOS-safe `backtrace 0.3.76` 快照，iOS simulator Rust check/Xcode build 已通过。剩余：P-02 T05/T06 联合对照、scene readback/verified present/完整语义与 action、跨平台 GUI/device 证据 |
-| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时；`doctor_cli` integration test 已通过真实 CLI 生成 desktop-only 项目，覆盖显式 target、项目默认 target 和非项目 host-only，并核对 schema v2、required pass/可选 warning 与移动工具链隔离。PR #384 的 native `cc` nonzero helper 验证 required probe failure；PR #385 的 native `rustc` exit-0 畸形版本 helper 验证版本解析 failure，两个变体均在两套 Linux/macOS/Windows workflow 通过。PR #386 又在真实 GitHub Linux/macOS/Windows runners 上传 explicit/project-default desktop doctor artifacts：required 全 pass、target source 正确、移动 checks 隔离、secret canary absent；Windows 实际 MinGW `cc 15.2.0`，Linux `cc 13.3.0`，macOS Apple clang 21.0.0。主线 `7336d74` 的 Ubuntu 24.04/Linux x86_64 容器 doctor 也通过。PR #388 新增 x86_64 emulator match/mismatch driver，但 run `37532395454`/`37532401654` 均因 `sys.boot_completed` 长时间为空取消，未取得真实 ABI report，记录为 `emulator_boot_unavailable`。PR #387 修复 coordinator Windows 时序 deadline 并以 `2a54083` 合并，修复后主线 run `37521989971` 全绿；路线证据提交后主线 run `37535113112` 也全绿；最新主线为 `8511e16`。剩余：x86/unknown ABI 或 physical device、未建模 AGP/Gradle 组合边界验收 |
+| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时；`doctor_cli` integration test 已通过真实 CLI 生成 desktop-only 项目，覆盖显式 target、项目默认 target 和非项目 host-only，并核对 schema v2、required pass/可选 warning 与移动工具链隔离。PR #384 的 native `cc` nonzero helper 验证 required probe failure；PR #385 的 native `rustc` exit-0 畸形版本 helper 验证版本解析 failure，两个变体均在两套 Linux/macOS/Windows workflow 通过。PR #386 又在真实 GitHub Linux/macOS/Windows runners 上传 explicit/project-default desktop doctor artifacts：required 全 pass、target source 正确、移动 checks 隔离、secret canary absent；Windows 实际 MinGW `cc 15.2.0`，Linux `cc 13.3.0`，macOS Apple clang 21.0.0。主线 `7336d74` 的 Ubuntu 24.04/Linux x86_64 容器 doctor 也通过。PR #388 新增 x86_64 emulator match/mismatch driver，但 run `37532395454`/`37532401654` 均因 `sys.boot_completed` 长时间为空取消，未取得真实 ABI report，记录为 `emulator_boot_unavailable`。PR #387 修复 coordinator Windows 时序 deadline 并以 `2a54083` 合并；PR #389 只修复 live diagnostics 测试等待异步发布的时序边界并以 `f38d9df` 合并；主线 run `37540497454` 全绿。剩余：x86/unknown ABI 或 physical device、未建模 AGP/Gradle 组合边界验收 |
 | P01 | in_progress | 有真实 macOS PoC；cancel/superseded/native-install-failure 变体已有隔离窗口、span、iOS simulator build/install-failure、cleanup/lease/device 证据，`7336d74` 复跑确认 window capture metadata 与 semantics `a11y_inactive`；scene readback、verified present、完整语义/action、完整设备证据和父任务 CI/review 仍有限 |
 | T02 | in_progress | 模板 manifest、嵌入内容摘要、增平台保护；真实历史内容的稳定取得仍不贯通 |
 | F02 | in_progress | 独立 protocol crate、v2、请求关联和 feature 边界；无在线 v1 兼容/事件投影，runtime 仍在模板内 |
@@ -712,6 +713,8 @@ T06 保持 `in_progress`。
 | PR #375 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `18c719a`；本轮未运行 GUI/设备验收 |
 | PR #377 本地验证 | Properties `load`/XML load/store、opaque stream、其他 receiver/方法引用以及注释/字符串排除回归通过；workspace 459 passed、1 ignored，fmt/clippy/build/design docs/package list/diff check 通过 |
 | PR #377 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；squash merge `852ddec`；本轮未运行 GUI/设备验收 |
+| 本地运行时验证（PR #389） | live feedback 集成回归等待 live build diagnostics 异步发布完成后再断言，避免构建终态先于诊断事件到达造成时序 flake；改动限定在测试同步边界 |
+| PR #389 CI / 合并 | PR 与 push 两套 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 全部通过；PR runs `37539211183`/`37539217315`，主线 push run `37540497454`；squash merge `f38d9df`；无版本发布/tag |
 | T05 release 对照 | Apple M2/macOS/aarch64、4096 files/32 MiB、热 filesystem cache、10 warmup + 30 alternating pairs；oracle mismatch=0；wrong_revision_acceptance=0；索引更新 P95 1.280 ms wall/1.242 ms process CPU，全量稳定 oracle P95 170.913/170.458 ms；单文件更新读 16 KiB，对照稳定双扫描读 64 MiB。只代表此主机和合成单文件变更 |
 
 七项探针的关键结果如下。这些是无 GPU 的边界复现，不是完整 UI 场景验收：
@@ -753,13 +756,13 @@ cleanup-finalized report evidence 接线，
 
 ## 5.1 本轮接续与下一动作
 
-- 基线/当前提交：`origin/main`=`8511e16`，工作区干净；PR #384/#385/#386/#387 已 squash 合并。
+- 基线/当前提交：`origin/main`=`f38d9df`，工作区干净；PR #384/#385/#386/#387/#389 已 squash 合并；主线 run `37540497454` 全绿。
 - 已关闭的 T01 responsibility：真实 CLI 的 required `cc` nonzero、`rustc` exit-0 畸形版本，以及
   GitHub Linux/macOS/Windows host doctor artifacts；本地 `doctor_cli` 4 passed，相关两套 workflow 全绿。
 - T01 剩余：真实 x86/unknown ABI 或 physical Android device、
   未建模 AGP/Gradle 兼容边界。恢复条件是可用的对应 runner/toolchain/device，不能以 shim 或 CI
   编译通过替代；T01 继续保持 `in_progress`。
-- 当前切换理由：T01 的本地 CLI responsibility 已完成，剩余变体需要外部环境；F01 无硬依赖且本机
+- 当前切换理由：PR #389 的 live diagnostics 时序修复已合并并通过主线 CI；T01 的本地 CLI responsibility 已完成，剩余变体需要外部环境；F01 无硬依赖且本机
   仍可推进，切换到 F01 的 GUI/scene/present 与 P-02 联合对照收口。T01 外部环境恢复后回看其责任矩阵。
 - F01 下一动作：先核对既有 macOS attempt-05/06/07 与模板 CI 新基线，选择一个可重跑的 scene/present
   或语义证据缺口；保持 cancel/superseded/native-install-failure 已关闭，不把 `a11y_inactive` 或

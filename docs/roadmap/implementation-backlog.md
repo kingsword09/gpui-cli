@@ -1,13 +1,13 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-07，主分支 `8511e16`（PR #387 后路线证据更新）。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-07，主分支 `f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
 cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
 PR #382 又合并 T01 doctor CLI host-smoke integration test，PR #383 又覆盖 explicit/project-default/
 host-only target selection，PR #384/#385 又合并 required `cc` nonzero 与 malformed-successful-version
 CLI responsibility 变体，PR #386 又上传三平台 host doctor artifacts，PR #387 修复 Windows
-coordinator state publication 测试 deadline；PR #388 的 x86_64 emulator job 因 hosted boot
+coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 为 `f38d9df`，主线 run `37540497454` 全绿；PR #388 的 x86_64 emulator job 因 hosted boot
 不可用保持未合并，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
 执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
@@ -147,7 +147,7 @@ exit-0 malformed `rustc` version，均通过两套 Linux/macOS/Windows workflow�
 Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI 全绿。PR #381
 又在 desktop-template CI 中加入 iOS simulator target check；PR #382/383 的两套 Linux/macOS/Windows
 workspace/template/baseline-driver workflow 也全绿，并以 `757f05b` squash 合并；PR #384/#385/#386
-分别 squash 为 `285893f`/`287c3c7`/`3772750`。CI 的
+分别 squash 为 `285893f`/`287c3c7`/`3772750`；PR #389 已 squash 为 `f38d9df`，主线 run `37540497454` 全绿。CI 的
 编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。真实 x86/未知 ABI
 设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
 
