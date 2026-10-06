@@ -18,7 +18,7 @@ gpui doctor --json --target desktop
 ## 本地结果
 
 - 命令：`cargo test --locked --test doctor_cli -- --nocapture`
-- macOS arm64：1 passed，exit 0。
+- macOS arm64：1 passed，exit 0；hosted runner 缺少可选 capture provider 时整体可为 `warning`，但 required checks 必须全部 `pass`。
 - 生成项目使用 `--targets macos`，doctor 使用显式 `--target desktop`；required Rust、host
   platform 和 C compiler checks 全部通过，移动工具链未进入报告。
 
