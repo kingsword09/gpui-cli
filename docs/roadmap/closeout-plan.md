@@ -1,6 +1,6 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-07（Asia/Shanghai）。执行基线：`287c3c7`（PR #385 squash merge）；相较
+更新日期：2026-10-07（Asia/Shanghai）。执行基线：`783a3bc`（PR #385 后路线证据更新）；相较
 实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
 iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection、
 required nonzero/malformed-version responsibility 变体。
