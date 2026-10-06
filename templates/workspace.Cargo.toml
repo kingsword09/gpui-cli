@@ -26,4 +26,4 @@ serde_json = "1.0"
 # because the repository is named differently from the crate inside it.
 gpui-mobile = { package = "{{GPUI_MOBILE_PKG}}", version = "={{GPUI_MOBILE_VERSION}}", git = "{{GPUI_MOBILE_GIT}}", rev = "{{GPUI_MOBILE_REV}}" }
 log = "0.4"
-{{ANDROID_PATCH}}
+{{MOBILE_PATCH}}

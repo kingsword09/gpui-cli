@@ -434,16 +434,27 @@ android_logger = "0.15"
     };
     vars.insert("ANDROID_SECTION", android_section);
 
-    let android_patch = if config.has_android() {
-        format!(
-            "\n# Bundled renderer; see vendor/gpui-pre-wgpu-{GPUI_PRE_VERSION}/PATCHES.md.\n\
-             [patch.crates-io]\n\
-             gpui-pre-wgpu = {{ path = \"vendor/gpui-pre-wgpu-{GPUI_PRE_VERSION}\" }}\n"
-        )
-    } else {
+    let mut mobile_patches = Vec::new();
+    if config.has_android() {
+        mobile_patches.push(format!(
+            "# Bundled renderer; see vendor/gpui-pre-wgpu-{GPUI_PRE_VERSION}/PATCHES.md.\n\
+             gpui-pre-wgpu = {{ path = \"vendor/gpui-pre-wgpu-{GPUI_PRE_VERSION}\" }}"
+        ));
+    }
+    if config.has_mobile() {
+        mobile_patches.push(
+            "# iOS simulator builds use a patched backtrace symbolizer because the upstream\n\
+             # crate currently selects macOS dyld APIs for every Apple target.\n\
+             backtrace = { path = \"vendor/backtrace-0.3.76\" }"
+                .to_string(),
+        );
+    }
+    let mobile_patch = if mobile_patches.is_empty() {
         String::new()
+    } else {
+        format!("\n[patch.crates-io]\n{}\n", mobile_patches.join("\n"))
     };
-    vars.insert("ANDROID_PATCH", android_patch);
+    vars.insert("MOBILE_PATCH", mobile_patch);
 
     vars.insert("MOBILE_ENTRY", mobile_entry(config));
 
@@ -705,6 +716,11 @@ fn template_path_for_output(relative: &Path) -> Option<String> {
         })
         .or_else(|| {
             value
+                .strip_prefix("vendor/backtrace-0.3.76/")
+                .map(|suffix| format!("mobile-compat/backtrace-0.3.76/{suffix}"))
+        })
+        .or_else(|| {
+            value
                 .strip_prefix("vendor/")
                 .map(|suffix| format!("android-compat/{suffix}"))
         })
@@ -714,6 +730,8 @@ fn manifest_group_for(relative: &Path, config: &ProjectConfig) -> &'static str {
     let value = slash_path(relative);
     if value.starts_with("mobile/ios/") {
         "ios-host"
+    } else if value.starts_with("vendor/backtrace-0.3.76/") {
+        "mobile-compat"
     } else if value.starts_with("mobile/android/")
         || value.starts_with("vendor/")
         || (value == "Cargo.toml" && config.has_android())
@@ -736,6 +754,7 @@ fn manifest_groups() -> Vec<ManifestGroup> {
         ("app-runtime", true),
         ("desktop-host", true),
         ("ios-host", true),
+        ("mobile-compat", true),
         ("project-config", true),
         ("project-support", true),
     ]
@@ -1026,6 +1045,10 @@ fn scaffold_files(target_dir: &Path, config: &ProjectConfig) -> Result<()> {
             &target_dir.join("mobile/android/.cargo/config.toml"),
             &vars,
         )?;
+    }
+
+    if config.has_mobile() {
+        render_subtree("mobile-compat", &target_dir.join("vendor"), &HashMap::new())?;
     }
 
     Ok(())
@@ -1362,6 +1385,7 @@ mod tests {
 
         let workspace = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
         assert!(!workspace.contains("crates/desktop"));
+        assert!(workspace.contains("backtrace = { path = \"vendor/backtrace-0.3.76\" }"));
 
         let ios = fs::read_to_string(dir.join("mobile/ios/project.yml")).unwrap();
         assert!(ios.contains("GPUI_CARGO_TARGET_DIR: \"$(PROJECT_DIR)/../../target\""));
@@ -1399,6 +1423,18 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(shader, embedded_shader.contents());
+
+        let backtrace = dir.join("vendor/backtrace-0.3.76");
+        let backtrace_manifest = fs::read_to_string(backtrace.join("Cargo.toml")).unwrap();
+        assert!(backtrace_manifest.contains("name = \"backtrace\""));
+        assert!(backtrace.join("LICENSE-APACHE").exists());
+        assert!(backtrace.join("src/symbolize/gimli.rs").exists());
+        let project_manifest = TemplateManifest::read(&dir).unwrap().unwrap();
+        assert!(
+            project_manifest
+                .file("vendor/backtrace-0.3.76/src/symbolize/gimli.rs")
+                .is_some()
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

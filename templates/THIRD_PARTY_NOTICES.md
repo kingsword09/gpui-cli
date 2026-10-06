@@ -11,6 +11,9 @@ this project was generated. Cargo dependencies retain their own licenses.
   provided under Apache-2.0.
 - When Android is selected, `vendor/gpui-pre-wgpu-{{GPUI_PRE_VERSION}}` is
   provided under Apache-2.0 with its original license and `PATCHES.md`.
+- When iOS or Android is selected, `vendor/backtrace-0.3.76` is based on
+  rust-lang/backtrace-rs commit `1071ac9c21c7f0dc31d8e28f4218a378f5d3c188`
+  under MIT OR Apache-2.0. `PATCHES.md` records the iOS symbolizer cfg fix.
 - Android's `NotoColorEmoji.ttf` is Copyright 2022 Google Inc., provided under
   the SIL Open Font License 1.1. Its license is included beside the font as
   `mobile/android/gradle/app/src/main/assets/fonts/OFL.txt`.

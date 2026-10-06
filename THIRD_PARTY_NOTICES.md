@@ -7,6 +7,7 @@ The components below retain their upstream licenses.
 | --- | --- | --- |
 | Mobile host templates | [longbridge/gpui-mobile](https://github.com/longbridge/gpui-mobile), revision `b4e3ab258f271003b7d4b874f7c5ebe3a77fac60` | Apache-2.0, selected from upstream's license options |
 | `gpui-pre-wgpu 0.3.5` | [Zed](https://github.com/zed-industries/zed), revision `d89e9c2124b2786a390c7a451c7488601b4da2e1`, published as `gpui-pre-wgpu` | Apache-2.0; license and local patch notes are included with the crate |
+| `backtrace 0.3.76` mobile compatibility snapshot | [rust-lang/backtrace-rs](https://github.com/rust-lang/backtrace-rs), commit `1071ac9c21c7f0dc31d8e28f4218a378f5d3c188` | MIT OR Apache-2.0; licenses are included with the crate. The local cfg patch is limited to iOS symbolizer selection |
 | Gradle wrapper | [Gradle](https://github.com/gradle/gradle) | Apache-2.0; original wrapper copyright headers are retained |
 | Noto Color Emoji 2.042 | [Google Noto Emoji](https://github.com/googlefonts/noto-emoji), revision `7f49a00d523ae5f94e52fd9f9a39bac9cf65f958`; Copyright 2022 Google Inc. | SIL Open Font License 1.1 |
 

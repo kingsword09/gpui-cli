@@ -34,6 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - name: Generate an app with a title requiring escaping
@@ -49,6 +51,9 @@ jobs:
           cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace
           cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --features gpui-dev --locked
           cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --release --locked
+          target/debug/gpui init ios-template-probe \
+            --path "$RUNNER_TEMP/gpui-ios-template" --targets ios --bundle-id com.example.iostemplateprobe
+          cargo check --manifest-path "$RUNNER_TEMP/gpui-ios-template/Cargo.toml" --workspace --target aarch64-apple-ios-sim
           if cargo check --manifest-path "$RUNNER_TEMP/gpui-template/Cargo.toml" --workspace --release --features gpui-dev --locked; then
             echo 'release + gpui-dev unexpectedly compiled'
             exit 1

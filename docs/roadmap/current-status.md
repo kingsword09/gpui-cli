@@ -1,14 +1,11 @@
 # 主分支进度与接续记录
 
 更新日期：2026-10-06（Asia/Shanghai）。合并代码审计基线仍为 `852ddec`（PR #377 squash merge）；
-流程记录从 `ac3db66` 更新至 `1c0a4cb`（PR #379）。已 fetch 确认 `main` 与 `origin/main`
-均为 `1c0a4cb`；`852ddec..1c0a4cb` 仅有文档流程变化。当前分支
-`codex/t01-doctor-closeout` 的 PR #380 已包含 T01 doctor、F01 baseline-driver 和可移植证据摘要
-（`c278dbc`、`739d140`）；工作区还未提交 Ubuntu `cc --version` 解析回归修复。PR #380 的
-`739d140` CI 中两次 Ubuntu workspace test 都因 `cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0`
-未解析失败；一次 macOS clippy 因 crates.io DNS 失败，另一次 macOS 完整检查通过；Windows job
-被 fail-fast 取消。desktop/Android template 与 baseline-driver 均通过。当前解析修复的本机定向与
-完整 workspace 回归已通过，待提交触发完整 CI；T01/F01 父状态未晋升。
+流程记录已合并至 `f8192d6`（PR #380 squash merge），其中包含 T01 doctor、F01 baseline-driver、
+Ubuntu `cc --version` 解析修复及可移植证据摘要。当前分支 `codex/f01-p01-closeout` 从
+`origin/main=f8192d6` 建立，PR #381 head `5a9cf9b` 新增 F01/P-01 cancel、superseded 和
+native-install-failure 接续记录及 iOS-safe backtrace 模板修复，正在等待 design-doc/CI/review。
+T01/F01/P01 父状态未晋升。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -427,9 +424,9 @@ T06 保持 `in_progress`。
 
 | ID | 状态 | 已实现 / 剩余边界 |
 | --- | --- | --- |
-| F01 | in_progress | 三种严格 fixture、单调 span、有界日志、macOS headless live 驱动器已实跑每 fixture 10 次预热 + 30 次测量，保留 LoginForm 编译失败/恢复样本；修复 fixture 缺 `gpui-dev` 与 transitional null build。PR 前 attempt-04 180s 内未注册窗口；本轮 attempt-05 已完成 8m 内首轮 Cargo 构建并注册 responsive macOS Counter 窗口，`capture.window` screenshot 成功、source/assets current；语义以 `a11y_inactive` unavailable，screenshot-only action 被 `stale_observation` 拒绝。一次受控 compile_error 失败后恢复至新 run；PR #380 的 baseline-driver CI self-test 通过。剩余：P-01 cancel/superseded/native-install-failure 责任变体、这些变体的 CI artifact、无障碍激活或明确 unavailable 结论及 T05/T06 联合对照 |
-| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时。本地 doctor 实现通过生成项目及故障变体；T-03 又以 22 台可用 iOS simulator 中的两个 selector 核对名称+runtime 与 UDID 解析，并对 ARM64 AVD 验证匹配与 x86_64 配置不匹配。PR #380 提交后发现 Ubuntu `cc (Ubuntu …) 13.3.0` 版本行解析缺失；工作区已新增 `cc ` marker 和分发版输出回归。定向 parser/upgrade regression、完整 workspace、clippy、fmt 已通过，待推送触发 PR CI。剩余：CI/review/merge、Linux/Windows doctor host 变体、真实 x86/未知 ABI 设备及未建模 AGP/Gradle 组合边界验收 |
-| P01 | in_progress | 有真实 macOS PoC；scene readback、a11y 激活及完整帧/GPU/故障证据仍有限 |
+| F01 | in_progress | 三种严格 fixture、单调 span、有界日志、macOS headless live 驱动器已实跑每 fixture 10 次预热 + 30 次测量，保留 LoginForm 编译失败/恢复样本；PR #380 squash 合并后，本轮在隔离 generated Counter 项目关闭 P-01 macOS cancel、superseded 和 native-install-failure 责任变体，保存 `cancelled`/`superseded` spans、窗口截图、受控 `ios.install` exit 73、未安装 app、lease owner 释放和临时 simulator 删除证据；模板新增带许可证的 iOS-safe `backtrace 0.3.76` 快照，iOS simulator Rust check/Xcode build 已通过。剩余：新模板变更的 CI/review/merge、P-02 T05/T06 联合对照、跨平台 GUI/device 证据 |
+| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时。本地 doctor 实现通过生成项目及故障变体；T-03 又以 22 台可用 iOS simulator 中的两个 selector 核对名称+runtime 与 UDID 解析，并对 ARM64 AVD 验证匹配与 x86_64 配置不匹配。PR #380 补上 Ubuntu `cc (Ubuntu …) 13.3.0` 版本行解析，并以 squash merge 合并为 `f8192d6`；Linux/macOS/Windows、模板和 baseline-driver CI 全绿。剩余：真实 Linux/Windows doctor host 矩阵、真实 x86/未知 ABI 设备及 physical-device 选择、未建模 AGP/Gradle 组合边界验收 |
+| P01 | in_progress | 有真实 macOS PoC；cancel/superseded/native-install-failure 变体已有隔离窗口、span、iOS simulator build/install-failure、cleanup/lease/device 证据，semantics 明确 runtime_unavailable；scene readback、完整帧/GPU、完整设备证据和父任务 CI/review 仍有限 |
 | T02 | in_progress | 模板 manifest、嵌入内容摘要、增平台保护；真实历史内容的稳定取得仍不贯通 |
 | F02 | in_progress | 独立 protocol crate、v2、请求关联和 feature 边界；无在线 v1 兼容/事件投影，runtime 仍在模板内 |
 | T03 | in_progress | 保守 B/L/N 整文件计划和冲突保护；缺结构化合并及完整历史基线识别 |
@@ -736,7 +733,7 @@ T06 保持 `in_progress`。
 | Subscriber identity/count | subscriber 文件名绑定 attempt 的安全编码，active count 通过 OS lock probe 判定，不读取 locked JSON；failed-attempt sharing 按 attempt 过滤 | [S04 subscriber identity/count](../experiments/S04-subscriber-identity-count-2026-09-30.md) |
 | v1 兼容 | app proto 1 为 `unsupported_version`；control schema 1 为 `invalid_schema`；schema 2 可用 | `cli-probes.json` |
 | 历史升级 | 复制上次用 `3df7a6c` CLI 生成的未修改项目，执行 `upgrade plan --to agent-native-v1-draft --json`，仍退出 1、`baseline_unavailable` | `upgrade-probe.json`、`old-t02-upgrade.json` |
-| doctor 版本/ABI/设备选择 | 历史 `runtime-probes.json` 记录了 exit 0 + 不可解析版本仍 overall=pass；PR #380 增加有效/最低版本、超时/大 stderr、SDK/NDK/Gradle/JDK 变体、required Rust target 缺失、iOS simulator selector 和 Android AVD ABI match/mismatch 证据 | [T01 doctor 验收摘要](../experiments/T01-doctor-closeout-2026-10-06.md)；本机原始 artifact 路径列于摘要中但不在仓库 checkout 内；真实 x86/unknown ABI、physical device 和完整 CI 仍未运行 |
+| doctor 版本/ABI/设备选择 | 历史 `runtime-probes.json` 记录了 exit 0 + 不可解析版本仍 overall=pass；PR #380 增加有效/最低版本、超时/大 stderr、SDK/NDK/Gradle/JDK 变体、required Rust target 缺失、iOS simulator selector 和 Android AVD ABI match/mismatch 证据，修复 Ubuntu `cc` marker 后 squash 合并；全平台 CI 通过 | [T01 doctor 验收摘要](../experiments/T01-doctor-closeout-2026-10-06.md)；CI runs `37436523210`/`37436528816`；CI 编译/单测通过不代替真实 Linux/Windows doctor host 矩阵；真实 x86/unknown ABI 与 physical device 仍未运行 |
 
 fixture 探针直接编译当前 `previews.rs`，只用最小 env/report bridge 隔离验证 hash；
 历史升级复用旧项目夹具，本轮没有重新编译旧 CLI。探针返回的预期失败不能统计为

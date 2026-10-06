@@ -1,9 +1,11 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-06，主分支 `852ddec`（PR #377 squash merge）。35 项中 1 done、22 in_progress、12 planned；
-完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
-执行流程调整基线：`ac3db66`（仅比实现核查多一条文档提交）；本次不新增验收结果，
-不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
+状态核查：2026-10-06，主分支 `f8192d6`（PR #380 squash merge）。35 项中 1 done、22 in_progress、12 planned；
+完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
+T01 doctor/F01 baseline-driver 实现及 CI 已合并；本轮新增 F01/P-01 macOS cancel/superseded/native-install-failure
+局部验收，父任务计数不变；模板新增 iOS-safe backtrace compatibility snapshot，native install failure
+责任变体已取得 build/install-failure/cleanup 证据，父任务仍等待 CI/review/merge。
+执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。PR #381 当前等待 required CI/review；默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -105,9 +107,13 @@ PR 拆分：夹具/基线契约 → span 和有界记录 → 重跑脚本及报�
 当前代码交付了严格 fixture 契约、supervisor 单调 span、有限 `spans.ndjson` 和可重跑
 的 headless 基线驱动器；本轮 macOS arm64 实跑覆盖 3 个夹具、每个 10 次预热和 30 次
 测量，保留 LoginForm 编译失败/恢复样本，并修复驱动对 transitional null build 状态的
-处理。证据位于 `artifacts/acceptance/1c0a4cb/F01/macos-arm64/attempt-03/`；真实窗口、
-native 安装失败、跨平台 CI artifact 以及 T05/T06 索引/缓存联合对照仍需补齐，不能将这次
-headless 结果写成跨平台性能结论。
+处理。证据位于 `artifacts/acceptance/1c0a4cb/F01/macos-arm64/attempt-03/`；新增 P-01
+cancel/superseded/native-install-failure 隔离证据见
+`docs/experiments/F01-p01-closeout-2026-10-06.md`。模板现内嵌带许可证的 iOS-safe
+`backtrace 0.3.76` 快照，生成项目的 `aarch64-apple-ios-sim` check 和 macOS Xcode build
+已通过，受控 invalid-app 已进入 `ios.install` 并保留 cleanup/lease/device 结果；新模板
+CI、review/merge、跨平台 GUI/device 验收，以及 T05/T06 索引/缓存联合对照仍需补齐，不能
+将局部窗口结果写成 F01 或跨平台性能结论。
 
 ### T01 · Target-aware doctor
 
@@ -129,8 +135,10 @@ command probe、项目默认 target、显式 iOS/Android 设备选择和 JSON/�
 build-tools 与 NDK `source.properties`。动态/未知兼容组合保持 unknown，敏感环境值只
 报告来源和存在性。T-03 的本地证据又覆盖 22 台 iOS simulator 候选中的名称+runtime 与
 UDID 两种精确 selector；新增 required Android Rust target 缺失和 Android selected-device
-ABI match/mismatch/unknown 的定向变体。完整跨平台 CI、Linux/Windows 工具链矩阵、真实
-x86/未知 ABI 设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
+ABI match/mismatch/unknown 的定向变体。PR #380 已 squash 合并为 `f8192d6`，对应
+Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI 全绿。CI 的
+编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。真实 x86/未知 ABI
+设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
 
 若选中 T01：先复核 `probe::run_command` 的“成功退出即 Passed”与版本校验的区别，
 补畸形/不兼容版本回归及 expected/actual 规则，再完成 T-01/T-02/T-03 对应本地/原生证据。

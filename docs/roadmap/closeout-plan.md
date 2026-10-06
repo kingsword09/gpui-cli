@@ -1,11 +1,11 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-06（Asia/Shanghai）。执行基线：`1c0a4cb`；相较实现核查
-`852ddec` 和流程基线 `ac3db66`，已合并提交均为文档流程记录。当前分支
-`codex/t01-doctor-closeout` 对应 PR #380（head `739d140`）；工作区有一处待提交的 Ubuntu
-`cc --version` parser 修复，其定向回归、完整 workspace、clippy、fmt 已通过。PR CI 仍未全绿，
-不得更新正式代码基线或晋升 T01/F01。PR #380 已授权 squash merge，恢复条件是修复提交后的
-必需 CI 全绿且审查条件满足。
+更新日期：2026-10-06（Asia/Shanghai）。执行基线：`f8192d6`（PR #380 squash merge）；相较
+实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor 与 F01 baseline-driver。
+当前分支 `codex/f01-p01-closeout` 的 PR #381 head `5a9cf9b` 包含 F01/P-01 接续证据、iOS-safe
+backtrace 模板修复与路线记录，正在等待 design-doc/CI/review。T01/F01/P01 仍保持 `in_progress`；
+PR #381 必须等 design-doc、三平台 CI、模板和
+baseline-driver 检查通过后使用 squash merge。
 
 ## 1. 文档职责与纠偏原因
 
@@ -34,11 +34,23 @@
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | F01 · 优先补 P-01 macOS GUI/native 的 cancel、superseded、native-install-failure 变体和无障碍结论；P-01/P-02 的基线子例已有本机证据。T01 的 T-01/T-02/T-03 macOS 本机子例已覆盖两个 iOS simulator、两个 Android AVD selector、required target 缺失和 Android ABI match/mismatch；T01 等待 PR #380 修复后 CI/review/squash merge，且仍缺跨平台/真实 x86 或 unknown ABI 设备变体。P01 需 F01+T01，T02 需 F01；下游暂不越过硬依赖 |
-| 首批候选 | F01 当前可执行；T01 处于必需 CI 等待，完成后重新纳入选择 |
+| 当前执行游标 | F01 · P-01 macOS cancel/superseded/native-install-failure responsibility variants 已有隔离证据；模板新增 iOS-safe `backtrace 0.3.76` snapshot 后，iOS simulator Rust check、Xcode build、受控 `ios.install` failure、cleanup/lease/device 状态均已取得。当前等待新模板变更的 design-doc/CI/review/merge；T01 已随 PR #380 squash 合并但仍缺跨平台/真实 x86 或 unknown ABI 设备变体和父任务验收；P01 需 F01+T01，T02 需 F01 |
+| 首批候选 | F01 当前等待新模板 CI/review/merge；等待期间继续核对可独立推进的 T01 Linux/Windows/ABI responsibility variants，不越过 P01/F01 硬依赖 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
+
+### 本轮执行卡：F01 / P-01 iOS simulator native-install-failure
+
+| 维度 | 本轮登记 |
+| --- | --- |
+| 实现缺口 | 已以内嵌 `vendor/backtrace-0.3.76` 兼容快照收口；cfg 差异限定为 macOS dyld library enumerator，许可证、上游 commit 和 PATCHES 已记录 |
+| 本地测试缺口 | 已重新生成隔离项目；`cargo check --target aarch64-apple-ios-sim`、Xcode Debug build、受控 `ios.install` exit 73、未安装 app、lease owner 释放和 simulator 删除均有证据 |
+| CI 缺口 | 已在 `.github/workflows/ci.yml` 增加 macOS desktop-template job 的 iOS simulator Rust check；新 head 尚未运行，不能把本地结果当 CI 通过 |
+| GUI/设备缺口 | 本轮临时 simulator 已 shutdown/delete；本地责任变体已关闭。真实 iOS GUI/输入/语义及物理设备仍不在此出口 |
+| acceptance / 依赖 | P-01 native-install-failure responsibility variant；F01 无硬前置，P01 仍要求 F01+T01；不宣称 P-01、F01 或 G0 完成 |
+| 非目标 | 不在本轮扩展 accessibility、scene/present、移动语义/输入、真机或完整 iOS CI；不改上游 gpui API 语义 |
+| 有界出口 | 已取得 install-failure + cleanup 证据；下一步只需新模板 CI/design-doc/review/merge，随后复核 F01/P-01 父任务剩余项并选择下一依赖可满足候选 |
 
 领取任务后，将游标更新为任务 ID、本轮剩余项、执行阶段和下一动作；收口后移到下一任务。
 设备、权限、review/merge 或 CI 等待必须另记恢复条件，不能让一个等待项卡住整个路线。
@@ -92,7 +104,7 @@ T-01/T-02/T-03 或 G0 已整体通过。
 | --- | --- | --- |
 | 实现 | 已按 `expected.version` 解析命令版本；不带版本要求的命令仍只看可用性；project-selected Gradle wrapper 做精确比对，固定模板 AGP 9.1.0 + Gradle 9.4.1 建立 Java 17 最低规则，未知组合保留 Unknown。修正 iOS 单字符串 host、adb version expectation，并读取 SDK platform/build-tools、NDK metadata 和项目 Rust minimum；Android selected-device 现在比较 `Device.arch` 与配置的 `GPUI_ANDROID_ABIS`，缺失架构保持 Unknown | 本轮接入 Android ABI match/mismatch/unknown 判定；跨平台规则/CI、动态兼容和完整秘密筛除边界仍需核验，未建模 AGP/Gradle 组合继续保持 Unknown |
 | 本地测试 | 修复前定向子进程回归确认为 exit 0 + 畸形版本误报 Pass；已有 T01 定向和 ABI 测试、串行 workspace 记录见 attempt-05/06。本次发现 Ubuntu 输出 `cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0` 无 marker 后新增真实格式 shim：定向 parser test 1 passed、原 CI 失败的 upgrade no-op transaction test 1 passed；`cargo test --workspace --locked` 主二进制 489 passed/12 ignored，integration、协议与 xtask 测试均通过；clippy、build、fmt、diff check 通过 | 新增回归写入 `docs/experiments/T01-doctor-closeout-2026-10-06.md`；此前默认并行失败保存在 `artifacts/acceptance/1c0a4cb/T-01/macos-arm64/attempt-05/`，串行完整结果及日志在 `attempt-06/`；其它 T01/T02/T03 证据路径不变 |
-| CI | PR #380 head `739d140` 两次 Ubuntu workspace test 均复现 `desktop.c_compiler` 解析失败；一次 macOS clippy 因 crates.io DNS 失败，另一次 macOS 完整检查通过；Windows job 因 fail-fast 取消。两个 run 的 desktop-template、android-template、baseline-driver 均通过 | 当前 parser 修复必须提交推送；新 head 需重新通过 Linux/macOS/Windows、desktop-template、android-template、baseline-driver 与 design-doc checks 后才 squash merge。不能使用 merge commit 或 rebase merge |
+| CI | PR #380 新 head `b2dbc40` 的两次 workflow run 均全绿：Linux/macOS/Windows、desktop-template、android-template、baseline-driver 通过；原 Ubuntu `cc --version` 失败现已在 Linux workspace job 中通过 | PR #380 已于 2026-10-06 以 squash 合并为 `f8192d6`；检查链接为 run `37436523210`、`37436528816`。T01 父任务仍因真实 x86/unknown ABI、physical device、Linux/Windows 原生 doctor 变体未收口 |
 | 原生验收 | 已在 macOS arm64 对 desktop-only、iOS-only、Android-only 生成项目及非项目显式 target 跑 doctor；最终 desktop/iOS/Android 项目均返回 0，Android 实际核对 platform 34、可用 build-tools、NDK 27.2.12479018、Gradle 9.4.1、AGP 9.1.0、Java 21.0.8。iOS 22 台 simulator 中两个 selector 解析到不同设备且未启动；Android 发现 3 台 stopped AVD，两个 selector 解析到 Pixel_9_Pro / Pixel_9a；Pixel_9_Pro 在 `arm64-v8a` 构建 ABI 下通过，在 `x86_64` 构建 ABI 下 required check 失败，调用前后 AVD 均保持 stopped。`adb devices -l` 无连接设备；临时 SDK canary 未泄露；错误 compileSdk、缺 build-tools、无 NDK metadata、Java 11 均拒绝 | T-01/T-02 原始证据见 `artifacts/acceptance/1c0a4cb/T-01/macos-arm64/attempt-03/`、`T-02/macos-arm64/attempt-02/`；iOS selector、Android AVD selector、ABI target 缺失和 ABI match/mismatch 分别见 `T-03/macos-arm64/attempt-02/`、`attempt-04/`、`attempt-03/`、`attempt-06/`。仍需 CI、Linux/Windows、真实 x86/unknown ABI 或 physical Android device 验收，不宣称整个 T-01/T-03 通过 |
 
 本机已补两个 iOS selector、两个 Android AVD selector、required Android ABI target 缺失
@@ -111,23 +123,20 @@ F01 无硬依赖。责任子例：P-01 的 L0 supervisor span/失败样本、P-0
 | 维度 | 本轮结果/剩余项 | 证据 |
 | --- | --- | --- |
 | 实现 | 基线脚本夹具补 `gpui-dev` feature；status predicate 对 `build`/`running` transitional null 安全；self-test 保持通过 | `scripts/live-baseline.py`、`cargo fmt --check`、`python3 -m py_compile scripts/live-baseline.py` |
-| 本地测试 | macOS arm64 实跑 counter、login-invalid、list-scroll；每个 10 warmup + 30 measurement，共 120 样本、1515 spans；失败 30、恢复样本 30，span 无负时长；本轮完整 workspace 489 主二进制测试通过、12 ignored，integration/protocol/xtask 目标通过；clippy/build/fmt/design docs/diff check 通过。默认并行 workspace 的 3 个 process-tree timeout 单列在 T01 `attempt-05` | F01 数据见 `artifacts/acceptance/1c0a4cb/F01/macos-arm64/attempt-03/`；本轮完整 workspace 回归见 T01 `attempt-07`；失败尝试 `attempt-01`/`attempt-02` 保留原始原因 |
-| CI | PR #380 head `739d140` 的 baseline-driver self-test 和 desktop/Android template job 通过；完整 workspace CI 正等待当前修复提交后的重跑 | 等待恢复条件：push 修复触发完整 CI；本地 evidence 不代替 CI |
-| GUI/设备/native | attempt-04 首轮构建超 180s 未注册窗口；本轮隔离重跑 8m 内完成 macOS Counter `cargo.build`、window registration 和 responsive heartbeat。`capture.window` observation succeeded，PNG 149×164、6,109 bytes、`freshness.source=current`/`assets=applied`；GPUI semantics 返回 `a11y_inactive`，screenshot-only click 以 `stale_observation` 拒绝。受控 `compile_error!` build b3 failed，恢复后 build b4 / run r2 responsive | 当前只关闭正常 window、window capture、编译失败和恢复子例；P-01 仍缺 cancel/superseded/native install failure 与无障碍激活验收，`presented_frame_id=null` 不证明 GPU present；不能晋升 F01 `done` |
+| 本地测试 | macOS arm64 实跑 counter、login-invalid、list-scroll；每个 10 warmup + 30 measurement，共 120 样本、1515 spans；失败 30、恢复样本 30，span 无负时长；本轮完整 workspace 489 主二进制测试通过、12 ignored，integration/protocol/xtask 目标通过；clippy/build/fmt/design docs/diff check 通过。默认并行 workspace 的 3 个 process-tree timeout 单列在 T01 `attempt-05` | F01 数据见 `artifacts/acceptance/1c0a4cb/F01/macos-arm64/attempt-03/`；本轮完整 workspace 回归见 `T-01/attempt-07`；P-01 GUI/span 原始证据见 F01 `attempt-06/attempt-07`；失败尝试 `attempt-01`/`attempt-02` 保留原始原因 |
+| CI | PR #380 squash 前所有 Linux/macOS/Windows、desktop-template、android-template、baseline-driver jobs 均通过；workspace 包含 live failure/recovery/supersession integration test，baseline-driver self-test 通过 | CI runs `37436523210`、`37436528816` 已绑定 squash 前 head；P-01 当前 GUI/native attempt 的 artifact 尚未进入新 CI 运行，不能据此声称完整 F01 CI 收口 |
+| GUI/设备/native | attempt-05 注册 responsive macOS Counter 窗口并成功 `capture.window`；语义 `a11y_inactive`，截图来源/资源 current；受控 compile_error build b3 failed 后 build b4/run r2 responsive。attempt-06 在 responsive 窗口运行的 cargo.build b6 经本 session `q` 取消，父/子 span 均 `cancelled`。attempt-07 系统 `/tmp` generated project 中 build b4 被源码更新 supersede，后续 build b9 成功并恢复 responsive；窗口 PNG 51,105 bytes，scene/source/assets matches，但 `presented_frame_id=null`。stable retry semantics 返回 `runtime_unavailable`。修复模板 backtrace snapshot 后的 iOS simulator 重跑中，cargo target check、Xcode build 成功，受控 `simctl install` exit 73 进入 `ios.install`，app 未安装、lease owner 释放、临时 simulator 删除 | cancel/superseded/native-install-failure 已关闭 macOS 本地 responsibility variants；新模板 CI/review/merge、完整 F01/P-01 父任务、真实语义/输入/scene/present 和跨平台 GUI/device 仍未收口。完整 details 和 artifact 路径见 `docs/experiments/F01-p01-closeout-2026-10-06.md`；不能晋升 F01 `done` |
 
-F01 本轮复核了 attempt-04，并新增隔离的 attempt-05：上次因首次编译时间较长未到窗口；本次
-成功注册 macOS generated Counter 窗口并取得当前 run/source 的 window screenshot。语义仍因
-`a11y_inactive` 不可用，window capture 与 scene/present 不等价；受控 compile_error build 失败，
-还原源码后新的 run responsive。既有 desktop、iOS simulator、Android AVD 长运行 live 进程未触碰；
-本次仅在临时 project 启动的 PID 36629 已在验收完成后由本轮停止。
+F01 本轮复核 attempt-04/05，并新增隔离 attempt-06/07 和修复后的独立 simulator 重跑：关闭 macOS
+cancel/superseded/native-install-failure responsibility variants 并确认语义 provider 不可用；
+仓库内原有 desktop/iOS/Android 长运行 live 进程未触碰；本轮启动的临时 desktop 和 simulator
+session 均已停止并删除。
 
-F01 与 T01 均无硬前置。PR #380 等待 parser 修复提交后的 CI/review；这是切换焦点的外部等待，
-恢复条件为新 head 必需 job 全绿且 squash merge 可执行。当前 F01 可继续：P-01 窗口/截图/失败恢复
-已有局部证据，下一动作是在隔离 fixture 项目尝试 cancel、superseded、native install failure，随后
-核实 GPUI accessibility 激活结论；既有 desktop、iOS、Android 长运行进程不得触碰。T01 仍缺 Linux/
-Windows doctor 验证及真实 x86/unknown ABI 或 physical-device 变体。P01 硬依赖 F01+T01，T02 硬依赖
-F01；其它核心项依赖未满足，不绕过前置。PR #380 必需 CI 全绿及审查条件满足后以 squash 合并，
-合并后复核基线，再重算依赖并选择 P01/T02。
+F01 与 T01 均无硬前置。PR #380 已 squash 合并并复核新基线；本轮已关闭 P-01 的三个 macOS
+隔离 responsibility variants，但 F01/P-01 父任务仍等待新模板 CI/review/merge，并缺 P-02
+联合对照、真实语义/输入/scene/present 和跨平台 GUI/device 证据。P01 硬依赖 F01+T01，T02
+硬依赖 F01；其它核心项依赖未满足，不绕过前置。下一动作是为本记录开 PR，等待新 head 的
+design-doc/三平台/template/baseline-driver CI 与 review，然后复核父任务出口并选择下一候选。
 
 ## 3. 自动选择、执行、收口循环
 
