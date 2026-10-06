@@ -37,3 +37,22 @@
 ## 本机原始证据位置
 
 原始 JSON、命令和子进程探针分别保存在 `artifacts/acceptance/1c0a4cb/T-01/macos-arm64/attempt-03/`、`T-02/macos-arm64/attempt-02/` 与 `T-03/macos-arm64/attempt-01/` 至 `attempt-06/`。这些路径只在本机存在；本页摘要和 PR 检查是仓库内可审查材料。
+
+## Ubuntu `cc --version` 回归与 CI 复查
+
+PR #380 head `739d140` 的 CI 检查了真实 Ubuntu 24.04 runner 输出
+`cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0`。doctor 将 `desktop.c_compiler` 判为失败，导致
+`upgrade::apply::tests::clean_plan_commits_noop_transaction_and_releases_lock` 失败。两次触发分别为
+[run 37433935925](https://github.com/kingsword09/gpui-cli/actions/runs/37433935925) 和
+[run 37433939343](https://github.com/kingsword09/gpui-cli/actions/runs/37433939343)。同一 head 上，一次
+macOS complete check 通过；另一次 macOS clippy 因 runner 无法解析 `index.crates.io` 失败。Windows
+job 被 fail-fast 取消，没有 Windows 失败结论。模板与 baseline-driver jobs 均通过。
+
+本地工作区在 `739d140` 上为版本 marker 增加 `cc `，并新增 Ubuntu 输出 shim 回归。验证结果：
+
+- `cargo test --locked --bin gpui toolchain::probe::tests::cc_version_with_distribution_prefix_is_parseable`：1 passed。
+- `cargo test --locked --bin gpui upgrade::apply::tests::clean_plan_commits_noop_transaction_and_releases_lock`：1 passed。
+- `cargo test --workspace --locked`：主二进制 489 passed、12 ignored；所有 integration、protocol、xtask 和 doc-test targets 通过。
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --locked`、`cargo fmt --check` 和 `git diff --check` 通过。
+
+这组结果来自含未提交 parser 修复的 macOS arm64 工作区；不是 CI，也不能替代 Linux/Windows doctor 验收。修复推送后需要绑定新 head 的完整 CI 结果。

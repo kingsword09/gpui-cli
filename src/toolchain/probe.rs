@@ -477,6 +477,7 @@ fn extract_reported_version(stdout: &[u8], stderr: &[u8], minimum_parts: usize) 
         "release:",
         "clang ",
         "gcc ",
+        "cc ",
         "xcrun version",
         "openjdk version",
         "java version",
@@ -1099,6 +1100,19 @@ mod tests {
     }
 
     #[test]
+    fn cc_version_with_distribution_prefix_is_parseable() {
+        let requirement = subprocess_requirement(
+            "toolchain::probe::tests::shim_cc_ubuntu_version",
+            json!({"executable": true, "version": "reported"}),
+        );
+        let mut runner = ProbeRunner::new(ProbeConfig::default());
+        let reports = runner.probe(&[requirement], None);
+
+        assert_eq!(reports[0].status, CheckStatus::Pass);
+        assert_eq!(reports[0].actual["version"], "13.3.0");
+    }
+
+    #[test]
     fn compatibility_marker_is_unknown_until_a_project_rule_exists() {
         let requirement = subprocess_requirement(
             "toolchain::probe::tests::shim_java_version_stderr",
@@ -1471,6 +1485,12 @@ mod tests {
     #[ignore = "invoked as a deterministic child process by probe tests"]
     fn shim_java_11_stderr() {
         eprintln!("openjdk version \"11.0.22\"");
+    }
+
+    #[test]
+    #[ignore = "invoked as a deterministic child process by probe tests"]
+    fn shim_cc_ubuntu_version() {
+        println!("cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0");
     }
 
     #[test]
