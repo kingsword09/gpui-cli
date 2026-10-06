@@ -156,26 +156,21 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Install Android doctor toolchain and x86_64 image
         run: |
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018" "emulator" "system-images;android-35;google_apis;x86_64"
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
           yes | sdkmanager --licenses >/dev/null || true
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
-      - name: Create and boot x86_64 emulator
-        run: |
-          echo no | avdmanager create avd --force --name gpui-doctor-x86 --package "system-images;android-35;google_apis;x86_64" --device pixel_2
-          nohup emulator -avd gpui-doctor-x86 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect > "$RUNNER_TEMP/gpui-doctor-emulator.log" 2>&1 &
-          adb wait-for-device
-          for attempt in $(seq 1 60); do
-            if adb shell getprop sys.boot_completed | tr -d '\r' | grep -q '^1$'; then
-              break
-            fi
-            sleep 5
-          done
-          test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1"
-          adb shell input keyevent 82 || true
-      - name: Build CLI and run Android ABI doctor evidence
-        run: |
-          cargo build --locked --bin gpui
-          python3 scripts/doctor-android-evidence.py --gpui target/debug/gpui --device emulator-5554 --output doctor-android-evidence
+      - name: Run Android ABI doctor evidence on x86_64 emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          disable-animations: true
+          script: |
+            cargo build --locked --bin gpui
+            python3 scripts/doctor-android-evidence.py --gpui target/debug/gpui --device emulator-5554 --output doctor-android-evidence
       - name: Upload Android ABI doctor evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -185,6 +180,3 @@ jobs:
             doctor-android-evidence/
             ${{ runner.temp }}/gpui-doctor-emulator.log
           if-no-files-found: warn
-      - name: Stop Android emulator
-        if: always()
-        run: adb -s emulator-5554 emu kill || true
