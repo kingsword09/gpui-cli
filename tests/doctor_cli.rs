@@ -105,17 +105,21 @@ fn doctor_cli_reports_a_nonzero_required_probe() {
     let shim_dir = dir.path().join("shims");
     fs::create_dir(&shim_dir).unwrap();
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let shim = shim_dir.join("cc");
-        fs::write(&shim, "#!/bin/sh\nexit 42\n").unwrap();
-        let mut permissions = fs::metadata(&shim).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&shim, permissions).unwrap();
-    }
-    #[cfg(windows)]
-    fs::write(shim_dir.join("cc.cmd"), "@echo off\r\nexit /b 42\r\n").unwrap();
+    // `Command::new("cc")` does not invoke a shell on any platform.  A text
+    // shim (`.cmd` on Windows or a shell script on Unix) would therefore not
+    // exercise the probe consistently.  Compile a tiny native executable
+    // with the same Rust toolchain that is running this test instead.
+    let shim_source = dir.path().join("cc-shim.rs");
+    fs::write(&shim_source, "fn main() { std::process::exit(42); }\n").unwrap();
+    let shim = shim_dir.join(if cfg!(windows) { "cc.exe" } else { "cc" });
+    let rustc_status = Command::new("rustc")
+        .arg("--edition=2021")
+        .arg(&shim_source)
+        .arg("-o")
+        .arg(&shim)
+        .status()
+        .unwrap();
+    assert!(rustc_status.success(), "failed to compile cc shim");
 
     let output = doctor_with_path(
         dir.path(),
