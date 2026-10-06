@@ -147,6 +147,27 @@ def main() -> int:
                     f"doctor {label} exit was {command['returncode']!r}, expected {expected_exit}"
                 )
             report = report_from(command, f"doctor {label}")
+            write_json(output / f"{label}-raw-doctor.json", report)
+            print(
+                json.dumps(
+                    {
+                        "label": label,
+                        "exit": command["returncode"],
+                        "overall": report.get("overall"),
+                        "checks": [
+                            {
+                                "id": item.get("id"),
+                                "status": item.get("status"),
+                                "required": item.get("required"),
+                                "reason": item.get("reason"),
+                            }
+                            for item in report.get("checks", [])
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             validate_report(report, expected_status, f"doctor {label}")
             reports[label] = report
 
