@@ -142,10 +142,6 @@ def main() -> int:
                 case_env,
             )
             commands.append({"label": f"doctor-{label}", "abis": abis, **command})
-            if command["returncode"] != expected_exit:
-                raise RuntimeError(
-                    f"doctor {label} exit was {command['returncode']!r}, expected {expected_exit}"
-                )
             report = report_from(command, f"doctor {label}")
             write_json(output / f"{label}-raw-doctor.json", report)
             print(
@@ -168,6 +164,10 @@ def main() -> int:
                 ),
                 flush=True,
             )
+            if command["returncode"] != expected_exit:
+                raise RuntimeError(
+                    f"doctor {label} exit was {command['returncode']!r}, expected {expected_exit}"
+                )
             validate_report(report, expected_status, f"doctor {label}")
             reports[label] = report
 

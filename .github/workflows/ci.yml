@@ -170,13 +170,13 @@ jobs:
           disable-animations: true
           script: |
             cargo build --locked --bin gpui
-            python3 scripts/doctor-android-evidence.py --gpui target/debug/gpui --device emulator-5554 --output doctor-android-evidence
+            python3 scripts/doctor-android-evidence.py --gpui target/debug/gpui --device emulator-5554 --output "$GITHUB_WORKSPACE/doctor-android-evidence"
       - name: Upload Android ABI doctor evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: doctor-android-x86_64
           path: |
-            doctor-android-evidence/
+            ${{ github.workspace }}/doctor-android-evidence/
             ${{ runner.temp }}/gpui-doctor-emulator.log
           if-no-files-found: warn
