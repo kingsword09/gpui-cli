@@ -2,8 +2,9 @@
 
 更新日期：2026-10-06（Asia/Shanghai）。执行基线：`f8192d6`（PR #380 squash merge）；相较
 实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor 与 F01 baseline-driver。
-当前分支 `codex/f01-p01-closeout` 工作区新增 F01/P-01 接续证据与路线记录，尚无绑定 CI/review
-的提交。T01/F01/P01 仍保持 `in_progress`；新 PR 必须等 design-doc、三平台 CI、模板和
+当前分支 `codex/f01-p01-closeout` 的 PR #381 head `5a9cf9b` 包含 F01/P-01 接续证据、iOS-safe
+backtrace 模板修复与路线记录，正在等待 design-doc/CI/review。T01/F01/P01 仍保持 `in_progress`；
+PR #381 必须等 design-doc、三平台 CI、模板和
 baseline-driver 检查通过后使用 squash merge。
 
 ## 1. 文档职责与纠偏原因

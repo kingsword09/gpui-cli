@@ -5,7 +5,7 @@
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；本轮新增 F01/P-01 macOS cancel/superseded/native-install-failure
 局部验收，父任务计数不变；模板新增 iOS-safe backtrace compatibility snapshot，native install failure
 责任变体已取得 build/install-failure/cleanup 证据，父任务仍等待 CI/review/merge。
-执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
+执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。PR #381 当前等待 required CI/review；默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 

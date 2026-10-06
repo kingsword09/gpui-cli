@@ -3,8 +3,9 @@
 更新日期：2026-10-06（Asia/Shanghai）。合并代码审计基线仍为 `852ddec`（PR #377 squash merge）；
 流程记录已合并至 `f8192d6`（PR #380 squash merge），其中包含 T01 doctor、F01 baseline-driver、
 Ubuntu `cc --version` 解析修复及可移植证据摘要。当前分支 `codex/f01-p01-closeout` 从
-`origin/main=f8192d6` 建立，新增 F01/P-01 cancel、superseded 和 native-install-failure 接续记录，
-等待新 PR 的 design-doc/CI/review。T01/F01/P01 父状态未晋升。
+`origin/main=f8192d6` 建立，PR #381 head `5a9cf9b` 新增 F01/P-01 cancel、superseded 和
+native-install-failure 接续记录及 iOS-safe backtrace 模板修复，正在等待 design-doc/CI/review。
+T01/F01/P01 父状态未晋升。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
