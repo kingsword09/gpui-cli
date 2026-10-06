@@ -756,7 +756,7 @@ cleanup-finalized report evidence 接线，
 
 ## 5.1 本轮接续与下一动作
 
-- 基线/当前提交：`origin/main`=`f38d9df`，工作区干净；PR #384/#385/#386/#387/#389 已 squash 合并；主线 run `37540497454` 全绿。
+- 代码审计/实现基线：`f38d9df`；文档同步 PR #390 已 squash 合并，工作区干净；其主线 run `37543387556` 全绿。
 - 已关闭的 T01 responsibility：真实 CLI 的 required `cc` nonzero、`rustc` exit-0 畸形版本，以及
   GitHub Linux/macOS/Windows host doctor artifacts；本地 `doctor_cli` 4 passed，相关两套 workflow 全绿。
 - T01 剩余：真实 x86/unknown ABI 或 physical Android device、
