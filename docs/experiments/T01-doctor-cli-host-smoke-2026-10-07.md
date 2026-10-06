@@ -1,6 +1,7 @@
 # T01 doctor CLI host smoke（2026-10-07）
 
-状态：本地与两套三平台 CI 切片通过，PR #382 已 squash 合并为 `9e6ef64`；不晋升 T01 或 G0。
+状态：本地与两套三平台 CI 切片通过，PR #382 已 squash 合并为 `9e6ef64`，PR #383 的
+target-selection 扩展已 squash 合并为 `757f05b`；不晋升 T01 或 G0。
 
 ## 范围
 
@@ -26,6 +27,7 @@ gpui doctor --json --target desktop
 ## CI/原生边界
 
 该 integration test 随 PR #382 的两套 `check` workflow 在 Linux/macOS/Windows matrix 中运行
-并通过；runs `37496876490`、`37496869916`。host smoke 不代替真实 Android ABI、iOS simulator/
+并通过；runs `37496876490`、`37496869916`。PR #383 的 target-selection 扩展也在两套 workflow
+中通过；runs `37500590204`、`37500498141`。host smoke 不代替真实 Android ABI、iOS simulator/
 physical device 或完整 Linux/Windows 工具版本矩阵。Linux hosted runner 缺少可选 capture provider
 时报告 `warning`，required checks 仍全部 `pass`；不修改 CI runner 环境。

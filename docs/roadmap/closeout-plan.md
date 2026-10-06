@@ -1,8 +1,8 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-07（Asia/Shanghai）。执行基线：`9e6ef64`（PR #382 squash merge）；相较
+更新日期：2026-10-07（Asia/Shanghai）。执行基线：`757f05b`（PR #383 squash merge）；相较
 实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
-iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke。
+iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection。
 当前分支为 `main`，工作区干净。T01/F01/P01 仍保持 `in_progress`；T01 host-smoke 已通过
 design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge。
 
@@ -33,7 +33,7 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | T01 · doctor CLI host-smoke 已在本机和 Linux/macOS/Windows `check` matrix 通过：生成 desktop-only 项目并执行 `doctor --json --target desktop`，schema v2、显式 target、required pass/可选 warning 和移动工具链隔离均核对。T01 仍缺真实 Linux/Windows 工具版本矩阵、x86/unknown ABI、physical-device 与未建模兼容边界；F01/P01 已回到等待/后续联合证据，P01 仍需 F01+T01 |
+| 当前执行游标 | T01 · doctor CLI host-smoke/target-selection 已在本机和 Linux/macOS/Windows `check` matrix 通过：生成 desktop-only 项目覆盖显式 target、项目默认 target，并在非项目目录验证 host-only report；schema v2、required pass/可选 warning 和移动工具链隔离均核对。T01 仍缺真实 Linux/Windows 工具版本矩阵、x86/unknown ABI、physical-device 与未建模兼容边界；F01/P01 已回到等待/后续联合证据，P01 仍需 F01+T01 |
 | 首批候选 | T01 继续处理 T-02/T-03 可执行 responsibility variants；优先复核真实工具版本/故障边界和可用设备变体，不越过 P01/F01 硬依赖 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
@@ -57,7 +57,7 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | --- | --- |
 | 实现缺口 | 将 target-aware doctor 通过真实 CLI 调用接入 integration test：生成 desktop-only 项目，显式运行 `doctor --json --target desktop`，验证 schema v2、target source、required pass 和不引入 Android/iOS checks |
 | 本地测试缺口 | macOS arm64 已通过 `cargo test --locked --test doctor_cli -- --nocapture`（2 passed），覆盖显式 target、项目默认 target 和非项目 host-only；需保留 stdout/stderr/exit 语义并执行适用 workspace 回归 |
-| CI 缺口 | 已由 PR #382 两套 workflow 实际运行 Linux/macOS/Windows `check` matrix；run `37496876490`、`37496869916` 全部通过并 squash 为 `9e6ef64` |
+| CI 缺口 | PR #382 两套 workflow 实际运行 Linux/macOS/Windows `check` matrix；run `37496876490`、`37496869916` 全部通过并 squash 为 `9e6ef64`。PR #383 两套 workflow 继续运行 target-selection 扩展；run `37500590204`、`37500498141` 全部通过并 squash 为 `757f05b` |
 | GUI/设备缺口 | 本切片不声称 GUI/device；真实 Linux/Windows host doctor、Android x86/unknown ABI 和 physical device 继续作为 T-01/T-03 后续责任 |
 | acceptance / 依赖 | T-01 的 T-01 CLI target-selection/host-only responsibility slice；无硬前置；不晋升 T01 或 G0 |
 | 非目标 | 不自动安装工具链，不修改 SDK/许可/签名，不把 CI hosted runner 当作完整 native device 验收 |
