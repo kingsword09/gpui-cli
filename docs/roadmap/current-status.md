@@ -3,8 +3,8 @@
 更新日期：2026-10-07（Asia/Shanghai）。合并代码审计基线仍为 `852ddec`（PR #377 squash merge）；
 流程记录已合并至 `306c070`（PR #381 squash merge），其中包含 T01 doctor、F01 baseline-driver、
 Ubuntu `cc --version` 解析修复、iOS-safe backtrace 模板修复及 F01/P-01 native-install-failure
-证据。当前分支为 `main`，工作区新增 T01 doctor CLI host-smoke integration test，正在等待新
-PR 的 design-doc/CI/review。T01/F01/P01 父状态未晋升。
+证据和 T01 doctor CLI host-smoke。当前分支为 `main`，工作区干净；PR #382 已以 squash
+合并为 `9e6ef64`，两套三平台 workspace/template/baseline-driver CI 全绿。T01/F01/P01 父状态未晋升。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -424,7 +424,7 @@ T06 保持 `in_progress`。
 | ID | 状态 | 已实现 / 剩余边界 |
 | --- | --- | --- |
 | F01 | in_progress | 三种严格 fixture、单调 span、有界日志、macOS headless live 驱动器已实跑每 fixture 10 次预热 + 30 次测量，保留 LoginForm 编译失败/恢复样本；PR #380 squash 合并后，本轮在隔离 generated Counter 项目关闭 P-01 macOS cancel、superseded 和 native-install-failure 责任变体，保存 `cancelled`/`superseded` spans、窗口截图、受控 `ios.install` exit 73、未安装 app、lease owner 释放和临时 simulator 删除证据；模板新增带许可证的 iOS-safe `backtrace 0.3.76` 快照，iOS simulator Rust check/Xcode build 已通过。剩余：新模板变更的 CI/review/merge、P-02 T05/T06 联合对照、跨平台 GUI/device 证据 |
-| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时；新增 `doctor_cli` integration test 通过真实 CLI 生成 desktop-only 项目并核对 schema v2、显式 target、required pass 与移动工具链隔离。T-03 又以 22 台可用 iOS simulator 中的两个 selector 核对名称+runtime 与 UDID 解析，并对 ARM64 AVD 验证匹配与 x86_64 配置不匹配。PR #380 补上 Ubuntu `cc (Ubuntu …) 13.3.0` 版本行解析，并以 squash merge 合并为 `f8192d6`；PR #381 三平台/template/baseline-driver CI 全绿。剩余：新 host-smoke PR 的三平台 CI/review、真实 Linux/Windows doctor host 矩阵、真实 x86/未知 ABI 设备及 physical-device 选择、未建模 AGP/Gradle 组合边界验收 |
+| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时；`doctor_cli` integration test 已通过真实 CLI 生成 desktop-only 项目并核对 schema v2、显式 target、required pass/可选 warning 与移动工具链隔离。T-03 又以 22 台可用 iOS simulator 中的两个 selector 核对名称+runtime 与 UDID 解析，并对 ARM64 AVD 验证匹配与 x86_64 配置不匹配。PR #380 补上 Ubuntu `cc (Ubuntu …) 13.3.0` 版本行解析，并以 squash merge 合并为 `f8192d6`；PR #381/382 三平台/template/baseline-driver CI 全绿，PR #382 squash 为 `9e6ef64`。剩余：真实 Linux/Windows doctor 工具版本矩阵、真实 x86/未知 ABI 设备及 physical-device 选择、未建模 AGP/Gradle 组合边界验收 |
 | P01 | in_progress | 有真实 macOS PoC；cancel/superseded/native-install-failure 变体已有隔离窗口、span、iOS simulator build/install-failure、cleanup/lease/device 证据，semantics 明确 runtime_unavailable；scene readback、完整帧/GPU、完整设备证据和父任务 CI/review 仍有限 |
 | T02 | in_progress | 模板 manifest、嵌入内容摘要、增平台保护；真实历史内容的稳定取得仍不贯通 |
 | F02 | in_progress | 独立 protocol crate、v2、请求关联和 feature 边界；无在线 v1 兼容/事件投影，runtime 仍在模板内 |

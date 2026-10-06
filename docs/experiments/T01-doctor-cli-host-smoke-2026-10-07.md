@@ -1,6 +1,6 @@
 # T01 doctor CLI host smoke（2026-10-07）
 
-状态：本地切片通过，等待新 PR 的三平台 CI/review；不晋升 T01 或 G0。
+状态：本地与两套三平台 CI 切片通过，PR #382 已 squash 合并为 `9e6ef64`；不晋升 T01 或 G0。
 
 ## 范围
 
@@ -24,7 +24,7 @@ gpui doctor --json --target desktop
 
 ## CI/原生边界
 
-该 integration test 会随现有 `check` job 在 Linux/macOS/Windows matrix 中运行。新 PR 尚未
-创建，三平台结果待 CI 提供；host smoke 也不代替真实 Android ABI、iOS simulator/physical
-device 或完整 Linux/Windows 工具版本矩阵。若 hosted runner 的必需工具缺失，保留 doctor 的
-required failure/unavailable 结果并记录恢复条件，不修改 CI runner 环境。
+该 integration test 随 PR #382 的两套 `check` workflow 在 Linux/macOS/Windows matrix 中运行
+并通过；runs `37496876490`、`37496869916`。host smoke 不代替真实 Android ABI、iOS simulator/
+physical device 或完整 Linux/Windows 工具版本矩阵。Linux hosted runner 缺少可选 capture provider
+时报告 `warning`，required checks 仍全部 `pass`；不修改 CI runner 环境。

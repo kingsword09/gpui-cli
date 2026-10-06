@@ -4,7 +4,8 @@
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
 cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
-本轮新增 T01 doctor CLI host-smoke integration test，父任务计数不变，等待新 PR 的三平台 CI/review。
+PR #382 又合并 T01 doctor CLI host-smoke integration test，父任务计数不变；T01 仍缺 T-02/T-03
+真实工具/设备责任变体。
 执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
@@ -139,7 +140,8 @@ build-tools 与 NDK `source.properties`。动态/未知兼容组合保持 unknow
 UDID 两种精确 selector；新增 required Android Rust target 缺失和 Android selected-device
 ABI match/mismatch/unknown 的定向变体。PR #380 已 squash 合并为 `f8192d6`，对应
 Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI 全绿。PR #381
-又在 desktop-template CI 中加入 iOS simulator target check。CI 的
+又在 desktop-template CI 中加入 iOS simulator target check；PR #382 的两套 Linux/macOS/Windows
+workspace/template/baseline-driver workflow 也全绿，并以 `9e6ef64` squash 合并。CI 的
 编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。真实 x86/未知 ABI
 设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
 
