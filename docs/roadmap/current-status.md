@@ -1,10 +1,10 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-06（Asia/Shanghai）。实现核查代码：`852ddec`（PR #377 squash merge）。相较上一审计
-`18c719a`，复核了 PR #376 的路线图记录同步（`62c6fc1`）和 PR #377 的 Android Gradle Properties stream
-cache gate（`852ddec`）。本次流程复核至 `ac3db66`（PR #378 文档同步），与实现核查相比
-无运行代码变更；已 fetch 确认本地 `main` 与 `origin/main` 为 `ac3db66`。
-本次仅调整接续/验收责任，没有新增运行结果。后续提交须重新核对，本文不是动态状态。
+更新日期：2026-10-06（Asia/Shanghai）。合并代码审计基线仍为 `852ddec`（PR #377 squash merge）；
+流程记录从 `ac3db66` 更新至 `1c0a4cb`（PR #379）。已 fetch 确认 `main` 与 `origin/main`
+均为 `1c0a4cb`；`852ddec..1c0a4cb` 仅有文档流程变化。当前工作区新增未提交的 T01 doctor
+实现/测试、F01 baseline-driver 修复及本地证据，尚无对应 CI、review 或 merge。本文的历史基线
+只描述已合并代码；T01/F01 本地差异和验收范围单列，不提升父任务状态。后续提交须重新核对。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -423,8 +423,8 @@ T06 保持 `in_progress`。
 
 | ID | 状态 | 已实现 / 剩余边界 |
 | --- | --- | --- |
-| F01 | in_progress | 三种 fixture、单调 span、有界日志、10 预热/30 测量 headless 驱动器；缺完整 UI/native 故障及索引/缓存对照 |
-| T01 | in_progress | target-aware JSON doctor、required/optional、超时；畸形版本仍可 pass，SDK/JDK/AGP/MSRV 规则未齐 |
+| F01 | in_progress | 三种严格 fixture、单调 span、有界日志、macOS headless live 驱动器已实跑每 fixture 10 次预热 + 30 次测量，保留 LoginForm 编译失败/恢复样本；修复基线夹具缺 `gpui-dev` feature 与 driver 对 transitional null build 的误处理。一次真实 macOS generated Counter live 尝试在 180s deadline 内仍处于首轮 `cargo.build`，未注册窗口，按 not_run 记录。剩余：CI artifact、真实 UI/native 故障、完整 P-01 L2 与 T05/T06 索引/缓存联合对照 |
+| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时。本地未提交差异补上版本分类/显式最低版本、iOS host 字符串、Android SDK platform/build-tools、NDK `source.properties`、项目 AGP/Gradle wrapper、固定 AGP 9.1.0 + Gradle 9.4.1 对的 Java 17 最低版本、required Rust target 和 Android selected-device ABI 检查；本机生成项目与故障变体通过。T-03 又以 22 台可用 iOS simulator 中的两个 selector 核对名称+runtime 与 UDID 解析，并对 ARM64 AVD 验证匹配与 x86_64 配置不匹配。剩余：CI/review/merge、Linux/Windows、真实 x86/未知 ABI 设备及未建模 AGP/Gradle 组合边界验收 |
 | P01 | in_progress | 有真实 macOS PoC；scene readback、a11y 激活及完整帧/GPU/故障证据仍有限 |
 | T02 | in_progress | 模板 manifest、嵌入内容摘要、增平台保护；真实历史内容的稳定取得仍不贯通 |
 | F02 | in_progress | 独立 protocol crate、v2、请求关联和 feature 边界；无在线 v1 兼容/事件投影，runtime 仍在模板内 |
@@ -732,7 +732,7 @@ T06 保持 `in_progress`。
 | Subscriber identity/count | subscriber 文件名绑定 attempt 的安全编码，active count 通过 OS lock probe 判定，不读取 locked JSON；failed-attempt sharing 按 attempt 过滤 | [S04 subscriber identity/count](../experiments/S04-subscriber-identity-count-2026-09-30.md) |
 | v1 兼容 | app proto 1 为 `unsupported_version`；control schema 1 为 `invalid_schema`；schema 2 可用 | `cli-probes.json` |
 | 历史升级 | 复制上次用 `3df7a6c` CLI 生成的未修改项目，执行 `upgrade plan --to agent-native-v1-draft --json`，仍退出 1、`baseline_unavailable` | `upgrade-probe.json`、`old-t02-upgrade.json` |
-| doctor 版本 | shim 输出不可解析版本但退出 0，doctor 仍 overall=pass | `runtime-probes.json` |
+| doctor 版本/ABI/设备选择 | 历史 `runtime-probes.json` 记录了 exit 0 + 不可解析版本仍 overall=pass；当前未提交 T01 差异已让该变体变为 required fail，并新增有效版本、最低版本、超时/大 stderr、SDK/NDK/Gradle/JDK 变体、required Rust target 缺失负例、两个 iOS simulator selector 及 Android AVD ABI match/mismatch 证据 | [T01/T-02/T-03 local evidence](../../artifacts/acceptance/1c0a4cb/T-01/macos-arm64/attempt-03/)（工具链矩阵）及 [T-03 attempts](../../artifacts/acceptance/1c0a4cb/T-03/macos-arm64/)（工作区证据；真实 x86/unknown ABI 与 CI 仍未运行） |
 
 fixture 探针直接编译当前 `previews.rs`，只用最小 env/report bridge 隔离验证 hash；
 历史升级复用旧项目夹具，本轮没有重新编译旧 CLI。探针返回的预期失败不能统计为

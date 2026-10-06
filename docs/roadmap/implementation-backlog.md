@@ -103,9 +103,11 @@ PR 拆分：夹具/基线契约 → span 和有界记录 → 重跑脚本及报�
 验收：P-01/P-02；功能对照运行现有 fmt/clippy/test。回退：关闭新增计时，不改变 D1 状态语义。不能先承诺“提速百分比”再选择样本。
 
 当前代码交付了严格 fixture 契约、supervisor 单调 span、有限 `spans.ndjson` 和可重跑
-的 headless 基线驱动器；本地完整运行已覆盖 3 个夹具、每个 10 次预热和 30 次测量，
-并保留编译失败/恢复样本。真实 native 安装失败以及 T05/T06 的索引/缓存对照仍需在
-对应平台/任务完成后补齐，不能将这次 headless 结果写成跨平台性能结论。
+的 headless 基线驱动器；本轮 macOS arm64 实跑覆盖 3 个夹具、每个 10 次预热和 30 次
+测量，保留 LoginForm 编译失败/恢复样本，并修复驱动对 transitional null build 状态的
+处理。证据位于 `artifacts/acceptance/1c0a4cb/F01/macos-arm64/attempt-03/`；真实窗口、
+native 安装失败、跨平台 CI artifact 以及 T05/T06 索引/缓存联合对照仍需补齐，不能将这次
+headless 结果写成跨平台性能结论。
 
 ### T01 · Target-aware doctor
 
@@ -121,9 +123,14 @@ PR 拆分：纯报告/规则测试 → 实际 probes/超时 → CLI 和真实 SD
 回退：保持原人类命令可用，去掉有问题的 probe 并标 unknown。禁止顺手安装 SDK、接受许可或修改签名。
 
 当前代码交付了 schema-v2 target-aware doctor、required/optional 退出规则、bounded
-command probe、项目默认 target、显式 iOS/Android 设备选择和 JSON/人类共用报告模型。
-完整 SDK/JDK/AGP/build-tools 组合、真实多设备矩阵和敏感日志筛除仍需平台验收后再改为
-`done`。
+command probe、项目默认 target、显式 iOS/Android 设备选择和 JSON/人类共用报告模型；
+命令 exit 0 现在还要满足声明的版本语义，支持 Rust 最低版本、Gradle wrapper 版本、
+固定模板 AGP/Gradle 对的 Java 最低版本，并读取项目选定的 Android SDK platform、
+build-tools 与 NDK `source.properties`。动态/未知兼容组合保持 unknown，敏感环境值只
+报告来源和存在性。T-03 的本地证据又覆盖 22 台 iOS simulator 候选中的名称+runtime 与
+UDID 两种精确 selector；新增 required Android Rust target 缺失和 Android selected-device
+ABI match/mismatch/unknown 的定向变体。完整跨平台 CI、Linux/Windows 工具链矩阵、真实
+x86/未知 ABI 设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
 
 若选中 T01：先复核 `probe::run_command` 的“成功退出即 Passed”与版本校验的区别，
 补畸形/不兼容版本回归及 expected/actual 规则，再完成 T-01/T-02/T-03 对应本地/原生证据。

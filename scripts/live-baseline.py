@@ -77,6 +77,14 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def mapping(value: Any, key: str) -> dict[str, Any]:
+    """Return a nested status object, treating transitional nulls as empty."""
+    if not isinstance(value, dict):
+        return {}
+    nested = value.get(key)
+    return nested if isinstance(nested, dict) else {}
+
+
 def read_spans(project: Path, session_id: str) -> list[dict[str, Any]]:
     path = project / ".gpui" / "live" / session_id / "spans.ndjson"
     if not path.exists():
@@ -237,7 +245,9 @@ def write_project(project: Path, case_id: str, fixture: dict[str, Any]) -> None:
         f'[app]\nname = "f01-{case_id}"\ntitle = "F01 {case_id}"\n'
     )
     (project / "crates" / "desktop" / "Cargo.toml").write_text(
-        f'[package]\nname = "f01-{case_id}-desktop"\nversion = "0.1.0"\nedition = "2024"\n'
+        f'[package]\nname = "f01-{case_id}-desktop"\nversion = "0.1.0"\nedition = "2024"\n\n'
+        '[features]\n'
+        'gpui-dev = []\n'
     )
     (project / "crates" / "desktop" / "src" / "main.rs").write_text(
         good_source(f"{case_id}-initial")
@@ -310,8 +320,8 @@ class LiveSession:
             stderr=subprocess.STDOUT,
         )
         initial = self.wait(
-            lambda value: value.get("build", {}).get("status") == "succeeded"
-            and value.get("running", {}).get("process") == "running"
+            lambda value: mapping(value, "build").get("status") == "succeeded"
+            and mapping(value, "running").get("process") == "running"
         )
         self.session_id = str(initial["session_id"])
         return initial
@@ -367,10 +377,10 @@ def run_sample(
     asset = session.project / "assets" / "baseline.txt"
     before = len(session.spans())
     previous = session.status() or {}
-    previous_build_id = previous.get("build", {}).get("build_id")
+    previous_build_id = mapping(previous, "build").get("build_id")
     previous_revision = (
-        previous.get("desired", {}).get("source_revision"),
-        previous.get("desired", {}).get("asset_revision"),
+        mapping(previous, "desired").get("source_revision"),
+        mapping(previous, "desired").get("asset_revision"),
     )
     started = time.monotonic()
     started_ms = int(time.time() * 1000)
@@ -388,14 +398,14 @@ def run_sample(
 
     def reached_target(value: dict[str, Any]) -> bool:
         revision = (
-            value.get("desired", {}).get("source_revision"),
-            value.get("desired", {}).get("asset_revision"),
+            mapping(value, "desired").get("source_revision"),
+            mapping(value, "desired").get("asset_revision"),
         )
-        build_id = value.get("build", {}).get("build_id")
+        build_id = mapping(value, "build").get("build_id")
         changed = build_id != previous_build_id or revision != previous_revision
         return (
             changed
-            and value.get("build", {}).get("status") == expected
+            and mapping(value, "build").get("status") == expected
             and (expected == "failed" or value.get("stale") is False)
         )
 
@@ -406,7 +416,7 @@ def run_sample(
     if mutation == "compile_failure":
         source.write_text(good_source(f"{case_id}-{sample_id}-recovery"))
         recovery_status = session.wait(
-            lambda value: value.get("build", {}).get("status") == "succeeded"
+            lambda value: mapping(value, "build").get("status") == "succeeded"
             and value.get("stale") is False
         )
         new_spans = session.spans()[before:]
@@ -440,17 +450,17 @@ def run_sample(
         "mutation": mutation,
         "cache_kind": "incremental_warm",
         "expected_build_status": expected,
-        "outcome": status.get("build", {}).get("status", "unknown"),
+        "outcome": mapping(status, "build").get("status", "unknown"),
         "driver_elapsed_ms": elapsed,
         "build_duration_ms": duration_ms(primary_build) if primary_build else None,
         "stage_duration_ms": dict(sorted(stage_durations.items())),
         "build_ids": build_ids,
         "span_count": len(new_spans),
-        "source_revision": status.get("desired", {}).get("source_revision"),
-        "asset_revision": status.get("desired", {}).get("asset_revision"),
+        "source_revision": mapping(status, "desired").get("source_revision"),
+        "asset_revision": mapping(status, "desired").get("asset_revision"),
         "recovery": {
             "performed": recovery_status is not None,
-            "build_status": recovery_status.get("build", {}).get("status")
+            "build_status": mapping(recovery_status, "build").get("status")
             if recovery_status
             else None,
         },
@@ -597,6 +607,8 @@ def self_test() -> None:
         ],
         "case",
     )["counter"]["samples"] == 2
+    assert mapping({"build": None}, "build") == {}
+    assert mapping(None, "build") == {}
     print("live-baseline self-test: ok")
 
 
