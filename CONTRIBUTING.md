@@ -27,11 +27,17 @@ and device execution; it does not validate native runtime behavior.
 ## Design documentation
 
 Start with the [current status](docs/roadmap/current-status.md) and compare its
-audited commit with your branch. Then read the
-[agent-native roadmap](docs/ROADMAP-agent-native-development.md) and select a task
-from its implementation backlog and the matching acceptance
-cases. Proposed APIs and configuration examples must stay marked as drafts
-until their implementation and required platform checks have passed.
+audited commit with your branch and `origin/main`. For an overall roadmap request,
+follow the [closeout plan](docs/roadmap/closeout-plan.md) selection loop: resume an
+eligible cursor, close gaps and automatically continue to the next eligible task.
+One task or slice is not the whole run; a user-specified bounded scope takes
+precedence. Read the matching implementation backlog, acceptance variants and relevant
+design before editing. Record implementation, local-test, CI and native evidence
+gaps separately; a shared acceptance case's task-local pass is not a full-case
+pass. At handoff, update the cursor, remaining exit items, waiting conditions,
+next eligible candidates and exact next action.
+Proposed APIs and configuration examples must stay marked as drafts until their
+implementation and required platform checks have passed.
 
 For documentation-only changes, check links, task dependencies, acceptance IDs
 and JSON/TOML examples with the repository's Rust `x` task runner:

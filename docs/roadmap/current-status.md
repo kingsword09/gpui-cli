@@ -1,12 +1,18 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-06（Asia/Shanghai）。核查代码：`852ddec`（PR #377 squash merge）。相较上一审计
+更新日期：2026-10-06（Asia/Shanghai）。实现核查代码：`852ddec`（PR #377 squash merge）。相较上一审计
 `18c719a`，复核了 PR #376 的路线图记录同步（`62c6fc1`）和 PR #377 的 Android Gradle Properties stream
-cache gate（`852ddec`）；当前 `origin/main` 指向 `852ddec`。后续提交须重新核对，本文不是动态状态。
+cache gate（`852ddec`）。本次流程复核至 `ac3db66`（PR #378 文档同步），与实现核查相比
+无运行代码变更；已 fetch 确认本地 `main` 与 `origin/main` 为 `ac3db66`。
+本次仅调整接续/验收责任，没有新增运行结果。后续提交须重新核对，本文不是动态状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
 专项设计中的目标接口和历史实验记录不能直接当作当前实现或全平台验收。
+
+执行入口改为[收口计划](closeout-plan.md)：默认持续推进整体核心路线，每次按依赖和可用
+验收环境选择一个收口焦点，完成后自动选择下一项，不绑定固定任务 ID。原有 35 项状态计数不变；不要从最近 Gradle cache PR 继续
+自动选择加固切片。共享验收按[矩阵](acceptance-matrix.md)第 1.4 节登记责任和联合出口。
 
 ## 1. 当前结论
 
@@ -742,10 +748,13 @@ cleanup-finalized report evidence 接线，
 
 ## 6. 后续接续顺序
 
-1. 在现有 coordinator heartbeat/fencing 与移动 delegated lease/evidence 边界基础上，继续处理 Android Gradle/AGP/NDK/build-script 隐藏输入闭包、复杂/远端 signing cache、移动完整语义/输入 scenario 和真实环境身份/viewport/DPI 设备验收；unsigned release 仅完成非 live cache hit，release preview 与签名敏感/复杂/远端 signing 仍不进入 preview cache。随后处理剩余 preview/cache orchestration 和真实连续验收。
-2. 补齐 v1 在线兼容、不可变历史模板基线和 doctor 版本解析；保留现有拒绝/降级边界。
-3. 完成 macOS 三夹具各连续 20 次及故障变体，再收口移动语义/输入和完整三端矩阵。
-4. 按依赖继续 MCP、repro、L2/L3 CI；性能、索引/预热、Agent 基准按各自验收推进。
+2026-10-06 纠偏：此前顺序将缓存隐藏输入和移动扩张放在基础兼容/验收收口之前。
+现改为以下顺序，详细工作卡、阻塞切换和交接规则见[收口计划](closeout-plan.md)。
+
+1. 先从 F01/T01 基础候选中按实际缺口与可用环境选择并依次收口；任务完成后自动推进下一项，外部等待须记录恢复条件并继续独立可执行工作，不是一次切片修复就标 done 或停止。
+2. 按硬依赖收口 P01/T02/T03/F02，以及窗口/资源/升级/observe；补在线 v1 兼容、不可变历史基线并保留拒绝/降级边界，复核 O03 历史完成证据与 F02 依赖责任。
+3. 收口语义/场景/租约/冻结输入和 macOS 三夹具连续 20 次及故障变体，再按依赖推进 MCP、移动完整语义/输入、三端矩阵及 repro；真实验收 driver 随任务补齐，不等 Q01 最后统一补。
+4. T05/T06 剩余隐藏输入、复杂/远端 signing、release preview、预热和性能/Agent 基准保留为后续范围；当前 fail-closed 边界继续有效。已复现正确性/安全缺陷可有界插队，修复后返回原收口主线。
 
 每次新合并先比较本文代码基线，再更新相关行、问题结论和验证记录。不得继续引用
 `a6aa685` 的“matrix/Android adapter 未实现”或把旧 320 项测试当作新提交的检查结果。

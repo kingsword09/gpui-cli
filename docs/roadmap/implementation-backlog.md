@@ -2,6 +2,9 @@
 
 状态核查：2026-10-06，主分支 `852ddec`（PR #377 squash merge）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。
+执行流程调整基线：`ac3db66`（仅比实现核查多一条文档提交）；本次不新增验收结果，
+不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
+整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
 入口：[总路线](../ROADMAP-agent-native-development.md)。验收编号的完整步骤见 [验收矩阵](acceptance-matrix.md)，接口语义以各 [专项设计](../ROADMAP-agent-native-development.md) 为准。
@@ -16,6 +19,11 @@
 - 优先级 `core` 是该门槛的必需内容；`optional` 必须独立声明 provider/平台支持，不阻塞核心门槛。
 - 一个实现 PR 附 `task_id + acceptance_ids + evidence_root`。任务表中引用多个用例时，应说明本 PR 覆盖哪一部分；任务全部完成才可以改为 done。
 - CI 从 F01 开始逐项随功能加入，不能等 Q01 最后一次性补测试。Q01 负责贯通并审计已有各层任务。
+- 默认整体推进，每次保持一个父任务实现焦点；历史 `in_progress` 不等于全部同时开工。
+  开始前登记实现/本地/CI/原生验收差距；收口后自动选下一项，等待时记录原因并继续独立可执行任务。
+  切换和交接更新游标、剩余项、候选队列与返回条件，不在一个切片结束后默认停止。
+- 共享验收按[验收矩阵](acceptance-matrix.md)第 1.4 节划分责任子例。父任务只收口自身责任，
+  完整 case 和门槛仍要求全部变体/平台证据；不能降低标准或将下游局部实现当作硬前置已完成。
 
 ## 2. 任务与硬依赖总表
 
@@ -60,6 +68,10 @@
 依赖补充：A01 的基础 MCP 不依赖语义导出；只有 O06 完成后才注册 gpui_query。G01 标在 G4，但它的 hook/开销实验在 G0/G1 就可以准备。M04 前移到 G2，因为正式 check 的确定性不能依赖可变工作目录；M01 依赖 M03，因为移动安装/启动不得绕过设备租约。
 
 ## 3. 可直接采用的实施批次
+
+下表保留原依赖结构；当前执行以[收口计划](closeout-plan.md)为入口，不从最近 PR 主题
+自动选题。首批候选为 F01/T01，按代码缺口与可用环境自主选择，收口后继续依赖可满足的下一项；外部环境阻塞或正确性缺陷插队须记录。
+跨批次已有代码可以复用，不代表该批次出口已通过，也不允许以继续加固代替当前任务验收。
 
 | 批次 | 工作包 | 批次出口 |
 | --- | --- | --- |
@@ -112,6 +124,11 @@ PR 拆分：纯报告/规则测试 → 实际 probes/超时 → CLI 和真实 SD
 command probe、项目默认 target、显式 iOS/Android 设备选择和 JSON/人类共用报告模型。
 完整 SDK/JDK/AGP/build-tools 组合、真实多设备矩阵和敏感日志筛除仍需平台验收后再改为
 `done`。
+
+若选中 T01：先复核 `probe::run_command` 的“成功退出即 Passed”与版本校验的区别，
+补畸形/不兼容版本回归及 expected/actual 规则，再完成 T-01/T-02/T-03 对应本地/原生证据。
+具体剩余项和下一动作见[候选示例卡](closeout-plan.md)；一次解析修复不等于整个 T01 完成，
+T01 收口也不等于整体推进结束。
 
 ### P01 · macOS GPUI 观察 PoC
 
@@ -1223,10 +1240,13 @@ Changed existing files / proposed new files:
 User-visible behavior and explicit non-goals:
 Acceptance IDs / case variants / platforms / CI tiers:
 Evidence root / environment / commands / expected vs actual:
+Task-owned acceptance variants / full-case remaining variants:
+Remaining implementation / local tests / CI / GUI-device evidence:
 v1 / old template / release compatibility:
 Cancellation / restart / permissions / quotas / privacy:
 Migration / capability flags / rollback:
 Known unsupported paths / next PR:
+Current focus / exact next action / switch reason and resume condition:
 ```
 
 Review 必须回答：本次成功结论绑定哪份输入和哪次运行？缺能力时是否会伪成功？副作用是否有 owner/幂等？磁盘与队列是否有上限？旧用户如何继续工作？失败能否复现？
