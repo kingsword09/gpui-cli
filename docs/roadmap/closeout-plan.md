@@ -1,10 +1,12 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-07（Asia/Shanghai）。执行基线：`757f05b`（PR #383 squash merge）；相较
+更新日期：2026-10-07（Asia/Shanghai）。执行基线：`287c3c7`（PR #385 squash merge）；相较
 实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
-iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection。
+iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection、
+required nonzero/malformed-version responsibility 变体。
 当前分支为 `main`，工作区干净。T01/F01/P01 仍保持 `in_progress`；T01 host-smoke 已通过
-design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge。
+design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge；PR #384/#385
+分别 squash 为 `285893f`/`287c3c7`。
 
 ## 1. 文档职责与纠偏原因
 
@@ -33,8 +35,8 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | T01 · doctor CLI host-smoke/target-selection 已在本机和 Linux/macOS/Windows `check` matrix 通过：生成 desktop-only 项目覆盖显式 target、项目默认 target，并在非项目目录验证 host-only report；schema v2、required pass/可选 warning 和移动工具链隔离均核对。T01 仍缺真实 Linux/Windows 工具版本矩阵、x86/unknown ABI、physical-device 与未建模兼容边界；F01/P01 已回到等待/后续联合证据，P01 仍需 F01+T01 |
-| 首批候选 | T01 继续处理 T-02/T-03 可执行 responsibility variants；优先复核真实工具版本/故障边界和可用设备变体，不越过 P01/F01 硬依赖 |
+| 当前执行游标 | F01 · T01 的 CLI responsibility 已收口到真实 native helper 变体：required `cc` nonzero 与 `rustc` exit-0 malformed version 均在本机 4 项 `doctor_cli` 和两套 Linux/macOS/Windows workflow 通过。T01 仍缺真实 Linux/Windows 工具版本矩阵、x86/unknown ABI、physical-device 与未建模兼容边界，恢复条件已记录；当前转回 F01，先处理 macOS GUI/scene/present 与 P-02 联合对照，不把 `a11y_inactive`/`presented_frame_id=null` 当通过。P01 仍需 F01+T01 |
+| 首批候选 | F01 继续核对既有 attempt-05/06/07 和模板新基线，选择可重跑的 scene/present 或语义证据缺口；T01 外部 runner/device 可用后恢复其责任矩阵 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
@@ -56,12 +58,22 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 维度 | 本轮登记 |
 | --- | --- |
 | 实现缺口 | 将 target-aware doctor 通过真实 CLI 调用接入 integration test：生成 desktop-only 项目，显式运行 `doctor --json --target desktop`，验证 schema v2、target source、required pass 和不引入 Android/iOS checks |
-| 本地测试缺口 | macOS arm64 已通过 `cargo test --locked --test doctor_cli -- --nocapture`（2 passed），覆盖显式 target、项目默认 target 和非项目 host-only；需保留 stdout/stderr/exit 语义并执行适用 workspace 回归 |
-| CI 缺口 | PR #382 两套 workflow 实际运行 Linux/macOS/Windows `check` matrix；run `37496876490`、`37496869916` 全部通过并 squash 为 `9e6ef64`。PR #383 两套 workflow 继续运行 target-selection 扩展；run `37500590204`、`37500498141` 全部通过并 squash 为 `757f05b` |
+| 本地测试缺口 | macOS arm64 已通过 `cargo test --locked --test doctor_cli -- --nocapture`（4 passed），覆盖显式 target、项目默认 target、非项目 host-only、required `cc` nonzero 和 `rustc` exit-0 malformed version；fmt/clippy/diff check 通过 |
+| CI 缺口 | PR #382 两套 workflow 实际运行 Linux/macOS/Windows `check` matrix；run `37496876490`、`37496869916` 全部通过并 squash 为 `9e6ef64`。PR #383 两套 workflow 继续运行 target-selection 扩展；run `37500590204`、`37500498141` 全部通过并 squash 为 `757f05b`。PR #384/#385 的两套 push/PR workflow 也全部通过；runs `37506602963`/`37506608934`、`37509603211`/`37509630396`，分别 squash 为 `285893f`/`287c3c7` |
 | GUI/设备缺口 | 本切片不声称 GUI/device；真实 Linux/Windows host doctor、Android x86/unknown ABI 和 physical device 继续作为 T-01/T-03 后续责任 |
 | acceptance / 依赖 | T-01 的 T-01 CLI target-selection/host-only responsibility slice；无硬前置；不晋升 T01 或 G0 |
 | 非目标 | 不自动安装工具链，不修改 SDK/许可/签名，不把 CI hosted runner 当作完整 native device 验收 |
-| 有界出口 | host-smoke 已收口；下一步只处理 T-02/T-03 的真实工具/设备责任变体，若平台或设备缺失则记录 required/unavailable 结果和恢复条件，继续下一个独立候选 |
+| 有界出口 | host-smoke、required nonzero 和 malformed-successful-version CLI responsibility 已收口；T-02/T-03 的真实 Linux/Windows 工具、x86/unknown ABI、physical device 和 AGP/Gradle 边界仍需对应环境。环境缺失时保持 required/unavailable 记录并切回 F01 等独立候选，不晋升 T01 |
+
+### 当前执行卡：F01 GUI/scene/present 与 P-02 联合对照
+
+| 维度 | 本轮登记 |
+| --- | --- |
+| 已有证据 | F01 macOS arm64 已完成三夹具 10 warmup + 30 measurement、failure/recovery、cancel/superseded/native-install-failure responsibility；原始 attempt-05/06/07 和 `F01-p01-closeout-2026-10-06.md` 已记录窗口截图、span 与 cleanup |
+| 剩余实现 | 先复核 scene readback、presented frame、语义导出和 P-02 联合对照的实际代码/证据边界；不把缺失 provider 的 `a11y_inactive` 或 `presented_frame_id=null` 伪造为通过 |
+| 本地测试 | 选择一个隔离 generated Counter/LoginForm/VirtualList 重跑，保存 command、environment、span、截图/树 hash；若能力不可用，记录最小上游/恢复条件 |
+| CI/GUI 责任 | 现有 workflow/template CI 只证明构建和测试路径，不替代真实 GUI/scene/semantic/device；跨平台 GUI/device 与 T05/T06 联合对照仍未闭合 |
+| 有界出口 | 关闭一个可复现的 scene/present/semantic responsibility variant，或记录明确外部阻塞与恢复条件；随后回看 F01 父任务，不晋升 F01/P01 |
 
 领取任务后，将游标更新为任务 ID、本轮剩余项、执行阶段和下一动作；收口后移到下一任务。
 设备、权限、review/merge 或 CI 等待必须另记恢复条件，不能让一个等待项卡住整个路线。

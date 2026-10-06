@@ -1,8 +1,9 @@
 # T01 doctor CLI host smoke（2026-10-07）
 
 状态：本地与两套三平台 CI 切片通过，PR #382 已 squash 合并为 `9e6ef64`，PR #383 的
-target-selection 扩展已 squash 合并为 `757f05b`；本轮新增 required `cc` nonzero shim
-责任切片，等待新 PR 的三平台 CI；不晋升 T01 或 G0。
+target-selection 扩展已 squash 合并为 `757f05b`；required `cc` nonzero shim 已由 PR #384
+squash 合并为 `285893f`，malformed-successful-version 变体已由 PR #385 squash 合并为
+`287c3c7`。不晋升 T01 或 G0。
 
 ## 范围
 
@@ -22,7 +23,7 @@ gpui doctor --json --target desktop
 ## 本地结果
 
 - 命令：`cargo test --locked --test doctor_cli -- --nocapture`
-- macOS arm64：3 passed，exit 0；hosted runner 缺少可选 capture provider 时整体可为 `warning`，但 required checks 必须全部 `pass`；`cc` nonzero shim 变体返回 exit 1 且没有误报 pass。
+- macOS arm64：4 passed，exit 0；hosted runner 缺少可选 capture provider 时整体可为 `warning`，但 required checks 必须全部 `pass`；`cc` nonzero shim 变体返回 exit 1 且没有误报 pass，`rustc` exit 0 但输出畸形版本时返回 exit 1 并将 `rust.rustc` 标为 fail。
 - 生成项目使用 `--targets macos`，doctor 使用显式 `--target desktop`；required Rust、host
   platform 和 C compiler checks 全部通过，移动工具链未进入报告。
 
@@ -30,6 +31,18 @@ gpui doctor --json --target desktop
 
 该 integration test 随 PR #382 的两套 `check` workflow 在 Linux/macOS/Windows matrix 中运行
 并通过；runs `37496876490`、`37496869916`。PR #383 的 target-selection 扩展也在两套 workflow
-中通过；runs `37500590204`、`37500498141`。host smoke 不代替真实 Android ABI、iOS simulator/
-physical device 或完整 Linux/Windows 工具版本矩阵。Linux hosted runner 缺少可选 capture provider
-时报告 `warning`，required checks 仍全部 `pass`；不修改 CI runner 环境。
+中通过；runs `37500590204`、`37500498141`。PR #384 的 required nonzero 变体两套 workflow
+均通过（runs `37506602963`、`37506608934`）；PR #385 的 malformed-successful-version 变体
+两套 workflow 也均通过（runs `37509603211`、`37509630396`）。host smoke 不代替真实 Android
+ABI、iOS simulator/physical device 或完整 Linux/Windows 工具版本矩阵。Linux hosted runner
+缺少可选 capture provider 时报告 `warning`，required checks 仍全部 `pass`；不修改 CI runner 环境。
+
+## T-02 CLI responsibility 变体
+
+- `cc` native helper 退出 42：doctor 返回 exit 1，`desktop.c_compiler` 为 required `fail`。
+- `rustc` native helper 退出 0 但输出 `rustc definitely-not-a-version`：doctor 返回 exit 1，
+  `rust.rustc` 为 required `fail`，原因保留版本不可解析信息。
+
+两个 helper 都由当前 Rust 工具链编译为 native executable；测试在编译 helper 时使用进程内锁，
+避免默认并发测试在 Unix/Windows 上复用 shell shim 的差异。该设计只验证 CLI/报告分类，不把
+shim 当作真实工具链版本或设备验收。
