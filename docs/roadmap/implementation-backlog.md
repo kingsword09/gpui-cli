@@ -1,11 +1,11 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-06，主分支 `f8192d6`（PR #380 squash merge）。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-07，主分支 `306c070`（PR #381 squash merge）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
-T01 doctor/F01 baseline-driver 实现及 CI 已合并；本轮新增 F01/P-01 macOS cancel/superseded/native-install-failure
-局部验收，父任务计数不变；模板新增 iOS-safe backtrace compatibility snapshot，native install failure
-责任变体已取得 build/install-failure/cleanup 证据，父任务仍等待 CI/review/merge。
-执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。PR #381 当前等待 required CI/review；默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
+T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
+cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
+本轮新增 T01 doctor CLI host-smoke integration test，父任务计数不变，等待新 PR 的三平台 CI/review。
+执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
 
@@ -130,13 +130,16 @@ PR 拆分：纯报告/规则测试 → 实际 probes/超时 → CLI 和真实 SD
 
 当前代码交付了 schema-v2 target-aware doctor、required/optional 退出规则、bounded
 command probe、项目默认 target、显式 iOS/Android 设备选择和 JSON/人类共用报告模型；
+`doctor_cli` integration test 通过真实 CLI 生成 desktop-only 项目并核对 schema v2、显式
+target、required pass 与移动工具链隔离；
 命令 exit 0 现在还要满足声明的版本语义，支持 Rust 最低版本、Gradle wrapper 版本、
 固定模板 AGP/Gradle 对的 Java 最低版本，并读取项目选定的 Android SDK platform、
 build-tools 与 NDK `source.properties`。动态/未知兼容组合保持 unknown，敏感环境值只
 报告来源和存在性。T-03 的本地证据又覆盖 22 台 iOS simulator 候选中的名称+runtime 与
 UDID 两种精确 selector；新增 required Android Rust target 缺失和 Android selected-device
 ABI match/mismatch/unknown 的定向变体。PR #380 已 squash 合并为 `f8192d6`，对应
-Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI 全绿。CI 的
+Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI 全绿。PR #381
+又在 desktop-template CI 中加入 iOS simulator target check。CI 的
 编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。真实 x86/未知 ABI
 设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
 
