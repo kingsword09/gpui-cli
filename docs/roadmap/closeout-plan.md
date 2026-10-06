@@ -35,8 +35,8 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | F01 · T01 的 CLI/native host responsibility 已收口：required `cc` nonzero 与 `rustc` exit-0 malformed version 在本机 4 项 `doctor_cli` 和两套 Linux/macOS/Windows workflow 通过；PR #386 又在真实 GitHub Linux/macOS/Windows runners 上传 explicit/project-default doctor artifacts，required checks 全 pass、移动 checks 隔离、secret canary absent。主线 `7336d74` 还在 Ubuntu 24.04/Linux x86_64 容器完成显式/项目默认 desktop doctor。T01 仍缺 x86/unknown ABI、physical-device 与未建模兼容边界，恢复条件已记录；当前转回 F01，先处理 macOS GUI/scene/present 与 P-02 联合对照，不把 `a11y_inactive`/`presented_frame_id=null` 当通过。P01 仍需 F01+T01 |
-| 首批候选 | F01 继续核对既有 attempt-05/06/07 和模板新基线，选择可重跑的 scene/present 或语义证据缺口；T01 外部 runner/device 可用后恢复其责任矩阵 |
+| 当前执行游标 | T01 host responsibility 已收口到真实 GitHub Linux/macOS/Windows doctor artifacts；PR #387 修复 Windows coordinator test flake 并以 `2a54083` 合并，主线 run `37521989971` 全绿。PR #388 的 x86_64 emulator ABI slice 已实现脚本/CI，但两套 run `37532395454`/`37532401654` 因 hosted emulator `sys.boot_completed` 长时间为空而取消，未取得 match/mismatch report；等待能完成 x86_64 AVD boot 的 runner 或真实设备。F01/P-01 仍需 scene readback/verified present/AccessKit semantics/action 与 P-02 T05/T06 联合对照。条件恢复前保持 `in_progress`，不晋升父状态。 |
+| 首批候选 | PR #388 等待 x86_64 AVD boot 条件恢复后直接重跑；若接入真实 x86/unknown ABI AVD 或 physical device，恢复 T01 T-03；若 GPUI backend/AccessKit 提供 scene/present/semantics 能力，恢复 F01/P-01 联合出口 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
@@ -63,7 +63,7 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | GUI/设备缺口 | 本切片不声称 GUI/device；真实 Linux/Windows host doctor、Android x86/unknown ABI 和 physical device 继续作为 T-01/T-03 后续责任 |
 | acceptance / 依赖 | T-01 的 T-01 CLI target-selection/host-only responsibility slice；无硬前置；不晋升 T01 或 G0 |
 | 非目标 | 不自动安装工具链，不修改 SDK/许可/签名，不把 CI hosted runner 当作完整 native device 验收 |
-| 有界出口 | host-smoke、required nonzero 和 malformed-successful-version CLI responsibility 已收口；T-02/T-03 的真实 Linux/Windows 工具、x86/unknown ABI、physical device 和 AGP/Gradle 边界仍需对应环境。环境缺失时保持 required/unavailable 记录并切回 F01 等独立候选，不晋升 T01 |
+| 有界出口 | host-smoke、required nonzero/malformed-successful-version 与 GitHub Linux/macOS/Windows host evidence 已收口；PR #388 x86_64 emulator 两次 hosted boot 未完成，记录 `emulator_boot_unavailable`，未取得 match/mismatch JSON。T-03 的 x86/unknown ABI、physical device 和 AGP/Gradle 边界仍需对应环境；环境缺失时保持 required/unavailable 记录，不晋升 T01 |
 
 ### 当前执行卡：F01 GUI/scene/present 与 P-02 联合对照
 

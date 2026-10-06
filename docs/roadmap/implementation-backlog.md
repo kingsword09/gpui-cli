@@ -1,13 +1,14 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-07，主分支 `3772750`（PR #386 squash merge）。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-07，主分支 `2a54083`（PR #387 squash merge）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
 cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
 PR #382 又合并 T01 doctor CLI host-smoke integration test，PR #383 又覆盖 explicit/project-default/
 host-only target selection，PR #384/#385 又合并 required `cc` nonzero 与 malformed-successful-version
-CLI responsibility 变体，PR #386 又上传三平台 host doctor artifacts，父任务计数不变；T01 仍缺
-T-02/T-03 真实设备与兼容边界责任变体。
+CLI responsibility 变体，PR #386 又上传三平台 host doctor artifacts，PR #387 修复 Windows
+coordinator state publication 测试 deadline；PR #388 的 x86_64 emulator job 因 hosted boot
+不可用保持未合并，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
 执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
