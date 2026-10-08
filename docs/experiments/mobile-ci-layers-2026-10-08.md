@@ -355,7 +355,7 @@ queue test 受控 100ms 延迟下旧失败/新通过的对照和第一次完整�
 failures 均保留，注入已撤销，production app channel 未变。实现仅修正 timeout 分类、
 最小服务准备及测试同步，不把原始失败删除或记成成功。
 
-### 发布与后续验收
+### 合并前交接（历史状态）
 
 PR #388 已发布上述实现，等待 review/merge；已重新 fetch，`origin/main` 仍为
 `2f85842`。实现/验收基线为 `5d09ab3`，后续纯文档同步不改变代码、测试和验收范围。
@@ -365,3 +365,20 @@ PR #388 已发布上述实现，等待 review/merge；已重新 fetch，`origin/
 `verified_present=false`、`gui_acceptance=not_run`。真实首帧、前台归属、输入/语义、
 physical device、未覆盖 ABI 与兼容边界继续按原责任矩阵验收；仅在新的整体路线请求
 中恢复 F01 scene/present/semantics 执行游标。
+
+### 合并后复核（2026-10-08）
+
+PR #388 已 squash 合并为 `8effdf9`。合并后的 push run
+[`37729846375`](https://github.com/kingsword09/gpui-cli/actions/runs/37729846375) 与 PR run
+[`37729843264`](https://github.com/kingsword09/gpui-cli/actions/runs/37729843264) 均为 success，
+各 14 jobs 全绿。两套 run 的 doctor-host、Android/iOS cold/live doctor、Android native build、
+Android/iOS smoke artifacts 均已生成；PR artifact 的 source revision=`5e276b9`、dirty=false。
+
+`android-emulator-doctor` raw report 证明 API 35 x86_64 AVD 的 ABI match 为 pass，同一设备的
+arm64-v8a 配置 mismatch 为预期 fail；旧的 boot-unavailable runs `37532395454`/`37532401654`
+仍是有效历史失败，但已不再代表当前 hosted 条件。x86_64 emulator doctor 关闭其 T-03 责任
+变体，physical device 和 unknown ABI 仍未覆盖。移动 smoke 继续保留
+`verified_present=false`、`gui_acceptance=not_run`；它没有运行 scene readback、语义或输入验收。
+
+PR #388 相对 `f38d9df` 不修改 GPUI scene/present 或 accessibility runtime。整体路线已恢复
+F01 execution cursor；见[收口计划](../roadmap/closeout-plan.md)的当前工作卡。

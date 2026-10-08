@@ -1,13 +1,13 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-08，已合并代码基线 `f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-08，已合并代码基线 `8effdf9`（PR #388 squash merge；push/PR runs `37729846375`/`37729843264` 各 14 jobs 全绿）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
 cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
 PR #382 又合并 T01 doctor CLI host-smoke integration test，PR #383 又覆盖 explicit/project-default/
 host-only target selection，PR #384/#385 又合并 required `cc` nonzero 与 malformed-successful-version
 CLI responsibility 变体，PR #386 又上传三平台 host doctor artifacts，PR #387 修复 Windows
-coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 为 `f38d9df`，主线 run `37540497454` 全绿；PR #388 早期 hosted boot 失败保留为历史证据，当前分层 CI 结果见下文，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
+coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 为 `f38d9df`；PR #388 随后以 `8effdf9` 合并，两套 CI 的 28 jobs 全绿。其 raw x86_64 emulator doctor 已验证 ABI match/mismatch；旧 boot 失败保留为历史记录，父任务计数不变。T01 仍缺 unknown-ABI physical-device 责任变体。
 
 2026-10-08 用户限定的 PR #388 移动 CI 排障在 `5d09ab3` 达到有界出口：push
 run `37728230531` / PR run `37728233406` 各 14 jobs 全绿，两套 iOS raw service/
@@ -16,7 +16,7 @@ Rust target timeout 分类、当前 boot 的 APNs 卸载及 queue test 同步修
 采用两条原生命令/180s budget；doctor/app launch 标准保持，APNs 不在 smoke 范围。
 41 项 driver 回归、fmt/clippy/build、默认并行完整 workspace 复验通过（主二进制
 489 passed / 12 ignored）。受控竞态对照、原本地 helper timing failures 和复验分别
-保留在[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。PR 等待 review/merge；
+保留在[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。PR #388 已 squash 为 `8effdf9`；
 这些责任切片不晋升 O02/F02/T01/F01/P01 或 GUI/真机完成，35 项父状态/计数不变。
 执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
@@ -124,9 +124,21 @@ PR 拆分：夹具/基线契约 → span 和有界记录 → 重跑脚本及报�
 cancel/superseded/native-install-failure 隔离证据见
 `docs/experiments/F01-p01-closeout-2026-10-06.md`。模板现内嵌带许可证的 iOS-safe
 `backtrace 0.3.76` 快照，生成项目的 `aarch64-apple-ios-sim` check 和 macOS Xcode build
-已通过，受控 invalid-app 已进入 `ios.install` 并保留 cleanup/lease/device 结果；新模板
-CI、review/merge、跨平台 GUI/device 验收，以及 T05/T06 索引/缓存联合对照仍需补齐，不能
-将局部窗口结果写成 F01 或跨平台性能结论。
+已通过，受控 invalid-app 已进入 `ios.install` 并保留 cleanup/lease/device 结果；模板和
+baseline-driver 的已有 PR/CI 已合并。当前新增 clock-skew regression 的本地证据见下方，
+其 PR CI 仍待运行；baseline-driver 目前在 CI 中只做 self-test，完整 10+30 baseline 的
+CI artifact 仍需单独补齐。P01 的 scene/present/semantics 属于 O-10/O-11，不作为 F01 的
+P-02 责任；不能将单机窗口或性能结果写成跨平台结论。
+
+2026-10-08 在干净提交 `8effdf9` 上补跑了大输入 full-scan oracle：4096 个 8192-byte 文件、
+10 warmup + 30 measured pairs、Apple M2/macOS 15.6.1 release。原实现 oracle P50/P95 为
+167.20/171.18 ms，manifest mismatch 与 wrong-revision acceptance 均为 0；raw JSON 位于
+ignored `artifacts/acceptance/8effdf9/F01/macos-arm64/attempt-11/large-input-release-benchmark.json`，
+SHA-256=`346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`。这补充 F01 的
+P-02 原实现基线，不表示 index/cache 全量比较完成。新增
+`device_clock_offset_does_not_change_supervisor_span_time` 定向测试及串行 workspace 验证已通过；
+默认并行 workspace 的 4 个 process/helper timing failures 已分别重跑通过并保留原失败，PR CI
+仍待绑定。P01 observer 的 scene/present/semantics 属于 O-10/O-11，不计入 F01 的 P-02 责任。
 
 ### T01 · Target-aware doctor
 
@@ -167,9 +179,11 @@ Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI
 又在 desktop-template CI 中加入 iOS simulator target check；PR #382/383 的两套 Linux/macOS/Windows
 workspace/template/baseline-driver workflow 也全绿，并以 `757f05b` squash 合并；PR #384/#385/#386
 分别 squash 为 `285893f`/`287c3c7`/`3772750`；PR #389 已 squash 为 `f38d9df`，主线 run `37540497454` 全绿。CI 的
-编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。未合并 PR #388
-的 `d9dc35b` 已取得 Ubuntu x86_64 cold/live AVD ABI match/mismatch 责任证据；未知 ABI
-真实设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
+编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。PR #388 已 squash
+为 `8effdf9`；两套 `android-emulator-doctor` artifact 显示真实 API 35 x86_64 AVD 在 build ABI
+`x86_64` 下 pass、在 `arm64-v8a` 下预期 fail。unknown-ABI physical device 尚无环境，本机
+`adb devices -l` 为空；未建模 AGP/Gradle 组合继续保持 Unknown，完整兼容/真实设备责任仍未收口，
+不能改为 `done`。
 
 若选中 T01：先复核 `probe::run_command` 的“成功退出即 Passed”与版本校验的区别，
 补畸形/不兼容版本回归及 expected/actual 规则，再完成 T-01/T-02/T-03 对应本地/原生证据。

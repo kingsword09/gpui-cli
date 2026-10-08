@@ -1,43 +1,23 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-08（Asia/Shanghai）。当前已合并实现与审计核对基线为 `f38d9df`（PR #389 squash merge）；
-此前 `852ddec` 仍作为 PR #377 的历史代码审计基线保留。流程记录已更新至 `f38d9df`（PR #386–#389 后路线证据），其中包含 T01 doctor、F01 baseline-driver、
-Ubuntu `cc --version` 解析修复、iOS-safe backtrace 模板修复及 F01/P-01 native-install-failure
-证据、T01 doctor CLI host-smoke、target-selection、required nonzero probe、malformed
-successful-version probe 和三平台 host evidence。以下是已合并主线历史记录，不含本轮未提交变化。PR #382 已以 squash 合并为 `9e6ef64`，
-PR #383 已以 squash 合并为 `757f05b`，PR #384 已以 squash 合并为 `285893f`，PR #385 已以
-squash 合并为 `287c3c7`，PR #386 已以 squash 合并为 `3772750`，PR #387 已以 squash 合并为
-`2a54083`，以及 PR #389 对 live diagnostics 异步发布等待的修复并 squash 为 `f38d9df`；主线 run
-`37540497454` 的三平台 workspace/template/baseline-driver CI 全绿，doctor-host artifacts 仍绑定
-PR #386 runs。T01/F01/P01
-父状态未晋升。
+更新日期：2026-10-08（Asia/Shanghai）。当前 `main`/`origin/main` 已到 `8effdf9`（PR #388
+squash merge）；此前 `f38d9df` 是 PR #389 的合并与审计基线，`852ddec` 仍保留为 PR #377
+历史代码审计基线。`f38d9df..8effdf9` 共 13 个文件变化，覆盖 CI、移动证据 driver、文档和
+贡献说明；F01 的 GPUI span/scene runtime 未变化。PR #388 push run
+[`37729846375`](https://github.com/kingsword09/gpui-cli/actions/runs/37729846375) 和 PR run
+[`37729843264`](https://github.com/kingsword09/gpui-cli/actions/runs/37729843264) 各 14 jobs 全绿。
 
-本轮用户限定 PR #388 分层移动 CI 排障，有界实现/本地/hosted 出口已达到，等待
-review/merge。实现证据基线为 `5d09ab3`；已重新 fetch，`origin/main` 仍为 `2f85842`，
-相对已合并代码审计基线 `f38d9df` 仅有此前的文档同步。PR 尚未合并，不更新主线实现结论。
+PR #388 raw `android-emulator-doctor` artifact 已复核：API 35 x86_64 AVD 在 `GPUI_ANDROID_ABIS=x86_64`
+下 selected-device check 为 pass，在 `arm64-v8a` 下为预期 fail；原始 artifact 绑定两套 run。
+这关闭 hosted x86_64 emulator ABI match/mismatch responsibility，不覆盖 unknown-ABI physical
+device。Android/iOS smoke 的 `verified_present=false`、`gui_acceptance=not_run` 仍不能作为 GUI、
+scene、输入或语义验收。
 
-`5d09ab3` 的 push run `37728230531` / PR run `37728233406` 各 14 jobs 全绿。
-三平台 workspace/host doctor、templates、driver、Android cold/live doctor、完整 native
-build 与两端 smoke 均通过。两套 iOS 原始 service/doctor/Metal/install/launch/PID/
-PNG/cleanup 已核验，source/driver/workflow hashes 匹配且 dirty=false；push PID=34740、
-launch 1.69s，PR PID=19352、launch 1.25s，截图均为 1179×2556。完整各轮失败、修复、
-哈希及原始证据见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。
-
-修复包括 Rust target timeout 的漏分类、CI 自建 simulator 的 APNs 当前 boot 卸载，
-以及 reconciliation test 误把 journal event 当作 queue 已发布的竞态。服务准备仅有
-bootout/确切 absence 验证，配置 budget 为原生命令的 180s；本轮 PR bootout 实测
-80.80s，不能使用旧 60s 预算。doctor 的 5s/30s、单次 app launch/180s 和稳定 PID/PNG
-标准保持不变；APNs 推送通知不在此 smoke 范围，未声明所有宿主超时的唯一因果。
-
-41 项 driver 回归、fmt/clippy/build、默认并行完整 workspace 复验通过（主二进制
-489 passed / 12 ignored，全部其他目标通过）。queue test 在受控 100ms 延迟下完成
-失败/修复对照，注入已撤销，production app channel 未变。首次本地三个历史
-process-helper timing failures 和定向/完整复验分别留存，没有将重试配置等同于通过。
-
-本次只关闭用户指定 CI 排障切片，35 个父任务计数不变。`verified_present=false`、
-`gui_acceptance=not_run`；真实首帧、输入/语义、physical 和未覆盖 ABI/兼容变体仍按
-责任矩阵验收。下一动作是 PR #388 review/merge 后核对对应主线 CI；仅在新的整体
-路线请求中恢复 F01 scene/present/semantics 游标。后续纯文档同步不改变上述实现基线。
+PR #388 修复的 Rust target timeout 分类、当前 boot APNs service 卸载和 reconciliation queue
+测试等待均已 squash。服务命令使用 180s 配置预算；doctor 的 5s/30s、单次 app launch/180s
+标准保持不变。APNs 推送不在 smoke 范围，未声明所有宿主超时的唯一因果。41 项 driver 回归、
+fmt/clippy/build、完整 workspace 和两套 raw iOS runtime 均通过；历史失败与复验见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。
+35 个父任务计数仍为 1 done、22 in_progress、12 planned，没有因 PR #388 合并而晋升父状态。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -456,8 +436,8 @@ T06 保持 `in_progress`。
 
 | ID | 状态 | 已实现 / 剩余边界 |
 | --- | --- | --- |
-| F01 | in_progress | 三种严格 fixture、单调 span、有界日志、macOS headless live 驱动器已实跑每 fixture 10 次预热 + 30 次测量，保留 LoginForm 编译失败/恢复样本；PR #380 squash 合并后，本轮在隔离 generated Counter 项目关闭 P-01 macOS cancel、superseded 和 native-install-failure 责任变体，保存 `cancelled`/`superseded` spans、窗口截图、受控 `ios.install` exit 73、未安装 app、lease owner 释放和临时 simulator 删除证据；主线 `7336d74` 又复跑真实 `capture.window`（PNG metadata、scene epoch、source/assets freshness）及 semantics `a11y_inactive`，没有把 `presented_frame_id=null` 或空语义树当通过；模板新增带许可证的 iOS-safe `backtrace 0.3.76` 快照，iOS simulator Rust check/Xcode build 已通过。剩余：P-02 T05/T06 联合对照、scene readback/verified present/完整语义与 action、跨平台 GUI/device 证据 |
-| T01 | in_progress | 合并基线有 target-aware JSON doctor、required/optional、有限输出和超时；`doctor_cli` integration test 已通过真实 CLI 生成 desktop-only 项目，覆盖显式 target、项目默认 target 和非项目 host-only，并核对 schema v2、required pass/可选 warning 与移动工具链隔离。PR #384 的 native `cc` nonzero helper 验证 required probe failure；PR #385 的 native `rustc` exit-0 畸形版本 helper 验证版本解析 failure，两个变体均在两套 Linux/macOS/Windows workflow 通过。PR #386 又在真实 GitHub Linux/macOS/Windows runners 上传 explicit/project-default desktop doctor artifacts：required 全 pass、target source 正确、移动 checks 隔离、secret canary absent；Windows 实际 MinGW `cc 15.2.0`，Linux `cc 13.3.0`，macOS Apple clang 21.0.0。主线 `7336d74` 的 Ubuntu 24.04/Linux x86_64 容器 doctor 也通过。PR #388 新增 x86_64 emulator match/mismatch driver，但 run `37532395454`/`37532401654` 均因 `sys.boot_completed` 长时间为空取消，未取得真实 ABI report，记录为 `emulator_boot_unavailable`。PR #387 修复 coordinator Windows 时序 deadline 并以 `2a54083` 合并；PR #389 只修复 live diagnostics 测试等待异步发布的时序边界并以 `f38d9df` 合并；主线 run `37540497454` 全绿。剩余：x86/unknown ABI 或 physical device、未建模 AGP/Gradle 组合边界验收 |
+| F01 | in_progress | 三种严格 fixture、单调 supervisor spans、有界日志、headless driver 和 macOS arm64 每 fixture 10 warmup + 30 measurement 已有；P-01 cancel/superseded/native-install-failure 有本机证据；2026-10-08 在 `8effdf9` release 复跑 4096×8192-byte full-scan oracle，10 warmup + 30 measured pairs，P50/P95=167.20/171.18 ms，manifest mismatch 与 wrong-revision acceptance 均为 0，raw JSON hash=`346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`。`device_clock_offset_does_not_change_supervisor_span_time` 的 L0 regression 定向和串行 workspace 通过；默认并行 workspace 有 4 个 process/helper timing failures，逐项复跑通过并保留原失败。剩余：PR CI、full baseline artifact upload；单机结果不晋升完整 P-02。T05/T06 分别负责 index/cache；scene/present/semantics 归 P01 observer 的 O-10/O-11。 |
+| T01 | in_progress | target-aware JSON doctor、required/optional、版本与 SDK 规则、CLI host-smoke 和 Linux/macOS/Windows host artifacts 已通过。PR #388 (`8effdf9`) 两套 CI 各 14 jobs 全绿；raw Android API 35 x86_64 AVD doctor 在 x86_64 build ABI 下 pass、在 arm64-v8a 下预期 fail。剩余：unknown-ABI physical device/真实 Android 设备选择和完整兼容边界；本机 `adb devices -l` 无设备，未以 emulator smoke 宣称 physical 通过。 |
 | P01 | in_progress | 有真实 macOS PoC；cancel/superseded/native-install-failure 变体已有隔离窗口、span、iOS simulator build/install-failure、cleanup/lease/device 证据，`7336d74` 复跑确认 window capture metadata 与 semantics `a11y_inactive`；scene readback、verified present、完整语义/action、完整设备证据和父任务 CI/review 仍有限 |
 | T02 | in_progress | 模板 manifest、嵌入内容摘要、增平台保护；真实历史内容的稳定取得仍不贯通 |
 | F02 | in_progress | 独立 protocol crate、v2、请求关联和 feature 边界；无在线 v1 兼容/事件投影，runtime 仍在模板内 |
@@ -781,7 +761,7 @@ cleanup-finalized report evidence 接线，
 本轮没有重跑 GUI 或设备验收；#233 补充 capture-only 同一 run/lease 身份字段，#235 将同一边界
 传播到 control-driven scenario evidence，#237 将已取得 capture metadata 写入事件序列。
 
-## 5.1 本轮接续与下一动作
+## 5.1 历史交接（PR #388 合并前）
 
 - 用户限定的 PR #388 CI 排障在 `5d09ab3` 达到实现/本地/hosted 出口：push
   `37728230531` / PR `37728233406` 各 14 jobs 全绿，原始 iOS runtime 证据已核验。
@@ -802,6 +782,13 @@ cleanup-finalized report evidence 接线，
 - 若恢复 F01：先核对既有 macOS attempt-05/06/07 与模板 CI 新基线，选择一个可重跑的 scene/present
   或语义证据缺口；保持 cancel/superseded/native-install-failure 已关闭，不把 `a11y_inactive` 或
   `presented_frame_id=null` 当作通过。
+
+## 5.2 最新接续（2026-10-08）
+
+- PR #388 已 squash 为 `8effdf9`，两套 run `37729846375` / `37729843264` 各 14 jobs 全绿；raw x86_64 AVD doctor 关闭该 ABI 的真实 emulator match/mismatch 子例。旧 boot 失败继续保留为历史实验，不再是当前恢复条件。
+- F01 的 P-01 clock-skew L0 regression 已通过本地定向测试及串行 workspace（主二进制 490 passed / 12 ignored）；默认并行 workspace 的 4 项 process/helper timing failure 逐项复跑通过，原失败保留。PR CI 尚待运行。large-input full-scan release baseline 在干净 `8effdf9` 上复跑，raw JSON hash 为 `346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`；baseline-driver 的 full 10+30 CI artifact 仍待接入，不把这次单机结果算作完整 P-02。
+- T01 仍缺 unknown-ABI physical device；本机当前无 adb 设备。F01 后按依赖回看 T01；若仍无可用 physical/unknown-ABI 环境，明确等待条件并停止在无可执行候选状态，不降低 required 标准。
+- F01/P01/T01 均保持 `in_progress`；当前状态没有把 P01 的 O-10/O-11 observer 缺口转嫁给 F01 的 P-02 responsibility。
 
 ## 6. 后续接续顺序
 

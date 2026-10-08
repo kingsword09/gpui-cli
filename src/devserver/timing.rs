@@ -341,6 +341,48 @@ mod tests {
     }
 
     #[test]
+    fn device_clock_offset_does_not_change_supervisor_span_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let timing = Arc::new(Timing::new(dir.path(), "session-clock-offset").unwrap());
+        let host_time_ms = now_ms();
+        let device_started_at_ms = host_time_ms.saturating_add(30 * 24 * 60 * 60 * 1000);
+        let device_ended_at_ms = host_time_ms.saturating_sub(30 * 24 * 60 * 60 * 1000);
+
+        let span = timing.start(
+            "device.capture",
+            &Scope::default(),
+            None,
+            serde_json::json!({
+                "device_clock": {
+                    "started_at_ms": device_started_at_ms,
+                    "ended_at_ms": device_ended_at_ms,
+                }
+            }),
+        );
+        thread::sleep(Duration::from_millis(1));
+        span.finish("ok", None);
+
+        let line = fs::read_to_string(dir.path().join("spans.ndjson")).unwrap();
+        let record: SpanRecord = serde_json::from_str(line.trim()).unwrap();
+        let started_at_ns = record.started_at_ns.unwrap();
+        let ended_at_ns = record.ended_at_ns.unwrap();
+
+        assert!(device_ended_at_ms < device_started_at_ms);
+        assert_eq!(
+            record.attributes["device_clock"]["started_at_ms"],
+            device_started_at_ms
+        );
+        assert_eq!(
+            record.attributes["device_clock"]["ended_at_ms"],
+            device_ended_at_ms
+        );
+        assert!(record.recorded_at_ms > device_ended_at_ms);
+        assert!(record.recorded_at_ms < device_started_at_ms);
+        assert!(ended_at_ns >= started_at_ns);
+        assert_eq!(record.duration_ns, Some(ended_at_ns - started_at_ns));
+    }
+
+    #[test]
     fn uninstrumented_stages_have_no_fake_duration() {
         let dir = tempfile::tempdir().unwrap();
         let timing = Arc::new(Timing::new(dir.path(), "session-2").unwrap());

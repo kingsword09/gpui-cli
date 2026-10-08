@@ -105,7 +105,7 @@ check、template、baseline-driver 均通过。push artifacts 为：
 Android x86/unknown ABI、physical device、移动 GUI/语义或 AGP/Gradle 全组合验收。artifact
 下载记录只保留在 GitHub run；本地复核摘要保存在 `/tmp/gpui-doctor-ci386/`，不写入仓库。
 
-## x86_64 Android emulator 尝试（PR #388，外部阻塞）
+## x86_64 Android emulator 初次尝试（PR #388，历史外部阻塞）
 
 PR #388（head `2948908`，尚未合并）新增固定 API 35 Google APIs x86_64 emulator 的
 T-03 match/mismatch driver：同一真实 emulator 以 `GPUI_ANDROID_ABIS=x86_64` 运行
@@ -118,3 +118,25 @@ emulator action 启动，但 `adb shell getprop sys.boot_completed` 在约 15 �
 恢复条件：提供能完成 x86_64 AVD boot 的 hosted runner/嵌套虚拟化配置，或提供真实 x86_64
 Android 设备；恢复后直接重跑 PR #388 的 job，不改变 doctor ABI policy。unknown ABI、physical
 device 和 AGP/Gradle 兼容边界仍为独立缺口。
+
+## x86_64 Android emulator 恢复验证（PR #388，2026-10-08）
+
+PR #388 合并为 `8effdf9` 后，两套完整 workflow run
+[`37729846375`](https://github.com/kingsword09/gpui-cli/actions/runs/37729846375) 和
+[`37729843264`](https://github.com/kingsword09/gpui-cli/actions/runs/37729843264) 均为 success，
+各 14 jobs 全部通过。与早期因 `sys.boot_completed` 为空取消的 runs
+`37532395454`/`37532401654` 区分，新 driver 先安装 emulator host libraries，再做 KVM
+acceleration preflight；本轮 x86_64 AVD 实际启动并进入 doctor。
+
+PR run `37729843264` 的 `android-emulator-doctor` artifact 绑定 source revision
+`5e276b9bba30279e148176ee695eeb84ec6a0c70`、`dirty=false`。`summary.json` 为 `status=pass`；
+`match-doctor.json` 的 selected Android device 为真实运行中的 API 35 x86_64 emulator，
+配置 `GPUI_ANDROID_ABIS=x86_64` 时 `android.selected_device=pass`。同一 device 改用
+`arm64-v8a` 配置后，`mismatch-doctor.json` 的 check 为预期 `fail`，driver 将这个拒绝结果
+核验为成功的 mismatch responsibility。PR artifact 可从上述 GitHub run 下载；push run
+也上传了同名 evidence。
+
+这关闭 T-03 的 hosted x86_64 emulator ABI match/mismatch 变体，不代表 physical Android
+device 或未知 ABI 设备通过。当前本机 `adb devices -l` 没有连接设备；unknown ABI 的真实
+设备选择、physical-device 证据，以及完整 AGP/Gradle 兼容范围仍保持未收口。Android smoke
+另有 `verified_present=false`、`gui_acceptance=not_run`，不替代 F01/P01 GUI、scene 或语义验收。
