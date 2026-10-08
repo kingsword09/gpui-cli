@@ -40,17 +40,15 @@ def disable_push_service(evidence: Evidence, device: str) -> dict:
     if not identity:
         raise RuntimeError("APNs service did not resolve to a simulator user domain")
     domain = identity[1]
-    evidence.run("push-service-disable", [*prefix, "disable", service], timeout=60)
-    disabled = evidence.run("push-service-disabled", [*prefix, "print-disabled", domain], timeout=60)
-    if not re.search(r'^\s*"com\.apple\.apsd"\s*=>\s*disabled\s*$', disabled["stdout"], re.MULTILINE):
-        raise RuntimeError("APNs service disable was not confirmed")
+    # This owned simulator is deleted after one boot. Removing the registration
+    # is sufficient; persistent launchd overrides add unnecessary state writes.
     evidence.run("push-service-stop", [*prefix, "bootout", service], timeout=60)
     after = evidence.run("push-service-after", [*prefix, "print", service], timeout=60, check=False)
     if (after["returncode"] != 113 or after.get("error")
             or 'Could not find service "com.apple.apsd"' not in after["stderr"]):
         raise RuntimeError("APNs service removal was not confirmed")
     result = {"device": device, "service": "com.apple.apsd", "domain": domain,
-              "disabled": True, "loaded": False, "push_notifications": "excluded_from_smoke"}
+              "loaded": False, "lifetime": "current_boot", "push_notifications": "excluded_from_smoke"}
     evidence.write("simulator-services.json", result)
     return result
 

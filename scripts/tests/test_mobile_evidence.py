@@ -479,14 +479,15 @@ class RuntimeTests(unittest.TestCase):
         for call in recorder.run.call_args_list:
             self.assertEqual(call.args[1][:5], ["xcrun", "simctl", "spawn", "owned-udid", "launchctl"])
         self.assertEqual(result, {"device": "owned-udid", "service": "com.apple.apsd", "domain": "user/502",
-                                  "disabled": True, "loaded": False, "push_notifications": "excluded_from_smoke"})
+                                  "loaded": False, "lifetime": "current_boot", "push_notifications": "excluded_from_smoke"})
+        self.assertEqual([call.args[1][5] for call in recorder.run.call_args_list], ["print", "bootout", "print"])
         recorder.write.assert_called_once_with("simulator-services.json", result)
 
-    def test_ios_push_service_requires_confirmed_disable_and_removal(self):
+    def test_ios_push_service_requires_confirmed_removal(self):
         module = self.load_driver("check-ios-simulator.py")
         invalid = (
             ("push-service-before", {"stdout": "system/com.apple.apsd = {"}),
-            ("push-service-disabled", {"stdout": '"com.apple.apsd" => enabled'}),
+            ("push-service-before", {"stdout": "user/502/other-service = {"}),
             ("push-service-after", {"returncode": 0, "stdout": "state = running", "stderr": ""}),
             ("push-service-after", {"returncode": 113, "error": "command exceeded 60s deadline"}),
             ("push-service-after", {"returncode": 1, "stderr": "permission denied"}),
@@ -498,11 +499,25 @@ class RuntimeTests(unittest.TestCase):
                 module.disable_push_service(recorder, "owned-udid")
             recorder.write.assert_not_called()
 
+    def test_ios_push_service_bootout_failure_is_not_reported_as_removal(self):
+        module = self.load_driver("check-ios-simulator.py")
+        recorder = self.push_service_recorder()
+        respond = recorder.run.side_effect
+        def fail_bootout(label, argv, **kwargs):
+            if label == "push-service-stop":
+                raise RuntimeError("bootout failed")
+            return respond(label, argv, **kwargs)
+        recorder.run.side_effect = fail_bootout
+        with self.assertRaisesRegex(RuntimeError, "bootout failed"):
+            module.disable_push_service(recorder, "owned-udid")
+        recorder.write.assert_not_called()
+        self.assertEqual([call.args[0] for call in recorder.run.call_args_list],
+                         ["push-service-before", "push-service-stop"])
+
     @staticmethod
     def push_service_recorder(overrides=None):
         responses = {
             "push-service-before": {"stdout": "user/502/com.apple.apsd = {\n\tstate = running\n}"},
-            "push-service-disabled": {"stdout": '\tdisabled services = {\n\t\t"com.apple.apsd" => disabled\n\t}'},
             "push-service-after": {"returncode": 113, "stderr": 'Bad request.\nCould not find service "com.apple.apsd" in domain for user/502\n'},
         }
         for label, response in (overrides or {}).items():

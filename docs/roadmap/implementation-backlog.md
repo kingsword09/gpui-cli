@@ -33,6 +33,12 @@ APNs certificate/reconnect 噪声，本轮显式隔离 CI 自建 simulator smoke
 单次 launch/deadline/required/进程/截图标准保留，APNs 不属于此 smoke 验收范围。
 最终服务隔离 driver 在本地真实新建 iOS 26.2 simulator 验证及清理通过；尚不等同于
 新的 hosted GPUI launch/runtime pass。
+第五轮 `f78aee2` 的 PR run `37724359228` 全绿，push run `37724354473` 因新增
+持久化 `launchctl disable` 超时失败；本轮仅保留当前 boot 的 bootout/absence 核验，
+去掉临时 simulator 不需要的持久化 override。41 项 driver 回归通过，新 hosted
+结果待核验；不改变 doctor、单次 launch、GUI/父任务状态。
+直接 bootout 的最终 driver 本地真实服务/cleanup 验证通过；上一版 PR 原始完整 smoke
+也已核验，精简后的实现仍需对应新 hosted 结果，不继承旧版本 pass。
 同日已在 PR #388 现有分支本地合入 `origin/main`=`2f85842` 并解决路线文档冲突，
 以分层 jobs/driver 替代旧 emulator-only 检查；用户已明确授权提交推送，等待发布提交
 对应的实际 hosted artifacts，不改变父任务状态。

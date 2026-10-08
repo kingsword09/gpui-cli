@@ -242,6 +242,38 @@ disabled 已确认、bootout 成功、print 返回 113/service-not-found，随�
 Rust 实现，完整 Rust 验证沿用上节 `a43b3c8` 前后的记录，新 hosted runtime 仍待核验。
 这些环境调整不晋升 GUI/首帧/输入/语义、APNs/真机或父任务。
 
+### 第五轮 hosted 结果与临时服务卸载（`f78aee2`）
+
+PR run `37724359228` 的 14 jobs 全绿；push run `37724354473` 的 13 jobs 通过，
+仅 iOS smoke 的 `push-service-disable` 60s timeout 失败，实测含回收耗时 84.60s。
+push build/boot/owned cleanup 通过；service-before 为 45.14s，尚未进入新 live
+doctor/launch，不能把这次 timeout 当作应用失败或 APNs 隔离已完成。
+push 选定原始证据在 `artifacts/ci/37724354473/ios-smoke-selected/`。
+
+本次临时 simulator 不会再次 boot，且退出后立即删除，不需要 persistent launchd
+disable override。driver 移除该状态写入和 `print-disabled` 查询，只保留实际 user
+domain/精确 service、`bootout` 和确切 service-not-found 验证。报告声明
+`loaded=false` / `lifetime=current_boot`，不再声明持久 disabled；服务控制 60s、
+应用单次 launch/180s 和 required/稳定 PID/PNG 标准保持不变。任何 bootout 或验证
+失败仍 fail 并清理 owned UDID。
+
+41 项 driver 回归、Python compile、actionlint、diff checks 通过；新增 bootout 失败
+拒绝发布成功报告，保留 scope/absence/域错误与 cleanup 变体。最终本地直接 bootout
+与修复后的 hosted runtime 需另行绑定证据，不能继承上一版服务准备的本地 pass。
+
+PR 原始证据已核验（`artifacts/ci/37724359228/ios-smoke-selected/`）：source 为
+`f78aee2` 的测试合并提交 `f1f43c5`、dirty=false，driver/workflow hashes 匹配。
+service-before/disable 分别 36.18s/56.45s，bootout/absence 验证分别 1.18s/1.33s；
+live doctor 无重试，单次 launch 1.49s，PID=20494、1179×2556 PNG 和 cleanup 通过。
+PNG SHA-256=`4b8bb51d9bebd57c2196c84a1c87ffb88db7fe0658e36964a091708bbba171ad`。
+这证明该次服务隔离后完整 smoke 通过，不证明所有 runner 上的唯一故障原因。
+
+精简后的最终 driver 已在另一个新建本地 iOS 26.2 simulator 实跑通过：直接 bootout
+8.49s，absence 验证 7.06s，并删除 owned UDID；原始证据在
+`artifacts/ci/f78aee2-apsd-local-bootout/`，报告为 `loaded=false/lifetime=current_boot`。
+41 项回归、Python compile、actionlint、design-doc/diff 检查通过。新 hosted runtime
+仍待发布后的实际 run；不将此次本地服务验证称为完整 GPUI 应用验收。
+
 ### 发布与后续验收
 
 `2eb7285`/`d9dc35b` 两轮 hosted 结果已如上核验；live iOS timeout-only 修复尚待新 run，GitHub PR 尚未合并。2026-10-08 已在

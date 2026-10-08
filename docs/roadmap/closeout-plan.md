@@ -38,8 +38,8 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | 用户指定 PR #388 CI 修复：`a43b3c8` push 全绿，PR live doctor 已通过但 launch 180s timeout。已依据 APNs log storm 增加自建 simulator smoke 专用服务隔离，40 项 driver 回归通过；继续实测服务与新 hosted runtime。Android/iOS 既有证据保留，T01/F01/P01 父状态不变 |
-| 首批候选 | 验证并发布 CI smoke APNs 隔离，核验新 push/PR 的 service state、单次 launch、PID/capture/cleanup；不能以配置存在标 pass。T01 unknown ABI/physical/AGP 边界仍待对应环境；仅在整体路线恢复时回到 F01 scene/present/semantics 原出口 |
+| 当前执行游标 | 用户指定 PR #388 CI 修复：`f78aee2` PR 全绿，push 卡在新增 persistent disable；APNs 隔离现收敛为当前 boot 的 bootout/absence 核验，41 项回归通过，继续真实服务和新 CI 核验。既有 doctor/runtime 证据保留，父状态不变 |
+| 首批候选 | 验证并发布临时 simulator 的最小 APNs 隔离，核验新 push/PR service/launch/PID/capture/cleanup；T01 unknown ABI/physical/AGP 边界仍待对应环境；仅在整体路线恢复时回到 F01 scene/present/semantics 原出口 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
@@ -107,6 +107,22 @@ UDID 清理通过。push 的 PID=26376、1179×2556 PNG/hash 与 cleanup 已核�
 | acceptance / 依赖 | 同一用户指定移动 CI 切片，T01 无硬前置；启动 smoke 为 F01/P01 平台证据设施，不晋升父任务或解除硬依赖 |
 | 非目标 | 不扩大 timeout、不重试 launch、不吞非零退出/真实 crash；不修改宿主或既有 simulator 服务，不扩展 renderer、Android 或核心路线。此 smoke 不覆盖 APNs 推送能力 |
 | 有界出口 / 恢复 | 收集启动失败原始证据，完成针对性修复和回归，发布并核验两套 CI；如有外部环境阻塞，记录准确恢复条件，不伪造 runtime pass。review/merge 与完整 GUI/真机责任独立保留 |
+
+### 第五轮环境准备纠偏（`f78aee2`）
+
+push run `37724354473` 的 13 jobs 通过，iOS smoke 卡在新增的 `launchctl disable`
+60s deadline，尚未进入新 doctor/launch；PR run `37724359228` 的 14 jobs 全绿。
+持久化 disabled override 对本次只 boot 一次、结束即删除的 owned simulator 并非必要。
+本轮把 APNs 隔离收敛为 `bootout` 当前 service registration 加确切 absence 验证，
+不再写/读取持久化 disable 状态；报告只声明当前 boot 已卸载，不声明 persistent disable。
+保持原服务控制/应用 launch 的 deadline 与单次 launch，不重跑或吞掉应用失败。
+先补“不允许 bootout 失败仍通过”及 absence/域校验回归，再在新的本地 iOS 26.2
+simulator 验证直接 bootout 和 cleanup；后续须绑定新 push/PR 原始 runtime 证据。
+父任务、GUI/真机与 APNs 验收边界保持不变，失败实验不标作已稳定修复。
+PR 原始证据已核验：service removal 后 doctor 无重试，launch 1.49s，PID=20494、
+1179×2556 PNG/hash 与 cleanup 通过。精简后的直接 bootout driver 又在新建本地
+iOS 26.2 simulator 验证当前 boot 服务移除及 cleanup 通过；41 项回归、Python compile、
+actionlint、design-doc/diff checks 通过。下一动作是发布并核验精简版两套 hosted CI。
 
 ### 历史执行卡：F01 / P-01 iOS simulator native-install-failure
 

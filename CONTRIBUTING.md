@@ -63,8 +63,10 @@ summary records recovery counts. Missing tools, invalid versions/targets and
 device identity errors fail without retries; persistent timeouts still fail.
 
 CI passes `--disable-push-service` only to iOS smoke. On its newly created
-simulator, the driver disables and removes `com.apple.apsd` from the simulator's
-foreground user domain, verifies both states, and records `simulator-services.json`.
+simulator, the driver removes `com.apple.apsd` from the simulator's foreground
+user domain with `bootout`, verifies its absence, and records `simulator-services.json`.
+The scope is the current boot; no persistent launchd disable override is needed
+because the owned simulator is deleted after the run.
 This avoids the APNs certificate/reconnect log storm observed on the hosted iOS
 26.2 runtime. Service setup failures fail the job and still delete the owned
 simulator. Cold doctor/build and default local smoke keep their normal services;
