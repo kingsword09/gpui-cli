@@ -1,13 +1,22 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-07，主分支 `2a54083`（PR #387 squash merge）。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-07，主分支 `f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
 cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
 PR #382 又合并 T01 doctor CLI host-smoke integration test，PR #383 又覆盖 explicit/project-default/
 host-only target selection，PR #384/#385 又合并 required `cc` nonzero 与 malformed-successful-version
-CLI responsibility 变体，PR #386 又上传三平台 host doctor artifacts，PR #387 修复 Windows coordinator
-state publication 测试 deadline，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
+CLI responsibility 变体，PR #386 又上传三平台 host doctor artifacts，PR #387 修复 Windows
+coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 为 `f38d9df`，主线 run `37540497454` 全绿；PR #388 的 x86_64 emulator job 因 hosted boot
+不可用保持未合并，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
+
+2026-10-08 接续：基线 `2f85842`，本轮新增分层移动 CI；其实现和本地/CI/
+设备边界见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。PR #388 历史取消
+保留，但先修复可配置 KVM 权限及 required cargo-ndk 准备，不再仅等待未知外部 runner。
+新 hosted CI 尚未运行，35 个父任务的状态/计数不变。
+同日已在 PR #388 现有分支本地合入 `origin/main`=`2f85842` 并解决路线文档冲突，
+以分层 jobs/driver 替代旧 emulator-only 检查；用户已明确授权提交推送，等待发布提交
+对应的实际 hosted artifacts，不改变父任务状态。
 执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
@@ -120,6 +129,13 @@ CI、review/merge、跨平台 GUI/device 验收，以及 T05/T06 索引/缓存�
 
 ### T01 · Target-aware doctor
 
+本轮新增独立 cold/live doctor 驱动；本机真实 iOS 26.2 stopped UDID + unknown UDID、
+Android API 35 ARM64 AVD 的 ABI match/mismatch 已通过。Cold 不证明实际启动；Ubuntu
+x86_64 cold/live jobs 虽已配置，仍需真实 run/artifact。完整 Debug `.app`/APK 与平台
+process/capture smoke 是另外的构建/可行性证据设施，不抵消 T01 的 unknown ABI、physical
+device、AGP/Gradle 边界，也不关闭 P01/M01 的硬依赖。详见上述切片记录，T01 仍为
+`in_progress`。
+
 代码落点：`src/commands/doctor.rs`、`src/config.rs`、`src/device/inventory.rs`；拟议 `src/toolchain/{probe,report,requirements}.rs`。
 
 1. 抽取按目标解析的 requirements，不再把所有平台工具都作为 host 的硬要求。
@@ -145,8 +161,8 @@ exit-0 malformed `rustc` version，均通过两套 Linux/macOS/Windows workflow�
 合并为 `f8192d6`，对应
 Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI 全绿。PR #381
 又在 desktop-template CI 中加入 iOS simulator target check；PR #382/383 的两套 Linux/macOS/Windows
-workspace/template/baseline-driver workflow 也全绿，并以 `757f05b` squash 合并；PR #384/#385/#386/#387
-分别 squash 为 `285893f`/`287c3c7`/`3772750`/`2a54083`。CI 的
+workspace/template/baseline-driver workflow 也全绿，并以 `757f05b` squash 合并；PR #384/#385/#386
+分别 squash 为 `285893f`/`287c3c7`/`3772750`；PR #389 已 squash 为 `f38d9df`，主线 run `37540497454` 全绿。CI 的
 编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。真实 x86/未知 ABI
 设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
 
