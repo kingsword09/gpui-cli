@@ -16,8 +16,12 @@ coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 
 首轮 hosted push/PR runs `37711864318`/`37711867631` 绑定 `2eb7285`，整体失败；
 完整 Android x86_64 native build 通过，cold metadata/缺 `libpulse0`/iOS required
 XcodeGen 和 device Rust target 的 bootstrap 缺口已定位并准备修复。27 个离线回归及
-本地 ARM64 isolated cold doctor 通过；用户已授权提交推送修复，新 hosted CI 结果待核验，
+本地 ARM64 isolated cold doctor 通过；bootstrap 修复已以 `d9dc35b` 提交推送，
 35 个父任务的状态/计数不变。
+第二轮 push/PR runs `37714516656`/`37714519942` 各 14 jobs 仅 iOS smoke 失败；
+Android x86_64 cold/live ABI 与 process/capture smoke、iOS cold doctor/native build
+通过，但不是 GUI/父任务通过。两套 iOS boot 后工具 probes 超时，已添加仅 live iOS
+timeout-only 有界重探、33 项回归；用户已授权本轮修复提交推送，完整 iOS runtime 仍待新 CI。
 同日已在 PR #388 现有分支本地合入 `origin/main`=`2f85842` 并解决路线文档冲突，
 以分层 jobs/driver 替代旧 emulator-only 检查；用户已明确授权提交推送，等待发布提交
 对应的实际 hosted artifacts，不改变父任务状态。
@@ -167,8 +171,9 @@ Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI
 又在 desktop-template CI 中加入 iOS simulator target check；PR #382/383 的两套 Linux/macOS/Windows
 workspace/template/baseline-driver workflow 也全绿，并以 `757f05b` squash 合并；PR #384/#385/#386
 分别 squash 为 `285893f`/`287c3c7`/`3772750`；PR #389 已 squash 为 `f38d9df`，主线 run `37540497454` 全绿。CI 的
-编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。真实 x86/未知 ABI
-设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
+编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。未合并 PR #388
+的 `d9dc35b` 已取得 Ubuntu x86_64 cold/live AVD ABI match/mismatch 责任证据；未知 ABI
+真实设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
 
 若选中 T01：先复核 `probe::run_command` 的“成功退出即 Passed”与版本校验的区别，
 补畸形/不兼容版本回归及 expected/actual 规则，再完成 T-01/T-02/T-03 对应本地/原生证据。

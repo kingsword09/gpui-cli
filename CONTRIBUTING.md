@@ -53,6 +53,13 @@ preflight. iOS jobs install XcodeGen and both `aarch64-apple-ios` and
 `aarch64-apple-ios-sim`; doctor requires the device target even when the selected
 device is a Simulator. These preparations do not replace the required checks.
 
+Only iOS smoke's live doctor may re-probe a case up to twice, 15 seconds apart,
+when its selected-device check is correct and every unrelated required failure
+is explicitly a probe timeout. Each failed report is retained separately;
+`doctor-result.json` identifies the final validated reports, and the smoke
+summary records recovery counts. Missing tools, invalid versions/targets and
+device identity errors fail without retries; persistent timeouts still fail.
+
 The smoke summaries deliberately retain `verified_present=false`,
 `application_ready=not_instrumented` and `gui_acceptance=not_run`. Process
 survival and a device screenshot do not establish app-owned pixels, verified

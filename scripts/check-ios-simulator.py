@@ -98,7 +98,7 @@ def main() -> int:
                 details["build_status"] = "pass"
                 if args.mode == "smoke":
                     evidence.run("boot", ["xcrun", "simctl", "bootstatus", device, "-b"], timeout=300)
-                    doctor(evidence, gpui, "ios", device, "live")
+                    details["live_doctor"] = doctor(evidence, gpui, "ios", device, "live", timeout_retries=2)
                     details.update(smoke(evidence, app, device))
     except Exception as error:
         failure = scrub(str(error))

@@ -171,9 +171,35 @@ def validate_doctor(report: dict, target: str, expected: str, phase: str,
                 raise RuntimeError("doctor did not check the configured build ABI set")
 
 
+def retryable_ios_doctor_timeouts(report: dict, device: str, expected: str) -> bool:
+    if report.get("schema_version") != 2 or report.get("target") != {
+        "id": "ios", "source": "cli", "explicit": True,
+    } or report.get("overall") != ("unknown" if expected == "pass" else "fail"):
+        return False
+    selected = selected_check(report, "ios")
+    if selected.get("status") != expected:
+        return False
+    actual = selected.get("actual", {})
+    if expected == "pass":
+        if (actual.get("id") != device or actual.get("kind") != "emulator"
+                or actual.get("platform") != "ios" or actual.get("state", {}).get("kind") != "running"):
+            return False
+    elif actual.get("available") is not False:
+        return False
+    failures = [check for check in report["checks"] if check.get("required") is True
+                and check.get("id") != "ios.selected_device" and check.get("status") != "pass"]
+    timeout_reasons = {"probe timed out", "total probe deadline exceeded before this check ran"}
+    return bool(failures) and all(check.get("status") == "unknown" and check.get("reason") in timeout_reasons
+                                  for check in failures)
+
+
 def doctor(evidence: Evidence, gpui: Path, target: str, device: str,
-           phase: str, abi: str = "x86_64") -> None:
+           phase: str, abi: str = "x86_64", *, timeout_retries: int = 0) -> dict:
+    if timeout_retries not in (0, 1, 2) or (timeout_retries and (target != "ios" or phase != "live")):
+        raise ValueError("bounded doctor timeout retries are only supported for live iOS")
     env = {**os.environ, "GPUI_DOCTOR_SECRET_CANARY": CANARY}
+    retries = []
+    reports = {}
     with tempfile.TemporaryDirectory(prefix="gpui-mobile-doctor-") as scratch:
         root = Path(scratch)
         project = root / PROJECT_NAME
@@ -188,13 +214,35 @@ def doctor(evidence: Evidence, gpui: Path, target: str, device: str,
             if target == "android":
                 case_env["GPUI_ANDROID_ABIS"] = abi if label == "match" else (
                     "arm64-v8a" if abi == "x86_64" else "x86_64")
-            command = evidence.run(label, [str(gpui), "doctor", "--json", "--target", target,
-                                           flag, selector], cwd=project, env=case_env, check=False)
-            report = json.loads(command["stdout"])
-            evidence.write(f"{label}-doctor.json", report)
-            if command["returncode"] != expected_exit:
-                raise RuntimeError(f"doctor {label} exit was {command['returncode']}, expected {expected_exit}")
-            validate_doctor(report, target, expected, phase, device, abi)
+            for attempt in range(timeout_retries + 1):
+                attempt_label = label if attempt == 0 else f"{label}-retry-{attempt}"
+                command = evidence.run(attempt_label, [str(gpui), "doctor", "--json", "--target", target,
+                                                       flag, selector], cwd=project, env=case_env, check=False)
+                report = json.loads(command["stdout"])
+                report_name = f"{attempt_label}-doctor.json"
+                evidence.write(report_name, report)
+                try:
+                    if command["returncode"] != expected_exit:
+                        failures = [(check.get("id"), check.get("status"), check.get("reason"))
+                                    for check in report.get("checks", [])
+                                    if check.get("required") is True and check.get("status") != "pass"]
+                        raise RuntimeError(f"doctor {attempt_label} exit was {command['returncode']}, "
+                                           f"expected {expected_exit}; required failures: {failures!r}")
+                    validate_doctor(report, target, expected, phase, device, abi)
+                except RuntimeError:
+                    if (attempt >= timeout_retries or command["returncode"] != 1
+                            or not retryable_ios_doctor_timeouts(report, device, expected)):
+                        raise
+                    retries.append({"failed_report": report_name, "next_attempt": attempt + 1,
+                                    "delay_seconds": 15, "reason": "required_probe_timeouts_only"})
+                    evidence.write("doctor-retries.json", retries)
+                    time.sleep(15)
+                else:
+                    reports[label] = report_name
+                    break
+    result = {"timeout_retries_used": len(retries), "reports": reports}
+    evidence.write("doctor-result.json", result)
+    return result
 
 
 def validate_png(data: bytes) -> dict:

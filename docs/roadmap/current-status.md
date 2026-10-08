@@ -19,8 +19,8 @@ doctor、两端完整 Debug native build 和 process/capture smoke；本机 iOS 
 ARM64 cold ABI match/mismatch、完整 iOS `.app` 与 Android ARM64 APK 构建通过；iOS smoke 的早期 boot-first
 尝试在 300s deadline 前未完成 System App 启动，失败证据和 owned simulator 删除均保留。
 新 driver 改为独立构建层，runtime 所需 boot/Metal 不阻断 build job。
-完整范围和逐层证据见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。新 hosted
-CI/review/merge、x86 live、真实 renderer/首帧/输入/语义和物理设备仍未验收；父任务计数不变。
+完整范围和逐层证据见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。完整 hosted
+CI/review/merge、真实 renderer/首帧/输入/语义和物理设备仍未验收；父任务计数不变。
 
 首轮发布 `2eb7285` 的 push/PR runs `37711864318`/`37711867631` 已完成且整体失败：
 三平台 checks、templates、driver 回归和完整 Android x86_64 Debug APK 构建通过。
@@ -28,13 +28,23 @@ KVM 权限/加速可用，但 emulator version 缺 `libpulse.so.0`；cold AVD �
 selected-device report 缺 ABI metadata；iOS 缺 required XcodeGen 和
 `aarch64-apple-ios` target。workflow 已准备显式宿主库、共享 AVD metadata 根、
 XcodeGen/两 Rust targets 的修复；27 项回归及本地 ARM64 isolated cold doctor 通过。
-用户已授权提交推送此次修复，新 CI 结果待核验，不能将本地 ARM64 metadata 验证扩展为 hosted x86/live 通过。
+该 bootstrap 修复已以 `d9dc35b` 提交推送；其实际 hosted 结果见下文，不由本地 ARM64 结果推导。
+
+第二轮 `d9dc35b` 的 push/PR runs `37714516656`/`37714519942` 已完成：各 14 jobs
+只有 iOS smoke 失败，其余成功。push 原始 artifacts 已验证 Android x86_64 cold/live
+match/mismatch、完整 APK、稳定包 PID/1080×1920 PNG/uninstall、iOS cold doctor/
+独立 app build/owned UDID 删除；`verified_present=false`、`gui_acceptance=not_run`。
+两套 iOS smoke 均完成 app build 和 boot，selected-device=running/pass，但工具
+probes 多项 required/unknown timeout，总 deadline 导致 Rust targets 未执行；PR 的
+simctl probe duration 为 89922ms，不能把配置的 5 秒预算当作实际硬截止证据。
+尚未进入 Metal/install/launch。仅对 live iOS 增加 timeout-only 有界重探与逐次原始报告
+留存，33 项离线回归通过；用户已授权本轮修复提交推送，新 CI 结果待核验，不宣称 iOS runtime 通过。
 
 同日按用户要求继续整合 PR #388：已切换现有 `codex/t01-android-x86-abi-evidence`
 分支，以 `49a6a3a` 为起点合入 `origin/main`=`2f85842`，
 三份路线文档冲突已解决，旧 `doctor-android-emulator` job/driver 由分层实现替代。
 原工作区有独立备份和 stash；用户已明确授权创建提交并推送到 PR 分支以触发 CI。
-首轮 hosted run/job/artifact 已按上文核验，bootstrap 修复仍待新 CI，PR 未合并。
+两轮 hosted run/job/artifact 已按上文核验，新 timeout-only driver 修复仍待新 CI，PR 未合并。
 整合后默认并行完整 workspace test 通过（主二进制 489 passed / 12 ignored），
 23 个 Python 回归、actionlint、fmt、Python compile 和文档/diff 检查通过；
 不覆盖未运行的 hosted/设备 runtime 验收，历史默认并行失败记录仍保留。
@@ -783,9 +793,10 @@ cleanup-finalized report evidence 接线，
 
 ## 5.1 本轮接续与下一动作
 
-- 用户本轮指定分层移动 CI，不推进整个核心路线；PR #388 已发布 `2eb7285`，首轮
-  两套 CI 的 bootstrap failures 与 Android x86_64 native build pass 已核验。新修复
-  已获提交推送授权，下一动作是核对重跑的各层 artifact；PR 未合并，不晋升父状态。
+- 用户本轮指定分层移动 CI，不推进整个核心路线；PR #388 已发布 `d9dc35b`，第二轮
+  只有 iOS smoke 的 boot 后工具超时失败。新 timeout-only 重探实现/33 项回归已完成，
+  用户已授权提交推送；下一动作是新 CI 核验完整 live doctor/Metal/install/process/capture/cleanup。
+  原始失败报告保留，PR 未合并，不晋升父状态。
 - PR #388 的历史取消不能继续当作“hosted Linux 不支持 emulator”的结论：已有可配置的
   KVM 权限缺口，且 Android doctor 的 required cargo-ndk 需要显式安装。本轮已准备配置，
   仍需真实 hosted run 验证 boot、actual ABI 和 required-only mismatch。

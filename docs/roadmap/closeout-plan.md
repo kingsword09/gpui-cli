@@ -38,8 +38,8 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | 用户指定分层移动 CI 切片：首轮 `2eb7285` 两套 CI 的完整 Android x86_64 native build 通过，但 cold metadata、emulator 缺 libpulse0、iOS 缺 required XcodeGen/device Rust target 使整体失败；bootstrap 修复已准备，27 个回归及本地 ARM64 isolated cold doctor 通过，用户已授权提交推送修复，新 CI 结果待核验。不声称 GUI 验收，T01/F01/P01 父状态不变；详见下方工作卡和移动 CI 切片 |
-| 首批候选 | open PR #388 的本地整合/路线文档冲突已解决，用户已授权提交推送，下一动作是核验发布提交对应的新 CI 各层 artifact；KVM/cargo-ndk 准备已是可执行配置，不再只等待未知 runner。T01 unknown ABI/physical/AGP 边界仍待对应环境；仅在整体路线恢复时回到 F01 scene/present/semantics 原出口，不从 smoke 倒推硬依赖完成 |
+| 当前执行游标 | 用户指定分层移动 CI 切片：bootstrap 修复 `d9dc35b` 两套 CI 各 14 jobs 只有 iOS smoke 失败；Android x86_64 cold/live doctor 与 process/capture smoke、iOS cold/native build 已通过。iOS boot 后 required 工具 probes 超时，timeout-only 有界重探实现与 33 项回归通过，用户已授权提交推送，新 CI 结果待核验。不声称 GUI 验收，T01/F01/P01 父状态不变；详见移动 CI 切片 |
+| 首批候选 | 先提交推送新的 live iOS timeout-only 重探修复并核验新 CI 的逐次报告、Metal/install/process/capture/cleanup；原始 failures 保留，不能以 retry 配置存在标 pass。T01 unknown ABI/physical/AGP 边界仍待对应环境；仅在整体路线恢复时回到 F01 scene/present/semantics 原出口，不从 smoke 倒推硬依赖完成 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
@@ -51,7 +51,7 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 基线 / 范围 | 初始 `HEAD` 与 `origin/main` 均为 `2f85842`；已复核 `f38d9df` 之后三份路线文档变更。现有 PR #388 分支以 `49a6a3a` 为起点合入该主线并解决冲突，用户已授权提交推送。本轮只落实用户指定的 Android/iOS 分层 CI，不启动整体路线循环 |
 | 实现缺口 | 已实现 Android/iOS cold doctor、Android live doctor 的 KVM preflight/boot deadline/失败报告、独立完整 Debug native build 与进程/capture/cleanup smoke；cold/live 均准备 required cargo-ndk，初始生成 Cargo.lock，合法 Gradle cache bypass 不阻断真实 APK 检查 |
 | 本地测试缺口 | 23 个 driver 回归通过，覆盖 failure-before-assert、ABI/phase/identity、PNG 校验/解压、timeout/秘密筛除、独立 build、manifest 目录根/cache bypass 与 failed-install cleanup；iOS/Android ARM64 cold doctor、完整 iOS native build 和 ARM64 APK 已通过。本地 iOS boot-first smoke 300s 等待 System App 超时但 owned simulator 删除通过；新 build-first runtime 仍待实际运行 |
-| CI 缺口 | `2eb7285` 的 push/PR runs `37711864318`/`37711867631` overall=failure；三平台 checks/templates/drivers 与完整 Android x86_64 APK 通过，其余移动 jobs 的 bootstrap 缺口已定位。修复已获提交推送授权，重跑须绑定新 workflow run/job/artifact，不继承旧主线全绿结果 |
+| CI 缺口 | `d9dc35b` 的 push/PR runs `37714516656`/`37714519942` overall=failure；仅 iOS smoke 的 boot 后工具 timeout 失败，其他 jobs success。push cold/live doctor reports/Android PNG 与 summary 已严格复核。新的 timeout-only 重探已获用户授权提交推送，须绑定新 workflow run/job/artifact，不继承旧主线全绿结果 |
 | GUI / 设备缺口 | process/capture smoke 不证明 scene readback、verified present、输入/语义、真实前台归属或 physical device；Metal probe 失败须留下 failure，不跳过后声称运行通过 |
 | acceptance / 依赖 | T01 的 T-01/T-03 cold inventory 与 live x86 ABI responsibility；T01 无硬前置。完整应用 smoke 是 F01/P01 的平台可行性证据设施，不晋升依赖 F01/T01 的 P01 或 M01/M-01/M-02 |
 | 非目标 | 不增加 XCTest/instrumentation 测试系统、不修改 GPUI renderer、不接公共 PR self-hosted runner、不降低原 live ABI 责任、不宣称 GUI/真机验收或父任务完成 |
@@ -67,6 +67,13 @@ iOS required tools，不修改 doctor ABI/required 策略或 renderer。27 项�
 Python compile、文档/diff checks 和本地 ARM64 isolated cold match/mismatch 已通过；
 修复已获提交推送授权，须核对重跑的 x86 metadata/live 以及 iOS build/boot/runtime/cleanup。
 失败报告、当前代码、父任务状态和 GUI 缺口保持分离；不从 Android APK pass 推导 GUI pass。
+
+第二轮有界出口：`d9dc35b` bootstrap 各层已取得 hosted job/部分 raw evidence，唯独
+iOS smoke 在 build/boot 成功后多工具超时。每个 live iOS doctor 用例只允许两次、
+间隔 15 秒的明确 timeout-only 重探，逐次报告保留；缺工具/版本/target/selector 错误
+不重试，最终不通过仍失败。33 项回归、Python compile、actionlint、文档/diff 检查通过；
+本轮修复已获用户授权提交推送，尚未取得新 runtime pass。下一动作是新 CI 核验最终报告及真实 smoke，
+不是晋升 GUI/首帧/父任务。
 
 ### 历史执行卡：F01 / P-01 iOS simulator native-install-failure
 

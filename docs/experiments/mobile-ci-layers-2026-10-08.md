@@ -127,17 +127,63 @@ capture/cleanup artifacts。新修复的本地验证与 hosted 重跑结果须�
 用户已授权提交推送此次修复；27 项回归、Python compile、actionlint 和文档/diff checks 通过，
 没有修改 Rust 实现或重跑完整 native build，不借本地工具齐备推断 runner 修复通过。
 
+### 第二轮 hosted 排障工作卡（`d9dc35b`）
+
+2026-10-08，push run `37714516656` / PR run `37714519942` 已完成且整体失败。
+两套 14 jobs 中只有 `ios-simulator (smoke)` 失败；Android cold/live doctor、完整
+x86_64 APK、Android process/capture smoke、iOS cold doctor 和完整 Simulator build
+及其他常规 jobs 均显示 success。job 成功不自动关闭 GUI/父任务责任。
+
+本轮有界出口是从失败 artifact 定位 iOS boot 后 live doctor 的实际 required failure，
+仅修复已证实的 driver/runtime 时序或代码缺陷，添加针对性离线回归，并保留失败报告
+与清理证据。不降低 required checks、不吞失败、不先假设 Metal/renderer 已坏；不改
+APK build 或其他已通过层。T01 无硬前置，smoke 仍不晋升 F01/P01/M01。
+
+两套失败日志均显示 `doctor match exit was 1, expected 0`。push artifact 已核验：
+完整 app build、bootstatus 和 owned UDID 清理均成功；boot 后的 live doctor 中
+`rust.rustc`、`rust.cargo`、`rust.rustup`、`ios.xcodebuild`、`ios.simctl` 为 required/
+unknown、`probe timed out`（约 5–8.5 秒），两个 required Rust targets 因 30 秒总
+deadline 未执行。宿主版本探测在 boot 前仅需约 0.07–0.47 秒；这与 boot 后调度
+压力一致，但报告不证明其底层原因。未进入 host Metal 或应用安装/启动，不可诊断为
+renderer/Metal 失败。PR raw report 也已核验：上述 required timeouts 之外还含
+`ios.xcodegen` timeout；`ios.simctl` 实测 duration=89922ms。两套 selected-device
+均为 running/pass，清理成功。报告只证明 deadline failure，不证明宿主调度压力的
+底层原因，也不证明配置的 5 秒/30 秒预算实现了硬截止。
+
+针对该明确边界，已仅在 iOS live doctor 的每个用例增加至多两次、间隔 15 秒的 timeout-only
+重探：必须是 schema/selector 身份正确、selected-device 状态符合用例、其余 required
+failure 全为明确 probe/total deadline 超时；非零工具、缺工具、版本/target/selector
+错误不重试。每次原始失败报告先持久化，不改 CLI 的 5 秒/30 秒预算；最终仍须完整
+通过严格验证，否则失败。cold/Android 默认不重试；此修复不代表 GUI/首帧验收。
+`doctor-retries.json` 保留失败报告引用/延迟；`doctor-result.json` 绑定最终通过严格验证
+的报告，summary.live_doctor 记录使用的 retry 数，初次失败报告不会被覆盖。未恢复
+时仍失败；额外工具退出/required failure 会直接停止，不把它算作 transient。
+
+33 项离线回归已通过，新增恢复后失败报告留存、重探耗尽、非 timeout/错身份不重探、
+负例 unrelated timeout 不算成功、默认/cold/Android 禁用重探、smoke 参数接线；
+Python compile、actionlint 和文档/diff 检查通过。用户已授权本轮修复提交推送，真实 live iOS
+重探恢复与后续 Metal/install/process/capture 仍待新 CI；没有修改 Rust probes/renderer。
+
+push artifacts 的 Android cold/live match/mismatch 和 iOS cold selector 报告已由
+同一严格 validator 重读通过；Android smoke 的 1080×1920 PNG 完整性/CRC/hash
+与 summary 一致，package PID=4162、uninstall=pass；独立 Android/iOS build=pass，
+所有 source revision=`d9dc35b`、dirty=false。仍不证明前台归属、app-owned pixels 或 GUI。
+原始 downloaded artifacts/logs/jobs 留存在 ignored
+`artifacts/acceptance/d9dc35b/ci/push-37714516656/` 与
+`artifacts/acceptance/d9dc35b/ci/pr-37714519942/`；PR 存储 iOS smoke raw artifact/
+jobs/logs，不补造尚未下载的其余 PR artifacts。
+
 ### 发布与后续验收
 
-`2eb7285` 的首轮 hosted 结果已如上核验；bootstrap 修复尚待新 run，GitHub PR 尚未合并。2026-10-08 已在
+`2eb7285`/`d9dc35b` 两轮 hosted 结果已如上核验；live iOS timeout-only 修复尚待新 run，GitHub PR 尚未合并。2026-10-08 已在
 现有 `codex/t01-android-x86-abi-evidence` 分支（整合起点=`49a6a3a`）本地合入
 `origin/main`=`2f85842`，三份路线文档冲突已解决。主线的 live
 diagnostics 测试修复及历史失败证据保留；旧 `doctor-android-emulator` job 和
 `scripts/doctor-android-evidence.py` 由新的分层 jobs/driver 替代，不再并行运行旧检查。
 原工作区另有本地备份和 stash，用户已明确授权提交推送；发布状态以 Git/GitHub 为准，
 下一动作是收集并核验本次提交对应的新 CI，不将授权或推送本身作为通过证据。
-Ubuntu x86_64 cold/live、x86_64 完整 APK、
-hosted ARM64 Mac native build/Metal/boot/process/capture 均须绑定实际 run/job/artifact。
+Ubuntu x86_64 cold/live、x86_64 完整 APK、hosted ARM64 Mac cold/native build 已取得
+上述证据；live iOS 的最终 doctor/Metal/process/capture 仍须绑定新实际 run/job/artifact。
 不将本机 ARM64 APK 或 cold AVD 结果扩展为 x86 runtime 通过。
 
 本地代码/回归/独立构建责任已登记，runtime 和父任务仍等待上述 CI 与真实变体。

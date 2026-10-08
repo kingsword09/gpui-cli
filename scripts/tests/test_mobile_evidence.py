@@ -1,6 +1,7 @@
 import importlib.util
 import hashlib
 import json
+import copy
 from pathlib import Path
 import re
 import struct
@@ -40,7 +41,102 @@ def tiny_png():
             + png_chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00")) + png_chunk(b"IEND", b""))
 
 
+def ios_live_report(*, missing=False, timeout=False):
+    actual = report(target="ios", status="fail" if missing else "pass", phase="live", device="ci-sim")
+    if missing:
+        actual["checks"][1]["actual"] = {"available": False}
+    if timeout:
+        actual["overall"] = "fail" if missing else "unknown"
+        actual["checks"][0].update(status="unknown", reason="probe timed out")
+    return actual
+
+
+class DoctorRecorder:
+    def __init__(self, responses):
+        self.responses = responses
+        self.saved = {}
+        self.commands = []
+
+    def run(self, label, argv, **kwargs):
+        self.commands.append(label)
+        if label == "generate":
+            return {"returncode": 0, "stdout": ""}
+        actual = self.responses.get(label, ios_live_report(missing=label.startswith("missing-device")))
+        return {"returncode": int(actual["overall"] in ("fail", "unknown")), "stdout": json.dumps(actual)}
+
+    def write(self, name, value):
+        self.saved[name] = copy.deepcopy(value)
+
+
 class DoctorTests(unittest.TestCase):
+    def test_ios_live_timeout_retries_preserve_each_failed_report(self):
+        recorder = DoctorRecorder({"match": ios_live_report(timeout=True)})
+        with patch("mobile_evidence.time.sleep") as sleeper:
+            result = doctor(recorder, Path("/gpui"), "ios", "ci-sim", "live", timeout_retries=2)
+        sleeper.assert_called_once_with(15)
+        self.assertEqual(result["timeout_retries_used"], 1)
+        self.assertEqual(result["reports"]["match"], "match-retry-1-doctor.json")
+        self.assertEqual(recorder.saved["match-doctor.json"]["overall"], "unknown")
+        self.assertEqual(recorder.saved["match-retry-1-doctor.json"]["overall"], "pass")
+        self.assertEqual(recorder.saved["doctor-retries.json"][0]["failed_report"], "match-doctor.json")
+
+    def test_ios_live_persistent_timeouts_fail_after_bounded_retries(self):
+        recorder = DoctorRecorder({label: ios_live_report(timeout=True)
+                                  for label in ("match", "match-retry-1", "match-retry-2")})
+        with patch("mobile_evidence.time.sleep") as sleeper, self.assertRaises(RuntimeError):
+            doctor(recorder, Path("/gpui"), "ios", "ci-sim", "live", timeout_retries=2)
+        self.assertEqual(sleeper.call_count, 2)
+        self.assertEqual(recorder.commands, ["generate", "match", "match-retry-1", "match-retry-2"])
+        self.assertIn("match-retry-2-doctor.json", recorder.saved)
+        self.assertNotIn("doctor-result.json", recorder.saved)
+
+    def test_ios_live_non_timeout_failures_and_wrong_identity_are_not_retried(self):
+        invalid_reports = []
+        for status in ("fail", "unavailable", "unknown"):
+            actual = ios_live_report(timeout=True)
+            actual["checks"][0].update(status=status, reason="missing or invalid tool")
+            invalid_reports.append(actual)
+        for field, value in (("id", "other-device"), ("kind", "physical"), ("platform", "android")):
+            actual = ios_live_report(timeout=True)
+            actual["checks"][1]["actual"][field] = value
+            invalid_reports.append(actual)
+        actual = ios_live_report(timeout=True)
+        actual["checks"][1]["actual"]["state"]["kind"] = "stopped"
+        invalid_reports.append(actual)
+        actual = ios_live_report(timeout=True)
+        actual["target"]["explicit"] = False
+        invalid_reports.append(actual)
+        actual = ios_live_report(timeout=True)
+        actual["checks"][1]["status"] = "fail"
+        invalid_reports.append(actual)
+        for actual in invalid_reports:
+            recorder = DoctorRecorder({"match": actual})
+            with self.subTest(actual=actual), patch("mobile_evidence.time.sleep") as sleeper, \
+                    self.assertRaises(RuntimeError):
+                doctor(recorder, Path("/gpui"), "ios", "ci-sim", "live", timeout_retries=2)
+            sleeper.assert_not_called()
+            self.assertEqual(recorder.commands, ["generate", "match"])
+
+    def test_ios_live_negative_timeout_retries_do_not_mask_unrelated_failure(self):
+        actual = ios_live_report(missing=True, timeout=True)
+        actual["checks"][0]["reason"] = "total probe deadline exceeded before this check ran"
+        recorder = DoctorRecorder({"missing-device": actual})
+        with patch("mobile_evidence.time.sleep") as sleeper:
+            result = doctor(recorder, Path("/gpui"), "ios", "ci-sim", "live", timeout_retries=2)
+        sleeper.assert_called_once_with(15)
+        self.assertEqual(result["reports"]["missing-device"], "missing-device-retry-1-doctor.json")
+        self.assertEqual(recorder.saved["missing-device-doctor.json"]["checks"][0]["status"], "unknown")
+        self.assertEqual(recorder.saved["missing-device-retry-1-doctor.json"]["checks"][0]["status"], "pass")
+
+    def test_doctor_timeout_retries_are_opt_in_and_live_ios_only(self):
+        recorder = DoctorRecorder({"match": ios_live_report(timeout=True)})
+        with patch("mobile_evidence.time.sleep") as sleeper, self.assertRaises(RuntimeError):
+            doctor(recorder, Path("/gpui"), "ios", "ci-sim", "live")
+        sleeper.assert_not_called()
+        for target, phase, retries in (("android", "live", 2), ("ios", "cold", 2), ("ios", "live", 3)):
+            with self.assertRaises(ValueError):
+                doctor(recorder, Path("/gpui"), target, "ci-sim", phase, timeout_retries=retries)
+
     def test_cold_match_and_mismatch(self):
         for expected in ("pass", "fail"):
             validate_doctor(report(status=expected), "android", expected, "cold", "ci-avd", "x86_64")
@@ -289,6 +385,27 @@ class RuntimeTests(unittest.TestCase):
             self.assertLess(labels.index("lock-app"), labels.index("build-app"))
             command = next(command for label, command in recorder.commands if label == "build-app")
             self.assertEqual(command[-2:], ["--device", "owned-udid"])
+
+    def test_ios_smoke_enables_only_bounded_live_doctor_retries(self):
+        module = self.load_driver("check-ios-simulator.py")
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            gpui = root / "gpui"
+            gpui.touch()
+            device = "11111111-1111-1111-1111-111111111111"
+            catalog = {"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+                                      "version": "26.2", "isAvailable": True}]}
+            recorder = FakeEvidence(root, responses={"runtimes": json.dumps(catalog), "create": device,
+                                                     "devices-after-cleanup": '{"devices": {}}'})
+            argv = ["driver", "--gpui", str(gpui), "--output", str(root / "evidence"), "--mode", "smoke"]
+            with patch.object(module, "Evidence", return_value=recorder), \
+                    patch.object(module, "build", return_value=root / "app.app"), \
+                    patch.object(module, "doctor", return_value={"timeout_retries_used": 1}) as live_doctor, \
+                    patch.object(module, "smoke", return_value={}), patch.object(sys, "argv", argv):
+                self.assertEqual(module.main(), 0)
+            live_doctor.assert_called_once_with(recorder, gpui.resolve(), "ios", device, "live", timeout_retries=2)
+            self.assertEqual(recorder.summary["live_doctor"]["timeout_retries_used"], 1)
+            self.assertEqual(recorder.summary["cleanup"]["status"], "pass")
 
     def test_android_manifest_roots_are_directories_not_apk_names(self):
         with tempfile.TemporaryDirectory() as root:
