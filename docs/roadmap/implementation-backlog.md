@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-08，已合并代码基线 `8effdf9`（PR #388 squash merge；push/PR runs `37729846375`/`37729843264` 各 14 jobs 全绿）。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-08，已合并代码基线 `ea9f5d8`（PR #392 squash merge）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
 cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
@@ -17,7 +17,10 @@ Rust target timeout 分类、当前 boot 的 APNs 卸载及 queue test 同步修
 41 项 driver 回归、fmt/clippy/build、默认并行完整 workspace 复验通过（主二进制
 489 passed / 12 ignored）。受控竞态对照、原本地 helper timing failures 和复验分别
 保留在[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。PR #388 已 squash 为 `8effdf9`；
-这些责任切片不晋升 O02/F02/T01/F01/P01 或 GUI/真机完成，35 项父状态/计数不变。
+这些责任切片不晋升 O02/F02/T01/F01/P01 或 GUI/真机完成，35 项父状态/计数不变。PR #392
+随后 squash 为 `ea9f5d8`；PR run `37755266052` 的 14 jobs 全绿，push run `37755215799`
+attempt 1 的 macOS `cc --version` 5.194s timeout 和 fail-fast cancel 保留为历史记录，attempt 2
+的 14 jobs 全绿。
 执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
@@ -125,10 +128,13 @@ cancel/superseded/native-install-failure 隔离证据见
 `docs/experiments/F01-p01-closeout-2026-10-06.md`。模板现内嵌带许可证的 iOS-safe
 `backtrace 0.3.76` 快照，生成项目的 `aarch64-apple-ios-sim` check 和 macOS Xcode build
 已通过，受控 invalid-app 已进入 `ios.install` 并保留 cleanup/lease/device 结果；模板和
-baseline-driver 的已有 PR/CI 已合并。当前新增 clock-skew regression 的本地证据见下方，
-其 PR CI 仍待运行；baseline-driver 目前在 CI 中只做 self-test，完整 10+30 baseline 的
-CI artifact 仍需单独补齐。P01 的 scene/present/semantics 属于 O-10/O-11，不作为 F01 的
-P-02 责任；不能将单机窗口或性能结果写成跨平台结论。
+baseline-driver 的已有 PR/CI 已合并。PR #392 已合入 `ea9f5d8`，clock-skew regression 的 PR CI
+与 push attempt 2 全绿；当前 F01 分支已把 baseline-driver 扩为完整 10+30 run、artifact
+source/dirty/hash manifest、逐样本 outcome/recovery/span/command 校验和 always-upload。
+macOS arm64 dirty smoke 的 120 个样本、1520 spans 和 993 commands 已本地验证，记录于 ignored
+`artifacts/acceptance/ea9f5d8/F01/macos-arm64/attempt-12/`；干净 hosted CI artifact 与 PR
+检查仍待运行。P01 的 scene/present/semantics 属于 O-10/O-11，不作为 F01 的 P-02 责任；
+不能将单机窗口或性能结果写成跨平台结论。
 
 2026-10-08 在干净提交 `8effdf9` 上补跑了大输入 full-scan oracle：4096 个 8192-byte 文件、
 10 warmup + 30 measured pairs、Apple M2/macOS 15.6.1 release。原实现 oracle P50/P95 为
@@ -137,8 +143,9 @@ ignored `artifacts/acceptance/8effdf9/F01/macos-arm64/attempt-11/large-input-rel
 SHA-256=`346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`。这补充 F01 的
 P-02 原实现基线，不表示 index/cache 全量比较完成。新增
 `device_clock_offset_does_not_change_supervisor_span_time` 定向测试及串行 workspace 验证已通过；
-默认并行 workspace 的 4 个 process/helper timing failures 已分别重跑通过并保留原失败，PR CI
-仍待绑定。P01 observer 的 scene/present/semantics 属于 O-10/O-11，不计入 F01 的 P-02 责任。
+默认并行 workspace 的 4 个 process/helper timing failures 已分别重跑通过并保留原失败。PR CI
+已由 run `37755266052` 和 push attempt 2 通过。当前分支的 baseline-driver artifact CI 仍待核验。
+P01 observer 的 scene/present/semantics 属于 O-10/O-11，不计入 F01 的 P-02 责任。
 
 ### T01 · Target-aware doctor
 

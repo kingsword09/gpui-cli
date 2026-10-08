@@ -1,9 +1,10 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-08（Asia/Shanghai）。当前 `main`/`origin/main` 已到 `8effdf9`（PR #388
-squash merge）；此前 `f38d9df` 是 PR #389 的合并与审计基线，`852ddec` 仍保留为 PR #377
-历史代码审计基线。`f38d9df..8effdf9` 共 13 个文件变化，覆盖 CI、移动证据 driver、文档和
-贡献说明；F01 的 GPUI span/scene runtime 未变化。PR #388 push run
+更新日期：2026-10-08（Asia/Shanghai）。当前 `main`/`origin/main` 已到 `ea9f5d8`（PR #392
+squash merge）；PR #388 的 `8effdf9` 是前一实现基线，`f38d9df` 是 PR #389 的合并与审计基线，
+`852ddec` 仍保留为 PR #377 历史代码审计基线。PR #392 增加 F01/P-01 clock-offset L0 regression，
+没有改变 span runtime 行为。PR #388 的 `f38d9df..8effdf9` 13 个文件变化覆盖 CI、移动证据
+driver、文档和贡献说明；F01 的 GPUI scene runtime 未变。PR #388 push run
 [`37729846375`](https://github.com/kingsword09/gpui-cli/actions/runs/37729846375) 和 PR run
 [`37729843264`](https://github.com/kingsword09/gpui-cli/actions/runs/37729843264) 各 14 jobs 全绿。
 
@@ -18,6 +19,11 @@ PR #388 修复的 Rust target timeout 分类、当前 boot APNs service 卸载�
 标准保持不变。APNs 推送不在 smoke 范围，未声明所有宿主超时的唯一因果。41 项 driver 回归、
 fmt/clippy/build、完整 workspace 和两套 raw iOS runtime 均通过；历史失败与复验见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。
 35 个父任务计数仍为 1 done、22 in_progress、12 planned，没有因 PR #388 合并而晋升父状态。
+
+PR #392 的 PR run [`37755266052`](https://github.com/kingsword09/gpui-cli/actions/runs/37755266052)
+14 jobs 全绿；push run [`37755215799`](https://github.com/kingsword09/gpui-cli/actions/runs/37755215799)
+attempt 1 的 macOS host-only doctor 因 `cc --version` 用时 5.194s 超过原 5s probe deadline，
+fail-fast 取消一个矩阵 job；保留该失败后，attempt 2 的 14 jobs 全绿。没有放宽 doctor deadline。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -436,7 +442,7 @@ T06 保持 `in_progress`。
 
 | ID | 状态 | 已实现 / 剩余边界 |
 | --- | --- | --- |
-| F01 | in_progress | 三种严格 fixture、单调 supervisor spans、有界日志、headless driver 和 macOS arm64 每 fixture 10 warmup + 30 measurement 已有；P-01 cancel/superseded/native-install-failure 有本机证据；2026-10-08 在 `8effdf9` release 复跑 4096×8192-byte full-scan oracle，10 warmup + 30 measured pairs，P50/P95=167.20/171.18 ms，manifest mismatch 与 wrong-revision acceptance 均为 0，raw JSON hash=`346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`。`device_clock_offset_does_not_change_supervisor_span_time` 的 L0 regression 定向和串行 workspace 通过；默认并行 workspace 有 4 个 process/helper timing failures，逐项复跑通过并保留原失败。剩余：PR CI、full baseline artifact upload；单机结果不晋升完整 P-02。T05/T06 分别负责 index/cache；scene/present/semantics 归 P01 observer 的 O-10/O-11。 |
+| F01 | in_progress | 三种严格 fixture、单调 supervisor spans、有界日志、headless driver 和 macOS arm64 每 fixture 10 warmup + 30 measurement 已有；P-01 cancel/superseded/native-install-failure 有本机证据；2026-10-08 在 `8effdf9` release 复跑 4096×8192-byte full-scan oracle，10 warmup + 30 measured pairs，P50/P95=167.20/171.18 ms，manifest mismatch 与 wrong-revision acceptance 均为 0，raw JSON hash=`346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`。P-01 clock-offset L0 regression 已在 PR #392 merge，PR CI 与 push attempt 2 全绿。当前分支接入 baseline-driver CI artifact；macOS arm64 dirty smoke 的 120 samples、40 failure/recovery pairs、1520 spans、993 commands 已通过逐样本 verifier，raw evidence 在 ignored `artifacts/acceptance/ea9f5d8/F01/macos-arm64/attempt-12/`。剩余：PR/push CI 与干净 hosted artifact 核验，随后复核 F01 task-local P-01/P-02 出口。默认并行 workspace 有 4 个 process/helper timing failures，逐项复跑通过并保留原失败。单机结果不晋升完整 P-02；T05/T06 分别负责 index/cache，scene/present/semantics 归 P01 observer 的 O-10/O-11。 |
 | T01 | in_progress | target-aware JSON doctor、required/optional、版本与 SDK 规则、CLI host-smoke 和 Linux/macOS/Windows host artifacts 已通过。PR #388 (`8effdf9`) 两套 CI 各 14 jobs 全绿；raw Android API 35 x86_64 AVD doctor 在 x86_64 build ABI 下 pass、在 arm64-v8a 下预期 fail。剩余：unknown-ABI physical device/真实 Android 设备选择和完整兼容边界；本机 `adb devices -l` 无设备，未以 emulator smoke 宣称 physical 通过。 |
 | P01 | in_progress | 有真实 macOS PoC；cancel/superseded/native-install-failure 变体已有隔离窗口、span、iOS simulator build/install-failure、cleanup/lease/device 证据，`7336d74` 复跑确认 window capture metadata 与 semantics `a11y_inactive`；scene readback、verified present、完整语义/action、完整设备证据和父任务 CI/review 仍有限 |
 | T02 | in_progress | 模板 manifest、嵌入内容摘要、增平台保护；真实历史内容的稳定取得仍不贯通 |
@@ -786,7 +792,8 @@ cleanup-finalized report evidence 接线，
 ## 5.2 最新接续（2026-10-08）
 
 - PR #388 已 squash 为 `8effdf9`，两套 run `37729846375` / `37729843264` 各 14 jobs 全绿；raw x86_64 AVD doctor 关闭该 ABI 的真实 emulator match/mismatch 子例。旧 boot 失败继续保留为历史实验，不再是当前恢复条件。
-- F01 的 P-01 clock-skew L0 regression 已通过本地定向测试及串行 workspace（主二进制 490 passed / 12 ignored）；默认并行 workspace 的 4 项 process/helper timing failure 逐项复跑通过，原失败保留。PR CI 尚待运行。large-input full-scan release baseline 在干净 `8effdf9` 上复跑，raw JSON hash 为 `346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`；baseline-driver 的 full 10+30 CI artifact 仍待接入，不把这次单机结果算作完整 P-02。
+- PR #392 已 squash 为 `ea9f5d8`；P-01 clock-offset L0 regression 的 PR run 与 push attempt 2 均全绿。push attempt 1 的 macOS `cc --version` 5.194s timeout 保留为历史失败，attempt 2 确认没有复现。
+- F01 当前游标为 baseline-driver CI artifact：分支已加入完整 10+30 执行、source/dirty 和 workflow/driver/verifier/CLI hashes、逐样本结果/恢复/span/命令校验及 always-upload。dirty macOS smoke 为 120 samples、1520 spans、993 commands，原始证据在 ignored `artifacts/acceptance/ea9f5d8/F01/macos-arm64/attempt-12/`；本机只作实现验证。下一步开 PR，核对 clean hosted artifact 与两个 workflow，再重审 task-local P-01/P-02 并自动选择下一候选。
 - T01 仍缺 unknown-ABI physical device；本机当前无 adb 设备。F01 后按依赖回看 T01；若仍无可用 physical/unknown-ABI 环境，明确等待条件并停止在无可执行候选状态，不降低 required 标准。
 - F01/P01/T01 均保持 `in_progress`；当前状态没有把 P01 的 O-10/O-11 observer 缺口转嫁给 F01 的 P-02 responsibility。
 
