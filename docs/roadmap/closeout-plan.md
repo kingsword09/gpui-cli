@@ -38,13 +38,18 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | 用户指定 PR #388 CI 修复：`2cd4f00` PR 全绿、push 两处失败已分别定位；queue test 同步修复通过受控延迟且注入已撤销，服务准备收敛为直接 bootout/absence 两命令、180s 原生预算。41 项 driver 回归、fmt/clippy/默认并行完整 workspace/build 与文档检查通过，等待本次提交的新 CI |
-| 首批候选 | 完成本地验证后发布 queue test / 最小服务准备修复，核验新 push/PR 全部检查及 raw service/launch/PID/capture/cleanup；父状态不变，仅在整体路线请求恢复时回 F01 原出口 |
+| 当前执行游标 | 用户限定 PR #388 CI 排障有界出口已达到：`5d09ab3` push `37728230531` / PR `37728233406` 各 14 jobs 全绿，raw iOS runtime 已核验；41 项 driver 与完整 Rust 本地复验通过，注入已撤销。等待 review/merge，父状态不变 |
+| 首批候选 | PR #388 review/merge 后核对对应 main CI。当前用户范围结束；仅在新整体路线请求中恢复 F01 scene/present/semantics。T01 未覆盖 ABI/physical/兼容责任仍等待对应工具链/设备环境，不从 smoke 倒推父任务或依赖完成 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
 
 ### 2026-10-08 用户指定切片：分层移动 CI 初始工作卡
+
+以下工作卡保留各轮领取时的缺口和切换理由；当前出口以本节上方游标及
+[移动 CI 切片的最终结果](../experiments/mobile-ci-layers-2026-10-08.md)为准。
+实现证据基线为 `5d09ab3`，后续文档同步不改变该基线。已重新核对 `origin/main`=`2f85842`；
+合并/主线 CI、完整 GUI/真机仍是独立等待项，本轮没有授权范围内的剩余实现任务。
 
 | 维度 | 本轮登记 |
 | --- | --- |

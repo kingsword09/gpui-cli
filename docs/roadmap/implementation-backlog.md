@@ -1,27 +1,23 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-07，主分支 `f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-08，已合并代码基线 `f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
 cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
 PR #382 又合并 T01 doctor CLI host-smoke integration test，PR #383 又覆盖 explicit/project-default/
 host-only target selection，PR #384/#385 又合并 required `cc` nonzero 与 malformed-successful-version
 CLI responsibility 变体，PR #386 又上传三平台 host doctor artifacts，PR #387 修复 Windows
-coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 为 `f38d9df`，主线 run `37540497454` 全绿；PR #388 的 x86_64 emulator job 因 hosted boot
-不可用保持未合并，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
+coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 为 `f38d9df`，主线 run `37540497454` 全绿；PR #388 早期 hosted boot 失败保留为历史证据，当前分层 CI 结果见下文，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
 
-2026-10-08 接续：用户限定 PR #388 分层移动 CI 排障，初始基线 `2f85842`，
-已发布 `2cd4f00`；完整逐轮实现/本地/CI/设备证据见
-[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。Android x86_64 cold/live
-ABI 与完整 native build/smoke、iOS cold/build 均有 hosted 证据。最新 PR run
-`37726138750` 14 jobs 全绿且 iOS raw smoke 已验证；push run `37726135008`
-有 macOS reconciliation test 同步竞态和 iOS service-before 60s timeout，另两项因
-fail-fast 取消。当前仅修测试等待实际 queue，并收敛为直接 bootout/absence 验证，
-两条服务准备命令采用原生命令 180s budget；不更改 doctor/app launch 验收标准。
-41 项 driver 回归与受控竞态验证通过，新提交的 hosted 结果仍待核验；不把局部证据
-晋升为 O02/F02/T01/F01/P01 或 GUI/真机完成，35 项父状态/计数不变。
-fmt/clippy/build 与默认并行完整 workspace 复验通过（主二进制 489 passed / 12 ignored）；
-首次本地三个历史 process-helper timing failures 和各自复验保留，不抵消新 hosted 验证要求。
+2026-10-08 用户限定的 PR #388 移动 CI 排障在 `5d09ab3` 达到有界出口：push
+run `37728230531` / PR run `37728233406` 各 14 jobs 全绿，两套 iOS raw service/
+doctor/launch/PID/PNG/cleanup 已验证。实现包含分层 cold/live/native build/smoke、
+Rust target timeout 分类、当前 boot 的 APNs 卸载及 queue test 同步修复。服务准备
+采用两条原生命令/180s budget；doctor/app launch 标准保持，APNs 不在 smoke 范围。
+41 项 driver 回归、fmt/clippy/build、默认并行完整 workspace 复验通过（主二进制
+489 passed / 12 ignored）。受控竞态对照、原本地 helper timing failures 和复验分别
+保留在[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。PR 等待 review/merge；
+这些责任切片不晋升 O02/F02/T01/F01/P01 或 GUI/真机完成，35 项父状态/计数不变。
 执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
@@ -264,7 +260,7 @@ queue entry。`2cd4f00` macOS CI 出现 len=0，临时 100ms test-only 延迟复
 仅修正测试等待实际 queue 与事件，不改变资源协议/事务实现，也不关闭 O-06/O-07
 的真实 GUI/删除/重连责任或 F02 硬依赖。
 修复在相同受控延迟下通过，注入已撤销；默认并行完整 workspace 复验与 clippy/build
-通过，仍需本次提交的 CI，不因测试修复晋升父状态。
+通过，`5d09ab3` 两套三平台 CI 也已通过；不因测试修复晋升父状态。
 
 代码落点：`src/commands/live.rs`、`src/devserver/inputs.rs`、`protocol.rs`、`templates/app/src/lib.rs` 及新 runtime assets adapter。
 

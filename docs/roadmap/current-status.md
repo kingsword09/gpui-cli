@@ -12,33 +12,32 @@ squash 合并为 `287c3c7`，PR #386 已以 squash 合并为 `3772750`，PR #387
 PR #386 runs。T01/F01/P01
 父状态未晋升。
 
-本轮范围是用户指定的 PR #388 移动 CI 排障，不推进整个核心路线。初始基线为
-`2f85842`，已复核相对审计基线 `f38d9df` 的文档同步；最新已核验 CI 基线为 `2cd4f00`。
-分层 CI 已覆盖 cold/live doctor、完整 Debug `.app`/APK、process/capture smoke 和
-owned cleanup；各轮失败、修复和原始证据统一记录在
-[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)，历史单轮结果不作为最新通过证据。
+本轮用户限定 PR #388 分层移动 CI 排障，有界实现/本地/hosted 出口已达到，等待
+review/merge。实现证据基线为 `5d09ab3`；已重新 fetch，`origin/main` 仍为 `2f85842`，
+相对已合并代码审计基线 `f38d9df` 仅有此前的文档同步。PR 尚未合并，不更新主线实现结论。
 
-最新 `2cd4f00` 的 PR run `37726138750` 14 jobs 全绿，iOS raw service/doctor、
-PID=20035、1.35s launch、1179×2556 PNG/hash/cleanup 已验证。push run `37726135008`
-为 10 success / 2 failure / 2 cancelled：macOS 既有 reconciliation test 在 journal
-已发布、queue 尚未入队时过早断言；fail-fast 取消 Linux/Windows；iOS 则在新增
-service-before 只读查询的 60s budget 上超时，尚未进入本次应用启动。
+`5d09ab3` 的 push run `37728230531` / PR run `37728233406` 各 14 jobs 全绿。
+三平台 workspace/host doctor、templates、driver、Android cold/live doctor、完整 native
+build 与两端 smoke 均通过。两套 iOS 原始 service/doctor/Metal/install/launch/PID/
+PNG/cleanup 已核验，source/driver/workflow hashes 匹配且 dirty=false；push PID=34740、
+launch 1.69s，PR PID=19352、launch 1.25s，截图均为 1179×2556。完整各轮失败、修复、
+哈希及原始证据见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。
 
-当前本地修复包括：测试在原 5s budget 中同时等待事件与实际 queue；CI 自建
-simulator 直接 bootout APNs，并从确切 service-not-found/uid 核验移除，省去前置
-查询和持久化 override。两条准备命令使用现有原生命令的 180s budget，配置值与
-实际耗时分别记录；doctor 的 5s/30s、单次 app launch/180s、稳定 PID/PNG 标准不变。
-APNs 已观察到 simulator certificate/reconnect log storm；该隔离不证明它是所有
-hosted 超时的唯一原因，也不覆盖推送通知验收。
+修复包括 Rust target timeout 的漏分类、CI 自建 simulator 的 APNs 当前 boot 卸载，
+以及 reconciliation test 误把 journal event 当作 queue 已发布的竞态。服务准备仅有
+bootout/确切 absence 验证，配置 budget 为原生命令的 180s；本轮 PR bootout 实测
+80.80s，不能使用旧 60s 预算。doctor 的 5s/30s、单次 app launch/180s 和稳定 PID/PNG
+标准保持不变；APNs 推送通知不在此 smoke 范围，未声明所有宿主超时的唯一因果。
 
-41 项 driver 回归通过；reconciliation 受控 100ms 延迟使旧测试失败、修复后通过，
-注入已撤销，production app channel 没有变更。fmt/clippy 通过；首次完整本地运行的
-三个历史 process-helper timing failures 已分别复验通过，默认并行 workspace 复验
-主二进制 489 passed / 12 ignored，全部 integration/protocol/xtask/doc tests 与 build
-均通过；原失败与复验日志分别保留。本次提交仍需对应的两套 CI/review/merge；此前各轮
-push/PR 单边成功不作为整体完成。
-`verified_present=false`、`gui_acceptance=not_run`，真实首帧、输入/语义、physical
-variants 和父任务计数保持不变。仅在新的整体路线请求中恢复 F01 原执行游标。
+41 项 driver 回归、fmt/clippy/build、默认并行完整 workspace 复验通过（主二进制
+489 passed / 12 ignored，全部其他目标通过）。queue test 在受控 100ms 延迟下完成
+失败/修复对照，注入已撤销，production app channel 未变。首次本地三个历史
+process-helper timing failures 和定向/完整复验分别留存，没有将重试配置等同于通过。
+
+本次只关闭用户指定 CI 排障切片，35 个父任务计数不变。`verified_present=false`、
+`gui_acceptance=not_run`；真实首帧、输入/语义、physical 和未覆盖 ABI/兼容变体仍按
+责任矩阵验收。下一动作是 PR #388 review/merge 后核对对应主线 CI；仅在新的整体
+路线请求中恢复 F01 scene/present/semantics 游标。后续纯文档同步不改变上述实现基线。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -784,26 +783,23 @@ cleanup-finalized report evidence 接线，
 
 ## 5.1 本轮接续与下一动作
 
-- 用户本轮指定修复 PR #388 分层移动 CI，不推进整个核心路线；Rust target timeout
-  分类已关闭，`f78aee2` 的 PR CI 全绿，push 卡在不必要的持久化 service disable。
-  本轮收敛为当前 boot 的服务卸载/absence 验证，41 项回归通过；沿用提交推送授权，
-  下一动作是直接 bootout 的真实服务验证及新 push/PR CI/完整运行证据核验。
-  PR 未合并，不晋升父状态。
-- PR #388 的历史取消不能继续当作“hosted Linux 不支持 emulator”的结论：已有可配置的
-  KVM 权限缺口，且 Android doctor 的 required cargo-ndk 需要显式安装。本轮已准备配置，
-  仍需真实 hosted run 验证 boot、actual ABI 和 required-only mismatch。
+- 用户限定的 PR #388 CI 排障在 `5d09ab3` 达到实现/本地/hosted 出口：push
+  `37728230531` / PR `37728233406` 各 14 jobs 全绿，原始 iOS runtime 证据已核验。
+  PR 未合并；下一动作是 review/merge 后核对主线 CI，不晋升任何父状态。
+- PR #388 早期 hosted boot 取消/失败保留为历史证据。KVM、required cargo-ndk、
+  x86_64 cold/live ABI match/mismatch 已有真实 hosted 证据，不再作为当前环境阻塞。
 - smoke 的 `verified_present=false` / `gui_acceptance=not_run` 不晋升 M-01/M-02、F01/P01；
   用户指定切片交接后，整体路线请求再恢复 F01 scene/present/semantics 的原游标。
 
-- 已合并代码审计/实现基线：`f38d9df`；文档同步 PR #390 已 squash 合并，其历史主线 run `37543387556` 全绿。本轮从 `2f85842` 接续，PR #388 的 `2eb7285` 和当前 bootstrap 修复不由该历史主线 CI 覆盖。
+- 已合并代码审计/实现基线：`f38d9df`；文档同步 PR #390 已 squash 合并，其历史主线 run `37543387556` 全绿。本轮从 `2f85842` 接续，PR #388 的实现/CI 证据独立绑定 `5d09ab3`，不继承旧主线 CI。
 - 已关闭的 T01 responsibility：真实 CLI 的 required `cc` nonzero、`rustc` exit-0 畸形版本，以及
   GitHub Linux/macOS/Windows host doctor artifacts；本地 `doctor_cli` 4 passed，相关两套 workflow 全绿。
-- T01 剩余：真实 x86/unknown ABI 或 physical Android device、
+- T01 剩余：未覆盖的 ABI/device 变体（含 unknown ABI、physical Android device）、
   未建模 AGP/Gradle 兼容边界。恢复条件是可用的对应 runner/toolchain/device，不能以 shim 或 CI
   编译通过替代；T01 继续保持 `in_progress`。
-- 当前切换理由：PR #389 的 live diagnostics 时序修复已合并并通过主线 CI；T01 的本地 CLI responsibility 已完成，剩余变体需要外部环境；F01 无硬依赖且本机
-  仍可推进，切换到 F01 的 GUI/scene/present 与 P-02 联合对照收口。T01 外部环境恢复后回看其责任矩阵。
-- F01 下一动作：先核对既有 macOS attempt-05/06/07 与模板 CI 新基线，选择一个可重跑的 scene/present
+- 整体路线恢复时的候选理由：PR #389 的 live diagnostics 时序修复已合并并通过主线 CI；T01 的本地 CLI responsibility 已完成，剩余变体需要外部环境；F01 无硬依赖且本机
+  仍可推进其 GUI/scene/present 与 P-02 联合对照收口。T01 外部环境恢复后回看其责任矩阵。
+- 若恢复 F01：先核对既有 macOS attempt-05/06/07 与模板 CI 新基线，选择一个可重跑的 scene/present
   或语义证据缺口；保持 cancel/superseded/native-install-failure 已关闭，不把 `a11y_inactive` 或
   `presented_frame_id=null` 当作通过。
 

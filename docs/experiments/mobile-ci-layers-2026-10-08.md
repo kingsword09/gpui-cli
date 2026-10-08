@@ -323,14 +323,45 @@ process-helper timing failures 保留在 `workspace.log`；三个定向复验均
 `build.log` 和三个 `*-recheck.log`；41 项 Python/compile/actionlint/design-doc/diff
 检查通过。新两命令准备流程的 hosted 证据仍须绑定对应新提交。
 
+### 最终实现与 hosted 收口结果（`5d09ab3`）
+
+本轮用户限定的 CI 排障达到实现/本地/hosted 有界出口。`5d09ab3` 的两套 workflow
+均完成且各 14 jobs 全绿：三平台 workspace/host doctor、templates、baseline/mobile
+回归、Android cold/live doctor/native build/smoke、iOS cold/build/smoke 均通过。
+
+| 事件 / run | iOS smoke job | 原始 source revision | app PID / 单次 launch | doctor 重试 |
+| --- | --- | --- | --- | --- |
+| push [`37728230531`](https://github.com/kingsword09/gpui-cli/actions/runs/37728230531) | `113151166573` | `5d09ab3` | 34740 / 1.69s | 1 |
+| PR [`37728233406`](https://github.com/kingsword09/gpui-cli/actions/runs/37728233406) | `113151175662` | `ce076da`（`5d09ab3` 的测试合并提交） | 19352 / 1.25s | 0 |
+
+macOS workspace jobs `113151166567` / `113151175720` 均通过，覆盖此前失败的
+reconciliation test。两套 iOS raw JSON/选定命令输出/PNG 已下载到 ignored
+`artifacts/ci/37728230531/ios-smoke-selected/` 和
+`artifacts/ci/37728233406/ios-smoke-selected/`，各有 `audit.json` 验证摘要；完整日志
+仍保留在对应 GitHub artifact。已核验 dirty=false、source/merge parent、driver/workflow
+SHA-256、服务命令的 owned UDID、确切 absence/uid、doctor 正负例、launch PID、六次
+进程 identity 与 capture 后检查、PNG CRC/尺寸/hash，以及 owned UDID 删除结果。
+
+两份服务 policy 均为 `loaded=false`、`lifetime=current_boot`、
+`configured_command_timeout_seconds=180`。push bootout/确认分别 12.97s/16.06s；
+PR 分别 80.80s/3.36s。后者确实超过旧 60s，新的原生命令预算已在实际 runner 验证，
+并未扩大 CLI doctor 或 app launch 的验收窗口。两份截图均为 1179×2556：
+
+- push SHA-256：`c9f8dd4d0bf8cb1ee22547d16e1e460f7438165c0879b299e048adaf1063d472`。
+- PR SHA-256：`e9d111819fa2ada5f4dee158b96789dd58ab8823af9fc53c882cd7577106ccbe`。
+
+本地 41 项 Python 回归、fmt/clippy、默认并行完整 workspace 复验与 build 通过；
+queue test 受控 100ms 延迟下旧失败/新通过的对照和第一次完整本地 helper timing
+failures 均保留，注入已撤销，production app channel 未变。实现仅修正 timeout 分类、
+最小服务准备及测试同步，不把原始失败删除或记成成功。
+
 ### 发布与后续验收
 
-PR #388 前述已核验 CI 基线为 `2cd4f00`，所有成功/失败分别绑定各自 source/run/artifact。
-本次提交包含 queue test 同步修复及最小 APNs 准备调用，本地验证已完成；下一动作是
-核验该提交对应的 push/PR 全部 checks 和原始 service/doctor/launch/PID/PNG/cleanup。
-初始整合基线 `2f85842` 已合入本 PR；旧 emulator-only job 已由分层 checks 替代。
+PR #388 已发布上述实现，等待 review/merge；已重新 fetch，`origin/main` 仍为
+`2f85842`。实现/验收基线为 `5d09ab3`，后续纯文档同步不改变代码、测试和验收范围。
+合并后须再核对对应 main CI，不能把分支结果改称已合并主线证据。
 
-本轮仅修复用户指定 CI 范围，PR 未合并。35 个父任务计数不变；APNs 不在本 smoke
-范围，`verified_present=false`、`gui_acceptance=not_run`。真实首帧、前台归属、输入/
-语义、physical device、unknown ABI 与兼容边界继续按原责任矩阵验收；仅在新的整体
-路线请求中恢复 F01 scene/present/semantics 执行游标。
+本轮仅关闭用户指定 CI 排障切片，35 个父任务计数不变；APNs 不在本 smoke 范围，
+`verified_present=false`、`gui_acceptance=not_run`。真实首帧、前台归属、输入/语义、
+physical device、未覆盖 ABI 与兼容边界继续按原责任矩阵验收；仅在新的整体路线请求
+中恢复 F01 scene/present/semantics 执行游标。
