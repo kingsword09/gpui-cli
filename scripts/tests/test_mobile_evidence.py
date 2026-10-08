@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import json
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -104,6 +105,14 @@ class DoctorTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_android_inventory_roots_are_recorded(self):
+        roots = {"ANDROID_AVD_HOME": "/isolated/avds", "ANDROID_USER_HOME": "/isolated/user"}
+        with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", roots):
+            evidence = Evidence(Path(root) / "evidence")
+            environment = json.loads((evidence.output / "environment.json").read_text())
+            self.assertEqual(environment["android_avd_home"], roots["ANDROID_AVD_HOME"])
+            self.assertEqual(environment["android_user_home"], roots["ANDROID_USER_HOME"])
+
     def test_nonzero_output_is_persisted_before_raising(self):
         with tempfile.TemporaryDirectory() as root:
             evidence = Evidence(Path(root) / "evidence")
@@ -132,6 +141,36 @@ class CommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(FileExistsError):
                 Evidence(Path(root))
+
+
+class WorkflowTests(unittest.TestCase):
+    def job(self, name):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml").read_text()
+        matched = re.search(rf"^  {re.escape(name)}:\n(.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
+                            workflow, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(matched)
+        return matched[1]
+
+    def test_ios_jobs_prepare_all_required_doctor_tools(self):
+        job = self.job("ios-simulator")
+        targets = re.search(r"^\s+targets: ([^\n]+)$", job, re.MULTILINE)
+        self.assertIsNotNone(targets)
+        self.assertTrue({"aarch64-apple-ios", "aarch64-apple-ios-sim"}.issubset(targets[1].split(",")))
+        self.assertLess(job.index("brew install xcodegen"), job.index("scripts/check-ios-simulator.py"))
+
+    def test_emulator_host_libraries_precede_preflight(self):
+        job = self.job("android-emulator")
+        self.assertLess(job.index("apt-get install -y --no-install-recommends libpulse0"),
+                        job.index('"$ANDROID_HOME/emulator/emulator" -accel-check'))
+        self.assertIn("mobile-preflight/shared-libraries.txt", job)
+
+    def test_cold_avd_has_an_explicit_shared_metadata_root(self):
+        job = self.job("doctor-android-cold")
+        self.assertIn('export ANDROID_AVD_HOME="$RUNNER_TEMP/gpui-cold-avd"', job)
+        self.assertIn('echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"', job)
+        self.assertIn('--path "$ANDROID_AVD_HOME/gpui-ci-x86.avd"', job)
+        self.assertIn('cp "$ANDROID_AVD_HOME/gpui-ci-x86.avd/config.ini" mobile-preflight/avd-config.ini', job)
+        self.assertIn("doctor-android-cold-evidence/\n            mobile-preflight/", job)
 
 
 class PngTests(unittest.TestCase):

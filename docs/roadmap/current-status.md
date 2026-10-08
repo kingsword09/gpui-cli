@@ -22,11 +22,19 @@ ARM64 cold ABI match/mismatch、完整 iOS `.app` 与 Android ARM64 APK 构建�
 完整范围和逐层证据见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。新 hosted
 CI/review/merge、x86 live、真实 renderer/首帧/输入/语义和物理设备仍未验收；父任务计数不变。
 
+首轮发布 `2eb7285` 的 push/PR runs `37711864318`/`37711867631` 已完成且整体失败：
+三平台 checks、templates、driver 回归和完整 Android x86_64 Debug APK 构建通过。
+KVM 权限/加速可用，但 emulator version 缺 `libpulse.so.0`；cold AVD 的
+selected-device report 缺 ABI metadata；iOS 缺 required XcodeGen 和
+`aarch64-apple-ios` target。workflow 已准备显式宿主库、共享 AVD metadata 根、
+XcodeGen/两 Rust targets 的修复；27 项回归及本地 ARM64 isolated cold doctor 通过。
+用户已授权提交推送此次修复，新 CI 结果待核验，不能将本地 ARM64 metadata 验证扩展为 hosted x86/live 通过。
+
 同日按用户要求继续整合 PR #388：已切换现有 `codex/t01-android-x86-abi-evidence`
 分支，以 `49a6a3a` 为起点合入 `origin/main`=`2f85842`，
 三份路线文档冲突已解决，旧 `doctor-android-emulator` job/driver 由分层实现替代。
 原工作区有独立备份和 stash；用户已明确授权创建提交并推送到 PR 分支以触发 CI。
-发布状态以 Git/GitHub 为准，本次提交对应的 hosted run/job/artifact 尚待核验，PR 未合并。
+首轮 hosted run/job/artifact 已按上文核验，bootstrap 修复仍待新 CI，PR 未合并。
 整合后默认并行完整 workspace test 通过（主二进制 489 passed / 12 ignored），
 23 个 Python 回归、actionlint、fmt、Python compile 和文档/diff 检查通过；
 不覆盖未运行的 hosted/设备 runtime 验收，历史默认并行失败记录仍保留。
@@ -775,16 +783,16 @@ cleanup-finalized report evidence 接线，
 
 ## 5.1 本轮接续与下一动作
 
-- 用户本轮指定分层移动 CI，不推进整个核心路线；PR #388 已在本地合入最新主线并解决
-  路线文档冲突，用户已授权提交推送。下一动作是核验发布提交对应的新 job/artifact；
-  GitHub PR 尚未合并，不能从推送动作推断新 CI 或设备验收通过。
+- 用户本轮指定分层移动 CI，不推进整个核心路线；PR #388 已发布 `2eb7285`，首轮
+  两套 CI 的 bootstrap failures 与 Android x86_64 native build pass 已核验。新修复
+  已获提交推送授权，下一动作是核对重跑的各层 artifact；PR 未合并，不晋升父状态。
 - PR #388 的历史取消不能继续当作“hosted Linux 不支持 emulator”的结论：已有可配置的
   KVM 权限缺口，且 Android doctor 的 required cargo-ndk 需要显式安装。本轮已准备配置，
   仍需真实 hosted run 验证 boot、actual ABI 和 required-only mismatch。
 - smoke 的 `verified_present=false` / `gui_acceptance=not_run` 不晋升 M-01/M-02、F01/P01；
   用户指定切片交接后，整体路线请求再恢复 F01 scene/present/semantics 的原游标。
 
-- 已合并代码审计/实现基线：`f38d9df`；文档同步 PR #390 已 squash 合并，其历史主线 run `37543387556` 全绿。本轮从 `2f85842` 接续，工作区未提交移动 CI 改动不包含在该 CI 结果中。
+- 已合并代码审计/实现基线：`f38d9df`；文档同步 PR #390 已 squash 合并，其历史主线 run `37543387556` 全绿。本轮从 `2f85842` 接续，PR #388 的 `2eb7285` 和当前 bootstrap 修复不由该历史主线 CI 覆盖。
 - 已关闭的 T01 responsibility：真实 CLI 的 required `cc` nonzero、`rustc` exit-0 畸形版本，以及
   GitHub Linux/macOS/Windows host doctor artifacts；本地 `doctor_cli` 4 passed，相关两套 workflow 全绿。
 - T01 剩余：真实 x86/unknown ABI 或 physical Android device、

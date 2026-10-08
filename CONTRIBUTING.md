@@ -46,6 +46,13 @@ Mobile checks run independently of the existing template packaging checks:
   Metal probe explicitly links CoreGraphics. A missing capability fails rather
   than silently skipping the runtime check.
 
+Cold Android AVD creation and doctor share an explicit `ANDROID_AVD_HOME`, and
+the real `config.ini` is retained in preflight artifacts. Linux emulator jobs
+install `libpulse0` before invoking the emulator, including version/acceleration
+preflight. iOS jobs install XcodeGen and both `aarch64-apple-ios` and
+`aarch64-apple-ios-sim`; doctor requires the device target even when the selected
+device is a Simulator. These preparations do not replace the required checks.
+
 The smoke summaries deliberately retain `verified_present=false`,
 `application_ready=not_instrumented` and `gui_acceptance=not_run`. Process
 survival and a device screenshot do not establish app-owned pixels, verified

@@ -13,7 +13,11 @@ coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 
 2026-10-08 接续：基线 `2f85842`，本轮新增分层移动 CI；其实现和本地/CI/
 设备边界见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。PR #388 历史取消
 保留，但先修复可配置 KVM 权限及 required cargo-ndk 准备，不再仅等待未知外部 runner。
-新 hosted CI 尚未运行，35 个父任务的状态/计数不变。
+首轮 hosted push/PR runs `37711864318`/`37711867631` 绑定 `2eb7285`，整体失败；
+完整 Android x86_64 native build 通过，cold metadata/缺 `libpulse0`/iOS required
+XcodeGen 和 device Rust target 的 bootstrap 缺口已定位并准备修复。27 个离线回归及
+本地 ARM64 isolated cold doctor 通过；用户已授权提交推送修复，新 hosted CI 结果待核验，
+35 个父任务的状态/计数不变。
 同日已在 PR #388 现有分支本地合入 `origin/main`=`2f85842` 并解决路线文档冲突，
 以分层 jobs/driver 替代旧 emulator-only 检查；用户已明确授权提交推送，等待发布提交
 对应的实际 hosted artifacts，不改变父任务状态。

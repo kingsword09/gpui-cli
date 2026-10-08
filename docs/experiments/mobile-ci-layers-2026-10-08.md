@@ -89,7 +89,47 @@ local attempt 未记录的字段不补造。CI root evidence/preflight 目录加
 
 ### 等待与恢复条件
 
-本次发布提交对应的新 hosted CI 结果尚待核验，GitHub PR 尚未合并。2026-10-08 已在
+### 首轮 hosted 结果与 bootstrap 修复（`2eb7285`）
+
+实际 push run `37711864318` / PR run `37711867631` 均已完成，overall=failure。
+两套三平台 workspace checks、templates、baseline/mobile driver 回归和完整 Android
+x86_64 Debug APK 构建通过；其余移动 jobs 失败，不能用这些局部通过晋升父任务。
+push APK 含 `lib/x86_64/libmobile_ci_probe_app.so`，SHA-256 为
+`e2283d092b9c4ac6851a1dd5cce0292ea90f8af9a1240d995fc0f536beaecb32`，
+原始 `source.json` 绑定 revision=`2eb7285`、dirty=false 和 driver/workflow hash。
+
+本轮有界缺口、修复与证据：
+
+- Android live 两 jobs 已通过 KVM 权限/加速预检（`KVM ... installed and usable`），
+  随后的 emulator version 命令因缺少 `libpulse.so.0` exit 127；未进入 emulator boot。
+  在预检之前显式安装 `libpulse0`，记录 `ldd`；实际 emulator version 必须成功后才启动。
+- Android cold 的 raw match report 只有 `android.selected_device` required/unknown：
+  选中 stopped AVD，但没有 arch/runtime/image metadata；无法确认 ABI。旧 artifact
+  没有 config.ini/实际默认 AVD 根，不能编造其确切路径。为创建器与 CLI 显式共用
+  `ANDROID_AVD_HOME` 和 `--path`，留存实际 config.ini/list 及环境根；不手写 ABI。
+- iOS doctor 的 required failures 是 `ios.xcodegen` unavailable 与
+  `ios.rust_target.device` 缺 `aarch64-apple-ios`；build/smoke 也因找不到 XcodeGen
+  失败。workflow 显式安装 XcodeGen 和 device/simulator 两个 Rust targets，
+  保留工具链 preflight；不把 device target 检查降为 optional。
+- 初始 run 的 raw logs/artifacts 已下载到 `/tmp/gpui-ci388-2eb7285/`；
+  ignored 留存根为 `artifacts/acceptance/2eb7285/ci/push-37711864318/` 和
+  `artifacts/acceptance/2eb7285/ci/pr-37711867631/`；
+  27 项离线回归包含 bootstrap 配置契约与 AVD 根记录，但不是 Linux 库/模拟器验收。
+- 本地使用真实 API 35/google_apis_playstore/arm64-v8a 镜像，以显式
+  `ANDROID_AVD_HOME`/`--path` 创建 isolated AVD，cold match/mismatch 通过且 owned
+  AVD 删除；实际 config.ini 与新版 environment roots 留存于
+  `/tmp/gpui-ci388-cold-root-evidence-1791423453/`。这不是 hosted x86/live 验收。
+
+本次仅修复已证实的 bootstrap/元数据可见性缺口；不修改 renderer、签名、doctor ABI
+策略，不使用 continue-on-error，不宣称 cold/live/GUI 已通过。修复重跑后须核验
+cold metadata/selected-device-only mismatch、iOS required tools 及实际 build/boot/process/
+capture/cleanup artifacts。新修复的本地验证与 hosted 重跑结果须分别登记。
+用户已授权提交推送此次修复；27 项回归、Python compile、actionlint 和文档/diff checks 通过，
+没有修改 Rust 实现或重跑完整 native build，不借本地工具齐备推断 runner 修复通过。
+
+### 发布与后续验收
+
+`2eb7285` 的首轮 hosted 结果已如上核验；bootstrap 修复尚待新 run，GitHub PR 尚未合并。2026-10-08 已在
 现有 `codex/t01-android-x86-abi-evidence` 分支（整合起点=`49a6a3a`）本地合入
 `origin/main`=`2f85842`，三份路线文档冲突已解决。主线的 live
 diagnostics 测试修复及历史失败证据保留；旧 `doctor-android-emulator` job 和

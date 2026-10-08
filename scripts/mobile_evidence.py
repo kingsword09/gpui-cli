@@ -45,6 +45,8 @@ class Evidence:
             "developer_dir": os.environ.get("DEVELOPER_DIR"),
             "android_home": os.environ.get("ANDROID_HOME"),
             "android_ndk_home": os.environ.get("ANDROID_NDK_HOME"),
+            "android_avd_home": os.environ.get("ANDROID_AVD_HOME"),
+            "android_user_home": os.environ.get("ANDROID_USER_HOME"),
             "java_home": os.environ.get("JAVA_HOME"),
             "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
         })
