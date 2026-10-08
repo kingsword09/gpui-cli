@@ -38,8 +38,8 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | 用户指定分层移动 CI 切片：bootstrap 修复 `d9dc35b` 两套 CI 各 14 jobs 只有 iOS smoke 失败；Android x86_64 cold/live doctor 与 process/capture smoke、iOS cold/native build 已通过。iOS boot 后 required 工具 probes 超时，timeout-only 有界重探实现与 33 项回归通过，用户已授权提交推送，新 CI 结果待核验。不声称 GUI 验收，T01/F01/P01 父状态不变；详见移动 CI 切片 |
-| 首批候选 | 先提交推送新的 live iOS timeout-only 重探修复并核验新 CI 的逐次报告、Metal/install/process/capture/cleanup；原始 failures 保留，不能以 retry 配置存在标 pass。T01 unknown ABI/physical/AGP 边界仍待对应环境；仅在整体路线恢复时回到 F01 scene/present/semantics 原出口，不从 smoke 倒推硬依赖完成 |
+| 当前执行游标 | 用户指定 PR #388 CI 修复：`82a353c` push 全绿、PR 仅 iOS smoke 失败；明确 Rust target 超时漏分类使重试未执行。分类修复及 36 项 driver 回归通过，沿用提交推送授权，等待新 hosted 核验。Android x86_64 各层和 iOS cold/build 的已有证据保留，T01/F01/P01 父状态不变 |
+| 首批候选 | 发布 Rust target timeout 分类修复，核验新 push/PR CI 的逐次报告、Metal/install/process/capture/cleanup；不能以配置存在标 pass。T01 unknown ABI/physical/AGP 边界仍待对应环境；仅在整体路线恢复时回到 F01 scene/present/semantics 原出口，不从 smoke 倒推硬依赖完成 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
@@ -74,6 +74,22 @@ iOS smoke 在 build/boot 成功后多工具超时。每个 live iOS doctor 用�
 不重试，最终不通过仍失败。33 项回归、Python compile、actionlint、文档/diff 检查通过；
 本轮修复已获用户授权提交推送，尚未取得新 runtime pass。下一动作是新 CI 核验最终报告及真实 smoke，
 不是晋升 GUI/首帧/父任务。
+
+### 第三轮 CI 排障工作卡（`82a353c`）
+
+接续用户指定的 PR #388 CI 修复；已 fetch 并比较主线 `2f85842` 与审计基线
+`f38d9df`，期间仅路线文档同步。当前 head=`82a353c`；push run `37719062475`
+全绿，PR run `37719065008` 仅 iOS smoke 失败，其余 13 jobs 通过。
+
+| 维度 | 剩余缺口 / 本轮出口 |
+| --- | --- |
+| 实现 | PR 日志含 `ios.rust_target.simulator` 的 `Rust target probe timed out`，现有 timeout-only 白名单未覆盖该明确超时原因，首轮即失败；补齐该分类，保留缺工具/缺 target/版本/selector 等非超时拒绝 |
+| 本地测试 | 新增回归先复现零次重试；修复后 36 项通过，覆盖 Rust target 正负 selector 恢复、持续超时上限及非超时拒绝；Python compile、actionlint 和文档/diff checks 通过 |
+| CI | 失败/成功选定原始证据已下载核验：PR 确为零重试，push 重试一次后完整 doctor/Metal/install/PID=36244/1179×2556 PNG/hash/cleanup 通过；沿用提交推送授权，修复后须核对新 push/PR runs，不从旧 push 全绿推导 PR 通过 |
+| GUI / 设备 | 保留 `verified_present=false`、`gui_acceptance=not_run`；真实首帧、输入/语义、physical device 仍无验收 |
+| acceptance / 依赖 | T01 的 T-01/T-03 iOS live selector 与 required-only failure 责任，无硬前置；smoke 不关闭 F01/P01/M01 父任务或依赖 |
+| 非目标 | 不放宽 5s/30s CLI 预算、不扩大重试次数、不改 renderer、Android 或 required 策略；历史 probe 实测超预算不能称为硬截止通过 |
+| 有界出口 / 恢复 | 漏分类修复及有意义回归通过，提交推送，核验新 CI 和原始证据并同步状态；review/merge 与 GUI/真机责任继续独立登记。整体路线恢复后才返回 F01 scene/present/semantics |
 
 ### 历史执行卡：F01 / P-01 iOS simulator native-install-failure
 

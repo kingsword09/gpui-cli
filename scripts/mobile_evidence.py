@@ -188,7 +188,10 @@ def retryable_ios_doctor_timeouts(report: dict, device: str, expected: str) -> b
         return False
     failures = [check for check in report["checks"] if check.get("required") is True
                 and check.get("id") != "ios.selected_device" and check.get("status") != "pass"]
-    timeout_reasons = {"probe timed out", "total probe deadline exceeded before this check ran"}
+    # RustTarget probes use a distinct timeout reason; installed=false on that
+    # unknown result does not mean the target is missing.
+    timeout_reasons = {"probe timed out", "Rust target probe timed out",
+                       "total probe deadline exceeded before this check ran"}
     return bool(failures) and all(check.get("status") == "unknown" and check.get("reason") in timeout_reasons
                                   for check in failures)
 

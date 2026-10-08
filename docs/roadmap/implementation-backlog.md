@@ -22,6 +22,10 @@ XcodeGen 和 device Rust target 的 bootstrap 缺口已定位并准备修复。2
 Android x86_64 cold/live ABI 与 process/capture smoke、iOS cold doctor/native build
 通过，但不是 GUI/父任务通过。两套 iOS boot 后工具 probes 超时，已添加仅 live iOS
 timeout-only 有界重探、33 项回归；用户已授权本轮修复提交推送，完整 iOS runtime 仍待新 CI。
+第三轮 `82a353c` 的 push run `37719062475` 全绿，PR run `37719065008` 仅 iOS smoke
+失败：Rust target 的明确超时原因漏分类，重试未执行。本轮补齐分类，36 项 driver 回归
+通过；缺 target/工具、非零和启动错误仍不重试，修复后的 hosted 结果待核验。
+不以旧 push 全绿代替新 PR 证据，不改变父任务状态。
 同日已在 PR #388 现有分支本地合入 `origin/main`=`2f85842` 并解决路线文档冲突，
 以分层 jobs/driver 替代旧 emulator-only 检查；用户已明确授权提交推送，等待发布提交
 对应的实际 hosted artifacts，不改变父任务状态。
@@ -139,7 +143,9 @@ CI、review/merge、跨平台 GUI/device 验收，以及 T05/T06 索引/缓存�
 
 本轮新增独立 cold/live doctor 驱动；本机真实 iOS 26.2 stopped UDID + unknown UDID、
 Android API 35 ARM64 AVD 的 ABI match/mismatch 已通过。Cold 不证明实际启动；Ubuntu
-x86_64 cold/live jobs 虽已配置，仍需真实 run/artifact。完整 Debug `.app`/APK 与平台
+x86_64 cold/live 已由 `d9dc35b` 的原始 CI artifacts 验证。`82a353c` 的 iOS smoke
+push job 通过、PR job 因 Rust target 超时漏分类失败，本轮有界修复仍需新 run/artifact。
+完整 Debug `.app`/APK 与平台
 process/capture smoke 是另外的构建/可行性证据设施，不抵消 T01 的 unknown ABI、physical
 device、AGP/Gradle 边界，也不关闭 P01/M01 的硬依赖。详见上述切片记录，T01 仍为
 `in_progress`。

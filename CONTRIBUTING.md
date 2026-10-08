@@ -56,6 +56,8 @@ device is a Simulator. These preparations do not replace the required checks.
 Only iOS smoke's live doctor may re-probe a case up to twice, 15 seconds apart,
 when its selected-device check is correct and every unrelated required failure
 is explicitly a probe timeout. Each failed report is retained separately;
+this includes Rust target probe timeouts, whose `unknown` result does not
+establish whether the target is installed.
 `doctor-result.json` identifies the final validated reports, and the smoke
 summary records recovery counts. Missing tools, invalid versions/targets and
 device identity errors fail without retries; persistent timeouts still fail.

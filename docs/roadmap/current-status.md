@@ -40,6 +40,16 @@ simctl probe duration 为 89922ms，不能把配置的 5 秒预算当作实际�
 尚未进入 Metal/install/launch。仅对 live iOS 增加 timeout-only 有界重探与逐次原始报告
 留存，33 项离线回归通过；用户已授权本轮修复提交推送，新 CI 结果待核验，不宣称 iOS runtime 通过。
 
+第三轮 `82a353c`：push run `37719062475` 全绿；PR run `37719065008` 只有 iOS smoke
+失败。PR 日志中的 `Rust target probe timed out` 未被 timeout-only 分类识别，导致首轮
+直接失败而未重探。本轮补齐该明确超时原因；新增回归先复现零次重试，修复后全部
+36 项 driver 测试通过，涵盖 simulator/device target、正负 selector、持续超时上限与
+缺 target/缺 rustup/非零退出/启动错误拒绝。沿用用户提交推送授权，待核验修复后的
+push/PR CI；旧 push 成功不能代替新 PR 验证，父任务与 GUI/真机状态不变。
+两套 iOS smoke 原始 JSON 已核验：PR match 没有重试，build/boot/cleanup 通过；push
+重试一次后完整 live doctor、Metal/install、PID=36244 和 1179×2556 PNG/hash、cleanup
+通过。原始证据和 source/merge revision 见移动 CI 切片，仍不是 GUI/首帧验收。
+
 同日按用户要求继续整合 PR #388：已切换现有 `codex/t01-android-x86-abi-evidence`
 分支，以 `49a6a3a` 为起点合入 `origin/main`=`2f85842`，
 三份路线文档冲突已解决，旧 `doctor-android-emulator` job/driver 由分层实现替代。
@@ -793,10 +803,10 @@ cleanup-finalized report evidence 接线，
 
 ## 5.1 本轮接续与下一动作
 
-- 用户本轮指定分层移动 CI，不推进整个核心路线；PR #388 已发布 `d9dc35b`，第二轮
-  只有 iOS smoke 的 boot 后工具超时失败。新 timeout-only 重探实现/33 项回归已完成，
-  用户已授权提交推送；下一动作是新 CI 核验完整 live doctor/Metal/install/process/capture/cleanup。
-  原始失败报告保留，PR 未合并，不晋升父状态。
+- 用户本轮指定修复 PR #388 分层移动 CI，不推进整个核心路线；`82a353c` 的 push
+  全绿，但 PR iOS smoke 因漏识别 Rust target 超时而未执行重试。漏分类修复及 36 项
+  driver 回归通过，沿用提交推送授权；下一动作是修复后的 push/PR CI 和 raw live
+  doctor/Metal/install/process/capture/cleanup 核验。PR 未合并，不晋升父状态。
 - PR #388 的历史取消不能继续当作“hosted Linux 不支持 emulator”的结论：已有可配置的
   KVM 权限缺口，且 Android doctor 的 required cargo-ndk 需要显式安装。本轮已准备配置，
   仍需真实 hosted run 验证 boot、actual ABI 和 required-only mismatch。

@@ -51,6 +51,18 @@ def ios_live_report(*, missing=False, timeout=False):
     return actual
 
 
+def ios_rust_target_timeout_report(*, missing=False, kind="simulator"):
+    actual = ios_live_report(missing=missing, timeout=True)
+    target = "aarch64-apple-ios-sim" if kind == "simulator" else "aarch64-apple-ios"
+    actual["checks"].append({
+        "id": f"ios.rust_target.{kind}", "required": True, "status": "unknown",
+        "reason": "Rust target probe timed out", "expected": {"target": target},
+        # A timeout reports installed=false even though it cannot establish absence.
+        "actual": {"target": target, "installed": False},
+    })
+    return actual
+
+
 class DoctorRecorder:
     def __init__(self, responses):
         self.responses = responses
@@ -69,6 +81,57 @@ class DoctorRecorder:
 
 
 class DoctorTests(unittest.TestCase):
+    def test_ios_live_rust_target_timeouts_recover_for_both_selector_cases(self):
+        for missing in (False, True):
+            for kind in ("simulator", "device"):
+                failed = ios_rust_target_timeout_report(missing=missing, kind=kind)
+                recovered = copy.deepcopy(failed)
+                recovered["overall"] = "fail" if missing else "pass"
+                for check in recovered["checks"]:
+                    if check["status"] == "unknown":
+                        check.update(status="pass", reason="probe completed")
+                recovered["checks"][-1]["actual"]["installed"] = True
+                label = "missing-device" if missing else "match"
+                recorder = DoctorRecorder({label: failed, f"{label}-retry-1": recovered})
+                with self.subTest(missing=missing, kind=kind), patch("mobile_evidence.time.sleep") as sleeper:
+                    result = doctor(recorder, Path("/gpui"), "ios", "ci-sim", "live", timeout_retries=2)
+                    sleeper.assert_called_once_with(15)
+                    self.assertEqual(result["timeout_retries_used"], 1)
+                    self.assertEqual(result["reports"][label], f"{label}-retry-1-doctor.json")
+                    self.assertEqual(recorder.saved[f"{label}-doctor.json"], failed)
+                    self.assertEqual(recorder.saved[f"{label}-retry-1-doctor.json"], recovered)
+
+    def test_ios_live_persistent_rust_target_timeouts_keep_the_retry_limit(self):
+        failed = ios_rust_target_timeout_report()
+        recorder = DoctorRecorder({label: failed for label in ("match", "match-retry-1", "match-retry-2")})
+        with patch("mobile_evidence.time.sleep") as sleeper, self.assertRaises(RuntimeError):
+            doctor(recorder, Path("/gpui"), "ios", "ci-sim", "live", timeout_retries=2)
+        self.assertEqual(sleeper.call_count, 2)
+        self.assertEqual(recorder.commands, ["generate", "match", "match-retry-1", "match-retry-2"])
+        self.assertEqual(recorder.saved["match-retry-2-doctor.json"], failed)
+        self.assertNotIn("doctor-result.json", recorder.saved)
+
+    def test_ios_live_rust_target_non_timeout_failures_are_not_retried(self):
+        failures = (("fail", "Rust target aarch64-apple-ios-sim is not installed"),
+                    ("unavailable", "rustup was not found"),
+                    ("fail", "rustup exited unsuccessfully (code Some(1))"),
+                    ("unknown", "could not start rustup: permission denied"))
+        for missing in (False, True):
+            for status, reason in failures:
+                failed = ios_rust_target_timeout_report(missing=missing)
+                failed["checks"][-1].update(status=status, reason=reason)
+                if status in ("fail", "unavailable"):
+                    failed["overall"] = "fail"
+                label = "missing-device" if missing else "match"
+                recorder = DoctorRecorder({label: failed})
+                with self.subTest(missing=missing, reason=reason), patch("mobile_evidence.time.sleep") as sleeper, \
+                        self.assertRaises(RuntimeError):
+                    doctor(recorder, Path("/gpui"), "ios", "ci-sim", "live", timeout_retries=2)
+                sleeper.assert_not_called()
+                self.assertEqual(recorder.commands[-1], label)
+                self.assertEqual(recorder.saved[f"{label}-doctor.json"], failed)
+                self.assertNotIn("doctor-result.json", recorder.saved)
+
     def test_ios_live_timeout_retries_preserve_each_failed_report(self):
         recorder = DoctorRecorder({"match": ios_live_report(timeout=True)})
         with patch("mobile_evidence.time.sleep") as sleeper:

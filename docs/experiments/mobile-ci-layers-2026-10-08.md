@@ -173,6 +173,37 @@ push artifacts 的 Android cold/live match/mismatch 和 iOS cold selector 报告
 `artifacts/acceptance/d9dc35b/ci/pr-37714519942/`；PR 存储 iOS smoke raw artifact/
 jobs/logs，不补造尚未下载的其余 PR artifacts。
 
+### 第三轮 hosted 排障（`82a353c`）
+
+push run `37719062475` 的 14 jobs 全绿；PR run `37719065008` 的 14 jobs 仅
+`ios-simulator (smoke)` 失败。其日志含三个普通工具 timeout、
+`ios.rust_target.simulator` 的 `Rust target probe timed out` 和 device target 的
+total deadline。现有 classifier 只接受普通 probe 与 total deadline 两种原因，漏掉了
+Rust target 专用原因，因此错误标签仍是 `match`，没有进入重试。
+该 `unknown` 结果的 `installed=false` 不证明 target 缺失；确实缺失时 CLI 返回
+`fail` / `Rust target ... is not installed`，必须保持直接拒绝。
+
+本轮仅补齐明确 timeout 分类，不修改 5s/30s 预算、required 策略或两次重试上限。
+回归先复现正负 selector/simulator/device target 全部提前失败和零次重试；修复后
+36 项 driver 测试通过，涵盖恢复后严格验证、逐次原始报告保留、持续超时失败，以及
+缺 target/缺 rustup/非零退出/启动错误混合普通 timeout 时仍不重试。
+Python compile、actionlint、design-doc 与 diff checks 通过；这是本地证据，修复后
+hosted 结果须另行绑定新 run/job/artifact。T01/F01/P01 和 GUI/真机责任不晋升。
+本轮 `cargo fmt --check`、workspace clippy `-D warnings`、默认并行完整 workspace
+test（主二进制 489 passed / 12 ignored，integration/protocol/xtask/doc tests 通过）和
+`cargo build --locked` 通过；本地测试日志 `/tmp/gpui-ci388-rust-target-workspace.log`。
+
+两套 iOS smoke 的选定原始证据已下载到 ignored
+`artifacts/ci/37719065008/ios-smoke-selected/` 和
+`artifacts/ci/37719062475/ios-smoke-selected/`（JSON、boot/process 输出及成功 PNG，
+未下载完整 native diagnostics 日志）。PR source 为测试合并提交 `188d701`、dirty=false，
+build/boot/cleanup 通过，`commands.json` 确认仅一次 match；将其原始报告交给修复后的
+classifier 可进入有界重试。push source=`82a353c`、dirty=false，match 第一次超时、
+重试一次后通过，unknown UDID 只触发 selected-device failure；host Metal、安装、启动、
+PID=36244 的进程采样与 capture 后检查、owned UDID 清理均通过。1179×2556 PNG 的
+CRC/像素尺寸/hash 已重验，SHA-256=`62f0839a2d6bb6bf6c7eaa20b3cf856f6966bf38340eaf5687329a53d224e967`。
+该成功仍标记 `verified_present=false`、`gui_acceptance=not_run`；不能代替修复后 PR CI。
+
 ### 发布与后续验收
 
 `2eb7285`/`d9dc35b` 两轮 hosted 结果已如上核验；live iOS timeout-only 修复尚待新 run，GitHub PR 尚未合并。2026-10-08 已在
