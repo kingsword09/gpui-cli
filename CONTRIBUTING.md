@@ -62,6 +62,15 @@ establish whether the target is installed.
 summary records recovery counts. Missing tools, invalid versions/targets and
 device identity errors fail without retries; persistent timeouts still fail.
 
+CI passes `--disable-push-service` only to iOS smoke. On its newly created
+simulator, the driver disables and removes `com.apple.apsd` from the simulator's
+foreground user domain, verifies both states, and records `simulator-services.json`.
+This avoids the APNs certificate/reconnect log storm observed on the hosted iOS
+26.2 runtime. Service setup failures fail the job and still delete the owned
+simulator. Cold doctor/build and default local smoke keep their normal services;
+the CI smoke excludes push-notification behavior. App launch remains a single
+attempt with a 180-second deadline, followed by the same process/capture checks.
+
 The smoke summaries deliberately retain `verified_present=false`,
 `application_ready=not_instrumented` and `gui_acceptance=not_run`. Process
 survival and a device screenshot do not establish app-owned pixels, verified

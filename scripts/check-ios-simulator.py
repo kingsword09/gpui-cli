@@ -31,6 +31,30 @@ def build(evidence: Evidence, gpui: Path, project: Path, device: str) -> Path:
     return build_artifact(evidence, project, "ios", ".app")
 
 
+def disable_push_service(evidence: Evidence, device: str) -> dict:
+    """Exclude APNs from an owned simulator's process/capture-only smoke."""
+    prefix = ["xcrun", "simctl", "spawn", device, "launchctl"]
+    service = "user/foreground/com.apple.apsd"
+    before = evidence.run("push-service-before", [*prefix, "print", service], timeout=60)
+    identity = re.match(r"(user/\d+)/com\.apple\.apsd = \{", before["stdout"])
+    if not identity:
+        raise RuntimeError("APNs service did not resolve to a simulator user domain")
+    domain = identity[1]
+    evidence.run("push-service-disable", [*prefix, "disable", service], timeout=60)
+    disabled = evidence.run("push-service-disabled", [*prefix, "print-disabled", domain], timeout=60)
+    if not re.search(r'^\s*"com\.apple\.apsd"\s*=>\s*disabled\s*$', disabled["stdout"], re.MULTILINE):
+        raise RuntimeError("APNs service disable was not confirmed")
+    evidence.run("push-service-stop", [*prefix, "bootout", service], timeout=60)
+    after = evidence.run("push-service-after", [*prefix, "print", service], timeout=60, check=False)
+    if (after["returncode"] != 113 or after.get("error")
+            or 'Could not find service "com.apple.apsd"' not in after["stderr"]):
+        raise RuntimeError("APNs service removal was not confirmed")
+    result = {"device": device, "service": "com.apple.apsd", "domain": domain,
+              "disabled": True, "loaded": False, "push_notifications": "excluded_from_smoke"}
+    evidence.write("simulator-services.json", result)
+    return result
+
+
 def smoke(evidence: Evidence, app: Path, device: str) -> dict:
     probe = 'import Metal; import CoreGraphics; import Darwin; guard let device = MTLCreateSystemDefaultDevice() else { print("Metal unavailable"); exit(1) }; print(device.name)'
     evidence.run("host-metal", ["xcrun", "swift", "-framework", "CoreGraphics", "-e", probe], timeout=120)
@@ -73,7 +97,11 @@ def main() -> int:
     parser.add_argument("--mode", choices=("doctor", "build", "smoke"), required=True)
     parser.add_argument("--runtime", default="26.2")
     parser.add_argument("--device-type", default="com.apple.CoreSimulator.SimDeviceType.iPhone-16")
+    parser.add_argument("--disable-push-service", action="store_true",
+                        help="disable APNs only on the simulator owned by this smoke run")
     args = parser.parse_args()
+    if args.disable_push_service and args.mode != "smoke":
+        parser.error("--disable-push-service requires --mode smoke")
     evidence = Evidence(args.output)
     device = None
     failure = None
@@ -98,6 +126,8 @@ def main() -> int:
                 details["build_status"] = "pass"
                 if args.mode == "smoke":
                     evidence.run("boot", ["xcrun", "simctl", "bootstatus", device, "-b"], timeout=300)
+                    if args.disable_push_service:
+                        details["simulator_services"] = disable_push_service(evidence, device)
                     details["live_doctor"] = doctor(evidence, gpui, "ios", device, "live", timeout_retries=2)
                     details.update(smoke(evidence, app, device))
     except Exception as error:

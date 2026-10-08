@@ -8,7 +8,7 @@ import struct
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 import zlib
 
@@ -464,11 +464,100 @@ class RuntimeTests(unittest.TestCase):
             with patch.object(module, "Evidence", return_value=recorder), \
                     patch.object(module, "build", return_value=root / "app.app"), \
                     patch.object(module, "doctor", return_value={"timeout_retries_used": 1}) as live_doctor, \
+                    patch.object(module, "disable_push_service") as push_service, \
                     patch.object(module, "smoke", return_value={}), patch.object(sys, "argv", argv):
                 self.assertEqual(module.main(), 0)
+            push_service.assert_not_called()
             live_doctor.assert_called_once_with(recorder, gpui.resolve(), "ios", device, "live", timeout_retries=2)
             self.assertEqual(recorder.summary["live_doctor"]["timeout_retries_used"], 1)
             self.assertEqual(recorder.summary["cleanup"]["status"], "pass")
+
+    def test_ios_push_service_is_disabled_only_inside_the_selected_simulator(self):
+        module = self.load_driver("check-ios-simulator.py")
+        recorder = self.push_service_recorder()
+        result = module.disable_push_service(recorder, "owned-udid")
+        for call in recorder.run.call_args_list:
+            self.assertEqual(call.args[1][:5], ["xcrun", "simctl", "spawn", "owned-udid", "launchctl"])
+        self.assertEqual(result, {"device": "owned-udid", "service": "com.apple.apsd", "domain": "user/502",
+                                  "disabled": True, "loaded": False, "push_notifications": "excluded_from_smoke"})
+        recorder.write.assert_called_once_with("simulator-services.json", result)
+
+    def test_ios_push_service_requires_confirmed_disable_and_removal(self):
+        module = self.load_driver("check-ios-simulator.py")
+        invalid = (
+            ("push-service-before", {"stdout": "system/com.apple.apsd = {"}),
+            ("push-service-disabled", {"stdout": '"com.apple.apsd" => enabled'}),
+            ("push-service-after", {"returncode": 0, "stdout": "state = running", "stderr": ""}),
+            ("push-service-after", {"returncode": 113, "error": "command exceeded 60s deadline"}),
+            ("push-service-after", {"returncode": 1, "stderr": "permission denied"}),
+            ("push-service-after", {"returncode": 113, "stderr": 'Could not find service "other-service"'}),
+        )
+        for label, response in invalid:
+            recorder = self.push_service_recorder({label: response})
+            with self.subTest(label=label, response=response), self.assertRaises(RuntimeError):
+                module.disable_push_service(recorder, "owned-udid")
+            recorder.write.assert_not_called()
+
+    @staticmethod
+    def push_service_recorder(overrides=None):
+        responses = {
+            "push-service-before": {"stdout": "user/502/com.apple.apsd = {\n\tstate = running\n}"},
+            "push-service-disabled": {"stdout": '\tdisabled services = {\n\t\t"com.apple.apsd" => disabled\n\t}'},
+            "push-service-after": {"returncode": 113, "stderr": 'Bad request.\nCould not find service "com.apple.apsd" in domain for user/502\n'},
+        }
+        for label, response in (overrides or {}).items():
+            responses[label] = {**responses.get(label, {}), **response}
+        recorder = Mock()
+        recorder.run.side_effect = lambda label, argv, **kwargs: {
+            "returncode": 0, "stdout": "", "stderr": "", "error": "", **responses.get(label, {})}
+        return recorder
+
+    def test_ios_push_service_policy_precedes_doctor_and_failure_still_cleans_up(self):
+        module = self.load_driver("check-ios-simulator.py")
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                gpui = root / "gpui"
+                gpui.touch()
+                device = "11111111-1111-1111-1111-111111111111"
+                catalog = {"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-2",
+                                          "version": "26.2", "isAvailable": True}]}
+                recorder = FakeEvidence(root, responses={"runtimes": json.dumps(catalog), "create": device,
+                                                         "devices-after-cleanup": '{"devices": {}}'})
+                policy = {"push_notifications": "excluded_from_smoke"}
+                calls = []
+                def configure(evidence, udid):
+                    self.assertEqual(udid, device)
+                    self.assertIn("boot", [label for label, _ in evidence.commands])
+                    calls.append("service")
+                    if failed:
+                        raise RuntimeError("APNs service removal was not confirmed")
+                    return policy
+                argv = ["driver", "--gpui", str(gpui), "--output", str(root / "evidence"),
+                        "--mode", "smoke", "--disable-push-service"]
+                with patch.object(module, "Evidence", return_value=recorder), \
+                        patch.object(module, "build", return_value=root / "app.app"), \
+                        patch.object(module, "disable_push_service", side_effect=configure), \
+                        patch.object(module, "doctor", side_effect=lambda *a, **k: calls.append("doctor")), \
+                        patch.object(module, "smoke", return_value={}) as smoke, patch.object(sys, "argv", argv):
+                    self.assertEqual(module.main(), int(failed))
+                self.assertEqual(calls, ["service"] if failed else ["service", "doctor"])
+                self.assertEqual(recorder.summary["cleanup"]["status"], "pass")
+                if failed:
+                    smoke.assert_not_called()
+                    self.assertEqual(recorder.summary["status"], "fail")
+                else:
+                    self.assertEqual(recorder.summary["simulator_services"], policy)
+
+    def test_ios_push_service_option_rejects_non_smoke_modes(self):
+        module = self.load_driver("check-ios-simulator.py")
+        for mode in ("doctor", "build"):
+            argv = ["driver", "--gpui", "/gpui", "--output", "/unused", "--mode", mode, "--disable-push-service"]
+            with self.subTest(mode=mode), patch.object(module, "Evidence") as recorder, \
+                    patch.object(sys, "argv", argv), self.assertRaises(SystemExit) as error:
+                module.main()
+            self.assertEqual(error.exception.code, 2)
+            recorder.assert_not_called()
 
     def test_android_manifest_roots_are_directories_not_apk_names(self):
         with tempfile.TemporaryDirectory() as root:

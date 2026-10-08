@@ -50,6 +50,18 @@ push/PR CI；旧 push 成功不能代替新 PR 验证，父任务与 GUI/真机�
 重试一次后完整 live doctor、Metal/install、PID=36244 和 1179×2556 PNG/hash、cleanup
 通过。原始证据和 source/merge revision 见移动 CI 切片，仍不是 GUI/首帧验收。
 
+第四轮 `a43b3c8` 已修复超时漏分类：push run `37721318579` 全绿，PR run
+`37721322431` 的 13 jobs 通过，iOS smoke 转为 `simctl launch` 180s 超时。两套
+live doctor 均一次重试后通过；push 的 PID=26376、1179×2556 PNG/hash/cleanup
+已核验；PR Metal/install 通过、launch 输出为空、cleanup 通过。PR 两分钟 diagnostics
+有 474956 events，其中 apsd 405664 events，反复 simulator certificate unsupported /
+reconnect；日志尚不证明启动超时的唯一因果。本轮仅为 CI 自建 simulator smoke 增加
+显式 APNs service disable/bootout/验证与 scope evidence，保持单次 launch/180s 和
+原进程/截图检查。40 项 driver 回归、Python compile、actionlint、diff checks 通过，
+真实服务停用和新 hosted 验证单独登记；不晋升 GUI/真机或父任务。
+最终 driver 在新建本地 iOS 26.2 simulator 的实际 user domain 停用/移除/验证与
+owned cleanup 已通过；文档检查通过，应用 launch 的修复效果仍待新 CI。
+
 同日按用户要求继续整合 PR #388：已切换现有 `codex/t01-android-x86-abi-evidence`
 分支，以 `49a6a3a` 为起点合入 `origin/main`=`2f85842`，
 三份路线文档冲突已解决，旧 `doctor-android-emulator` job/driver 由分层实现替代。
@@ -803,10 +815,11 @@ cleanup-finalized report evidence 接线，
 
 ## 5.1 本轮接续与下一动作
 
-- 用户本轮指定修复 PR #388 分层移动 CI，不推进整个核心路线；`82a353c` 的 push
-  全绿，但 PR iOS smoke 因漏识别 Rust target 超时而未执行重试。漏分类修复及 36 项
-  driver 回归通过，沿用提交推送授权；下一动作是修复后的 push/PR CI 和 raw live
-  doctor/Metal/install/process/capture/cleanup 核验。PR 未合并，不晋升父状态。
+- 用户本轮指定修复 PR #388 分层移动 CI，不推进整个核心路线；`a43b3c8` 已关闭
+  Rust target 超时漏分类，两套 live doctor 均通过，PR 仍有 launch 180s timeout。
+  已根据原始 APNs log storm 增加 CI smoke 专用服务隔离与 40 项 driver 回归；沿用
+  提交推送授权，下一动作是服务停用实测、新 push/PR CI 与完整 launch/process/capture/
+  cleanup 核验。PR 未合并，不晋升父状态。
 - PR #388 的历史取消不能继续当作“hosted Linux 不支持 emulator”的结论：已有可配置的
   KVM 权限缺口，且 Android doctor 的 required cargo-ndk 需要显式安装。本轮已准备配置，
   仍需真实 hosted run 验证 boot、actual ABI 和 required-only mismatch。

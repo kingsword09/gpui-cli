@@ -26,6 +26,13 @@ timeout-only 有界重探、33 项回归；用户已授权本轮修复提交推�
 失败：Rust target 的明确超时原因漏分类，重试未执行。本轮补齐分类，36 项 driver 回归
 通过；缺 target/工具、非零和启动错误仍不重试，修复后的 hosted 结果待核验。
 不以旧 push 全绿代替新 PR 证据，不改变父任务状态。
+第四轮 `a43b3c8`：push run `37721318579` 全绿，PR run `37721322431` 仅 iOS
+smoke 的 launch 180s timeout 失败；两套 live doctor 已通过。PR 原始日志存在大量
+APNs certificate/reconnect 噪声，本轮显式隔离 CI 自建 simulator smoke 的 APNs
+服务，40 项 driver 回归通过；真实服务验证与修复后的 hosted runtime 待分别核验。
+单次 launch/deadline/required/进程/截图标准保留，APNs 不属于此 smoke 验收范围。
+最终服务隔离 driver 在本地真实新建 iOS 26.2 simulator 验证及清理通过；尚不等同于
+新的 hosted GPUI launch/runtime pass。
 同日已在 PR #388 现有分支本地合入 `origin/main`=`2f85842` 并解决路线文档冲突，
 以分层 jobs/driver 替代旧 emulator-only 检查；用户已明确授权提交推送，等待发布提交
 对应的实际 hosted artifacts，不改变父任务状态。
@@ -143,8 +150,9 @@ CI、review/merge、跨平台 GUI/device 验收，以及 T05/T06 索引/缓存�
 
 本轮新增独立 cold/live doctor 驱动；本机真实 iOS 26.2 stopped UDID + unknown UDID、
 Android API 35 ARM64 AVD 的 ABI match/mismatch 已通过。Cold 不证明实际启动；Ubuntu
-x86_64 cold/live 已由 `d9dc35b` 的原始 CI artifacts 验证。`82a353c` 的 iOS smoke
-push job 通过、PR job 因 Rust target 超时漏分类失败，本轮有界修复仍需新 run/artifact。
+x86_64 cold/live 已由 `d9dc35b` 的原始 CI artifacts 验证。`a43b3c8` 已补齐 Rust
+target timeout 分类，push/PR 两套 iOS live doctor match/unknown UDID 均通过；
+PR 剩余 launch timeout 与新 APNs 隔离属于 smoke 环境，不撤回这些已验证 doctor 结果。
 完整 Debug `.app`/APK 与平台
 process/capture smoke 是另外的构建/可行性证据设施，不抵消 T01 的 unknown ABI、physical
 device、AGP/Gradle 边界，也不关闭 P01/M01 的硬依赖。详见上述切片记录，T01 仍为

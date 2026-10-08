@@ -204,6 +204,44 @@ PID=36244 的进程采样与 capture 后检查、owned UDID 清理均通过。11
 CRC/像素尺寸/hash 已重验，SHA-256=`62f0839a2d6bb6bf6c7eaa20b3cf856f6966bf38340eaf5687329a53d224e967`。
 该成功仍标记 `verified_present=false`、`gui_acceptance=not_run`；不能代替修复后 PR CI。
 
+### 第四轮 hosted 结果与 APNs 环境隔离（`a43b3c8`）
+
+push run `37721318579` 的 14 jobs 全绿；PR run `37721322431` 的 13 jobs 通过，
+只剩 iOS smoke 在单次 `simctl launch` 的 180s deadline 失败。两套 live doctor
+均一次重试后通过，最终 match / unknown-UDID-only failure 已重新严格验证。
+push source=`a43b3c8`、dirty=false、driver/workflow hashes 匹配；host Metal、install、
+PID=26376 的六次进程采样和 capture 后检查、owned UDID 清理均通过。
+1179×2556 PNG 重验通过，SHA-256=`bb92447470f75d3f37bc09f2443292abbb19550d89ecf9bfa204052e3e19d0b0`。
+原始证据及验证摘要在 ignored `artifacts/ci/37721318579/ios-smoke-selected/`。
+
+PR 的 build/boot/doctor/Metal/install 都通过；launch stdout/stderr 为空，最终删除
+owned UDID。原始证据在 `artifacts/ci/37721322431/ios-smoke-selected/`，包含完整
+`019-diagnostics.stdout`：最后两分钟共 683057564 bytes、474956 events，其中
+apsd 405664 events，反复 `Client is not supported` 的 simulator certificate 错误、
+刷新证书失败和重连；没有目标 bundle/executable 的日志。该观察支持隔离不相关推送
+后台活动的实验，但不证明它是 launch timeout 的唯一原因，不能把未返回 PID 当作成功。
+
+新 opt-in `--disable-push-service` 仅允许 smoke；workflow 只对该 mode 启用。
+driver 在自建 UDID boot 后，通过 `simctl spawn <owned-UDID> launchctl` 操作
+`user/foreground/com.apple.apsd`，从实际 service report 解析 user domain，验证 disabled
+状态，bootout 后要求确切 service-not-found 结果；任一步失败仍 fail 并清理 owned UDID。
+`simulator-services.json` 和 summary 明确记录 APNs 不在此 smoke 范围。宿主、其他
+simulator、cold doctor/build 和默认 local smoke 不受影响；不重试 launch、不放宽
+180s deadline，不修改应用/renderer 或稳定 PID/PNG 标准。
+
+40 项离线回归、Python compile、actionlint 和 diff checks 通过；新增变体覆盖仅在
+selected simulator 操作、服务仍在/无法确认停用/错误 domain/timeout/权限错误拒绝、
+flag 范围和失败 cleanup。本地隔离 iOS 26.2 的 `system` compatibility alias 已完成
+disable/bootout/验证并删除 owned UDID（`artifacts/ci/a43b3c8-apsd-local/`）；该 runtime
+明确提示使用 `user/foreground`，最终 driver 的实际服务路径与新 CI 仍需分别实测。
+最终 driver 也已在另一新建 iOS 26.2 simulator 实跑通过：实际解析 `user/501`，
+disabled 已确认、bootout 成功、print 返回 113/service-not-found，随后 shutdown/delete
+并确认 owned UDID 不存在；原始证据在 `artifacts/ci/a43b3c8-apsd-local-user-domain/`。
+该本地运行绑定 dirty source 和 driver hash，只验证服务/清理，没有重跑完整 GPUI 应用。
+最终 40 项回归、Python compile、actionlint、design-doc 与 diff checks 通过；本轮未改
+Rust 实现，完整 Rust 验证沿用上节 `a43b3c8` 前后的记录，新 hosted runtime 仍待核验。
+这些环境调整不晋升 GUI/首帧/输入/语义、APNs/真机或父任务。
+
 ### 发布与后续验收
 
 `2eb7285`/`d9dc35b` 两轮 hosted 结果已如上核验；live iOS timeout-only 修复尚待新 run，GitHub PR 尚未合并。2026-10-08 已在

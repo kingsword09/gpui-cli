@@ -38,8 +38,8 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | 用户指定 PR #388 CI 修复：`82a353c` push 全绿、PR 仅 iOS smoke 失败；明确 Rust target 超时漏分类使重试未执行。分类修复及 36 项 driver 回归通过，沿用提交推送授权，等待新 hosted 核验。Android x86_64 各层和 iOS cold/build 的已有证据保留，T01/F01/P01 父状态不变 |
-| 首批候选 | 发布 Rust target timeout 分类修复，核验新 push/PR CI 的逐次报告、Metal/install/process/capture/cleanup；不能以配置存在标 pass。T01 unknown ABI/physical/AGP 边界仍待对应环境；仅在整体路线恢复时回到 F01 scene/present/semantics 原出口，不从 smoke 倒推硬依赖完成 |
+| 当前执行游标 | 用户指定 PR #388 CI 修复：`a43b3c8` push 全绿，PR live doctor 已通过但 launch 180s timeout。已依据 APNs log storm 增加自建 simulator smoke 专用服务隔离，40 项 driver 回归通过；继续实测服务与新 hosted runtime。Android/iOS 既有证据保留，T01/F01/P01 父状态不变 |
+| 首批候选 | 验证并发布 CI smoke APNs 隔离，核验新 push/PR 的 service state、单次 launch、PID/capture/cleanup；不能以配置存在标 pass。T01 unknown ABI/physical/AGP 边界仍待对应环境；仅在整体路线恢复时回到 F01 scene/present/semantics 原出口 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
@@ -90,6 +90,23 @@ iOS smoke 在 build/boot 成功后多工具超时。每个 live iOS doctor 用�
 | acceptance / 依赖 | T01 的 T-01/T-03 iOS live selector 与 required-only failure 责任，无硬前置；smoke 不关闭 F01/P01/M01 父任务或依赖 |
 | 非目标 | 不放宽 5s/30s CLI 预算、不扩大重试次数、不改 renderer、Android 或 required 策略；历史 probe 实测超预算不能称为硬截止通过 |
 | 有界出口 / 恢复 | 漏分类修复及有意义回归通过，提交推送，核验新 CI 和原始证据并同步状态；review/merge 与 GUI/真机责任继续独立登记。整体路线恢复后才返回 F01 scene/present/semantics |
+
+### 第四轮 CI 排障工作卡（`a43b3c8`）
+
+Rust target 超时漏分类已修复并推送。push run `37721318579` 的 14 jobs 全绿；
+PR run `37721322431` 的 13 jobs 通过，iOS smoke 转为 `simctl launch` 180s 超时。
+两套 live doctor 均在一次重试后通过；PR Metal/install 通过，launch 输出为空、owned
+UDID 清理通过。push 的 PID=26376、1179×2556 PNG/hash 与 cleanup 已核验。
+
+| 维度 | 剩余缺口 / 本轮出口 |
+| --- | --- |
+| 实现 | 原始两分钟 diagnostics 为 683057564 bytes / 474956 events，其中 apsd 405664 events，反复 simulator certificate unsupported / reconnect；没有应用 bundle/executable 记录。仅对 CI 自建 simulator 的 smoke 显式关闭 APNs 后台服务并记录验证结果，再实测是否消除启动失败；不声称日志已证明唯一因果，也不重试/吞掉应用启动失败 |
+| 本地测试 | 新建本地 iOS 26.2 simulator 的最终 driver 实跑通过：实际 user domain、disabled、bootout、service-not-found 与 owned UDID 删除均有原始证据；40 项 driver 回归和 Python compile/actionlint/design-doc/diff checks 通过。此本地服务探针不覆盖 GPUI 应用 launch |
+| CI | 新失败已绑定 run/job/artifact；修复后重新核验 push/PR live doctor、launch、稳定 PID、PNG/hash、cleanup，不将 push 单边成功算作整体验证 |
+| GUI / 设备 | 仍不声明 app-owned pixels、verified present、语义/输入或物理设备验收 |
+| acceptance / 依赖 | 同一用户指定移动 CI 切片，T01 无硬前置；启动 smoke 为 F01/P01 平台证据设施，不晋升父任务或解除硬依赖 |
+| 非目标 | 不扩大 timeout、不重试 launch、不吞非零退出/真实 crash；不修改宿主或既有 simulator 服务，不扩展 renderer、Android 或核心路线。此 smoke 不覆盖 APNs 推送能力 |
+| 有界出口 / 恢复 | 收集启动失败原始证据，完成针对性修复和回归，发布并核验两套 CI；如有外部环境阻塞，记录准确恢复条件，不伪造 runtime pass。review/merge 与完整 GUI/真机责任独立保留 |
 
 ### 历史执行卡：F01 / P-01 iOS simulator native-install-failure
 

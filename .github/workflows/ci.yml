@@ -330,7 +330,12 @@ jobs:
           xcodebuild -version
       - run: cargo build --locked --bin gpui
       - name: Record cold doctor or full-app simulator smoke
-        run: python3 scripts/check-ios-simulator.py --gpui target/debug/gpui --mode "${{ matrix.mode }}" --runtime 26.2 --output "ios-${{ matrix.mode }}-evidence"
+        run: |
+          extra_args=()
+          if [[ "${{ matrix.mode }}" == "smoke" ]]; then
+            extra_args+=(--disable-push-service)
+          fi
+          python3 scripts/check-ios-simulator.py --gpui target/debug/gpui --mode "${{ matrix.mode }}" --runtime 26.2 --output "ios-${{ matrix.mode }}-evidence" "${extra_args[@]}"
       - name: Upload isolated simulator evidence
         if: always()
         uses: actions/upload-artifact@v4
