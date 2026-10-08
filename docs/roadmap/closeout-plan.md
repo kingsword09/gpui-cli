@@ -1,15 +1,14 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-08（Asia/Shanghai）。已合并实现基线：`f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）；相较
-历史实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
-iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection、
-required nonzero/malformed-version responsibility 变体和三平台 host doctor artifacts；PR #389
-修复 live diagnostics 测试等待异步发布的时序边界并已 squash 合并。
-当前分支为 `codex/t01-android-x86-abi-evidence`，整合起点=`49a6a3a`；已本地合入
-`origin/main`=`2f85842` 并解决冲突，用户已授权提交推送，发布状态以 Git/GitHub 为准。
-本轮分层移动 CI 不继承历史全绿。T01/F01/P01 仍保持 `in_progress`；T01 host-smoke 已通过
-design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge；PR #384/#385/#386/#387
-分别 squash 为 `285893f`/`287c3c7`/`3772750`/`2a54083`；PR #389 squash 为 `f38d9df`；主线路线证据 run `37540497454` 全绿。
+更新日期：2026-10-08（Asia/Shanghai）。当前 `main`/`origin/main`=`8effdf9`，PR #388 已于
+2026-10-08 squash 合并；之前的审计基线为 `f38d9df`（PR #389，主线 run `37540497454` 全绿）。
+已复核 `f38d9df..8effdf9` 的 13 个文件变化：分层移动 CI、driver、文档和贡献说明有更新，
+F01 的 GPUI span/scene runtime 代码未变。PR #388 push run
+[`37729846375`](https://github.com/kingsword09/gpui-cli/actions/runs/37729846375) 与 PR run
+[`37729843264`](https://github.com/kingsword09/gpui-cli/actions/runs/37729843264) 各 14 jobs 全绿。
+新 Android x86_64 AVD doctor artifact 已核验真实 ABI match pass、配置 mismatch fail；smoke
+仍为 `verified_present=false`、`gui_acceptance=not_run`。T01/F01/P01 父状态没有晋升。
+更早的 T01 doctor、F01 baseline-driver、iOS-safe backtrace、PR #382–#389 的合并证据保留在下文历史卡。
 
 ## 1. 文档职责与纠偏原因
 
@@ -38,11 +37,23 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | 用户限定 PR #388 CI 排障有界出口已达到：`5d09ab3` push `37728230531` / PR `37728233406` 各 14 jobs 全绿，raw iOS runtime 已核验；41 项 driver 与完整 Rust 本地复验通过，注入已撤销。等待 review/merge，父状态不变 |
-| 首批候选 | PR #388 review/merge 后核对对应 main CI。当前用户范围结束；仅在新整体路线请求中恢复 F01 scene/present/semantics。T01 未覆盖 ABI/physical/兼容责任仍等待对应工具链/设备环境，不从 smoke 倒推父任务或依赖完成 |
+| 当前执行游标 | F01 / P-01 device-clock-offset L0 regression 已实现并通过本地定向/串行 workspace 测试；当前分支待开 PR、CI 与 squash。合并后继续核验 F01 baseline CI artifact responsibility |
+| 首批候选 | F01 无硬前置；其 P-02 责任只包括固定夹具和原实现基线。T05 负责索引对照、T06 负责缓存对照，完整 P-02 不作为 F01 的反向依赖。T01 x86_64 emulator match/mismatch 已由 PR #388 hosted artifact 覆盖；unknown-ABI physical device 仍未覆盖 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
+
+### 当前工作卡：F01 / P-01 clock-skew 与 P-02 原实现基线
+
+| 维度 | 本轮开始时的差距 / 出口 |
+| --- | --- |
+| 实现 | `Timing` 用 session-local `Instant` 计算 span，`recorded_at_ms` 单独保留 host wall time；新增 L0 回归注入前移 30 天并回拨 30 天的 device metadata，原始值仍留在 attributes 中 |
+| 本地测试 | 定向 clock-skew regression 通过；完整串行 workspace 主二进制 490 passed / 12 ignored，doctor CLI、live feedback、upgrade、protocol、xtask 均通过。默认并行 workspace 有 4 个 process/helper timing failures；4 项逐项复跑通过，原失败保留。大输入 release oracle 为 4096×8192 bytes、10 warmup + 30 paired，P50/P95=167.20/171.18 ms，correctness 计数为 0；raw JSON 在 ignored `artifacts/acceptance/8effdf9/F01/macos-arm64/attempt-11/large-input-release-benchmark.json` |
+| CI | PR 尚未开出；clock-skew regression 仍需绑定常规 workspace CI。baseline-driver CI 目前只运行 self-test，完整 10+30 baseline report 的 CI artifact 仍是独立缺口；benchmark 是单机测量，不把 hosted CI 编译通过当作性能证据 |
+| GUI / 设备 | P-01 的 macOS cancel/superseded 与 iOS simulator native-install-failure 已有本机证据。scene readback、verified present 和完整语义属于 P01/O-10/O-11 observer work；PR #388 mobile process/capture smoke 未通过这些验收 |
+| acceptance / 依赖 | F01 无硬前置；P-01 需要 clock-skew L0 与既有 L2 故障样本。共享 P-02 中 F01 负责原实现基线，T05/T06 各自负责 index/cache 比较；完整 P-02 仍未通过 |
+| 非目标 | 不在 F01 中伪造 GPUI scene/present/accessibility provider，也不把 oracle/index 局部对照写成 T05/T06 或完整 P-02 完成 |
+| 有界出口 | 为 skew L0 regression 开单一 PR，核验 PR CI 并 squash；随后继续 F01 baseline CI artifact 切片，重审父任务自身 P-01/P-02 责任，再按依赖选择下一候选。当前本地结果不足以把 F01 改成 `done` |
 
 ### 2026-10-08 用户指定切片：分层移动 CI 初始工作卡
 
