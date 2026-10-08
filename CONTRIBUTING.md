@@ -67,6 +67,10 @@ simulator, the driver removes `com.apple.apsd` from the simulator's foreground
 user domain with `bootout`, verifies its absence, and records `simulator-services.json`.
 The scope is the current boot; no persistent launchd disable override is needed
 because the owned simulator is deleted after the run.
+Only `bootout` and the absence query are needed; their configured deadline is
+180 seconds, matching other native driver commands. The actual user domain is
+read from the service-not-found response. Each command's observed duration and
+failure remain recorded independently of that configured budget.
 This avoids the APNs certificate/reconnect log storm observed on the hosted iOS
 26.2 runtime. Service setup failures fail the job and still delete the owned
 simulator. Cold doctor/build and default local smoke keep their normal services;

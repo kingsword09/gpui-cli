@@ -10,38 +10,18 @@ CLI responsibility 变体，PR #386 又上传三平台 host doctor artifacts，P
 coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 为 `f38d9df`，主线 run `37540497454` 全绿；PR #388 的 x86_64 emulator job 因 hosted boot
 不可用保持未合并，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
 
-2026-10-08 接续：基线 `2f85842`，本轮新增分层移动 CI；其实现和本地/CI/
-设备边界见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。PR #388 历史取消
-保留，但先修复可配置 KVM 权限及 required cargo-ndk 准备，不再仅等待未知外部 runner。
-首轮 hosted push/PR runs `37711864318`/`37711867631` 绑定 `2eb7285`，整体失败；
-完整 Android x86_64 native build 通过，cold metadata/缺 `libpulse0`/iOS required
-XcodeGen 和 device Rust target 的 bootstrap 缺口已定位并准备修复。27 个离线回归及
-本地 ARM64 isolated cold doctor 通过；bootstrap 修复已以 `d9dc35b` 提交推送，
-35 个父任务的状态/计数不变。
-第二轮 push/PR runs `37714516656`/`37714519942` 各 14 jobs 仅 iOS smoke 失败；
-Android x86_64 cold/live ABI 与 process/capture smoke、iOS cold doctor/native build
-通过，但不是 GUI/父任务通过。两套 iOS boot 后工具 probes 超时，已添加仅 live iOS
-timeout-only 有界重探、33 项回归；用户已授权本轮修复提交推送，完整 iOS runtime 仍待新 CI。
-第三轮 `82a353c` 的 push run `37719062475` 全绿，PR run `37719065008` 仅 iOS smoke
-失败：Rust target 的明确超时原因漏分类，重试未执行。本轮补齐分类，36 项 driver 回归
-通过；缺 target/工具、非零和启动错误仍不重试，修复后的 hosted 结果待核验。
-不以旧 push 全绿代替新 PR 证据，不改变父任务状态。
-第四轮 `a43b3c8`：push run `37721318579` 全绿，PR run `37721322431` 仅 iOS
-smoke 的 launch 180s timeout 失败；两套 live doctor 已通过。PR 原始日志存在大量
-APNs certificate/reconnect 噪声，本轮显式隔离 CI 自建 simulator smoke 的 APNs
-服务，40 项 driver 回归通过；真实服务验证与修复后的 hosted runtime 待分别核验。
-单次 launch/deadline/required/进程/截图标准保留，APNs 不属于此 smoke 验收范围。
-最终服务隔离 driver 在本地真实新建 iOS 26.2 simulator 验证及清理通过；尚不等同于
-新的 hosted GPUI launch/runtime pass。
-第五轮 `f78aee2` 的 PR run `37724359228` 全绿，push run `37724354473` 因新增
-持久化 `launchctl disable` 超时失败；本轮仅保留当前 boot 的 bootout/absence 核验，
-去掉临时 simulator 不需要的持久化 override。41 项 driver 回归通过，新 hosted
-结果待核验；不改变 doctor、单次 launch、GUI/父任务状态。
-直接 bootout 的最终 driver 本地真实服务/cleanup 验证通过；上一版 PR 原始完整 smoke
-也已核验，精简后的实现仍需对应新 hosted 结果，不继承旧版本 pass。
-同日已在 PR #388 现有分支本地合入 `origin/main`=`2f85842` 并解决路线文档冲突，
-以分层 jobs/driver 替代旧 emulator-only 检查；用户已明确授权提交推送，等待发布提交
-对应的实际 hosted artifacts，不改变父任务状态。
+2026-10-08 接续：用户限定 PR #388 分层移动 CI 排障，初始基线 `2f85842`，
+已发布 `2cd4f00`；完整逐轮实现/本地/CI/设备证据见
+[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。Android x86_64 cold/live
+ABI 与完整 native build/smoke、iOS cold/build 均有 hosted 证据。最新 PR run
+`37726138750` 14 jobs 全绿且 iOS raw smoke 已验证；push run `37726135008`
+有 macOS reconciliation test 同步竞态和 iOS service-before 60s timeout，另两项因
+fail-fast 取消。当前仅修测试等待实际 queue，并收敛为直接 bootout/absence 验证，
+两条服务准备命令采用原生命令 180s budget；不更改 doctor/app launch 验收标准。
+41 项 driver 回归与受控竞态验证通过，新提交的 hosted 结果仍待核验；不把局部证据
+晋升为 O02/F02/T01/F01/P01 或 GUI/真机完成，35 项父状态/计数不变。
+fmt/clippy/build 与默认并行完整 workspace 复验通过（主二进制 489 passed / 12 ignored）；
+首次本地三个历史 process-helper timing failures 和各自复验保留，不抵消新 hosted 验证要求。
 执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
@@ -278,6 +258,13 @@ PR 拆分：journal/恢复纯文件测试 → apply/锁/并发 → 实际旧模�
 验收 O-04/O-05；输出真实 UI 人为阻塞和恢复记录。回退：关闭 probe 则 UI=unavailable，不能退回“进程活着即健康”。
 
 ### O02 · 资源事务、删除和 ACK
+
+PR #388 CI 排障发现已有 L0 reconciliation test 只等 journal event，未等随后发布的
+queue entry。`2cd4f00` macOS CI 出现 len=0，临时 100ms test-only 延迟复现；本轮
+仅修正测试等待实际 queue 与事件，不改变资源协议/事务实现，也不关闭 O-06/O-07
+的真实 GUI/删除/重连责任或 F02 硬依赖。
+修复在相同受控延迟下通过，注入已撤销；默认并行完整 workspace 复验与 clippy/build
+通过，仍需本次提交的 CI，不因测试修复晋升父状态。
 
 代码落点：`src/commands/live.rs`、`src/devserver/inputs.rs`、`protocol.rs`、`templates/app/src/lib.rs` 及新 runtime assets adapter。
 

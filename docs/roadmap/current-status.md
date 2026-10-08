@@ -12,74 +12,33 @@ squash 合并为 `287c3c7`，PR #386 已以 squash 合并为 `3772750`，PR #387
 PR #386 runs。T01/F01/P01
 父状态未晋升。
 
-本轮用户指定落实分层移动 CI，初始接续基线 `HEAD`/`origin/main`=`2f85842`；已核对
-`f38d9df` 之后只有三份路线文档同步。本轮 driver/workflow/documentation
-变化不由下述历史主线全绿覆盖。已接入 cold inventory doctor、Android KVM/live
-doctor、两端完整 Debug native build 和 process/capture smoke；本机 iOS cold doctor、Android
-ARM64 cold ABI match/mismatch、完整 iOS `.app` 与 Android ARM64 APK 构建通过；iOS smoke 的早期 boot-first
-尝试在 300s deadline 前未完成 System App 启动，失败证据和 owned simulator 删除均保留。
-新 driver 改为独立构建层，runtime 所需 boot/Metal 不阻断 build job。
-完整范围和逐层证据见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。完整 hosted
-CI/review/merge、真实 renderer/首帧/输入/语义和物理设备仍未验收；父任务计数不变。
+本轮范围是用户指定的 PR #388 移动 CI 排障，不推进整个核心路线。初始基线为
+`2f85842`，已复核相对审计基线 `f38d9df` 的文档同步；最新已核验 CI 基线为 `2cd4f00`。
+分层 CI 已覆盖 cold/live doctor、完整 Debug `.app`/APK、process/capture smoke 和
+owned cleanup；各轮失败、修复和原始证据统一记录在
+[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)，历史单轮结果不作为最新通过证据。
 
-首轮发布 `2eb7285` 的 push/PR runs `37711864318`/`37711867631` 已完成且整体失败：
-三平台 checks、templates、driver 回归和完整 Android x86_64 Debug APK 构建通过。
-KVM 权限/加速可用，但 emulator version 缺 `libpulse.so.0`；cold AVD 的
-selected-device report 缺 ABI metadata；iOS 缺 required XcodeGen 和
-`aarch64-apple-ios` target。workflow 已准备显式宿主库、共享 AVD metadata 根、
-XcodeGen/两 Rust targets 的修复；27 项回归及本地 ARM64 isolated cold doctor 通过。
-该 bootstrap 修复已以 `d9dc35b` 提交推送；其实际 hosted 结果见下文，不由本地 ARM64 结果推导。
+最新 `2cd4f00` 的 PR run `37726138750` 14 jobs 全绿，iOS raw service/doctor、
+PID=20035、1.35s launch、1179×2556 PNG/hash/cleanup 已验证。push run `37726135008`
+为 10 success / 2 failure / 2 cancelled：macOS 既有 reconciliation test 在 journal
+已发布、queue 尚未入队时过早断言；fail-fast 取消 Linux/Windows；iOS 则在新增
+service-before 只读查询的 60s budget 上超时，尚未进入本次应用启动。
 
-第二轮 `d9dc35b` 的 push/PR runs `37714516656`/`37714519942` 已完成：各 14 jobs
-只有 iOS smoke 失败，其余成功。push 原始 artifacts 已验证 Android x86_64 cold/live
-match/mismatch、完整 APK、稳定包 PID/1080×1920 PNG/uninstall、iOS cold doctor/
-独立 app build/owned UDID 删除；`verified_present=false`、`gui_acceptance=not_run`。
-两套 iOS smoke 均完成 app build 和 boot，selected-device=running/pass，但工具
-probes 多项 required/unknown timeout，总 deadline 导致 Rust targets 未执行；PR 的
-simctl probe duration 为 89922ms，不能把配置的 5 秒预算当作实际硬截止证据。
-尚未进入 Metal/install/launch。仅对 live iOS 增加 timeout-only 有界重探与逐次原始报告
-留存，33 项离线回归通过；用户已授权本轮修复提交推送，新 CI 结果待核验，不宣称 iOS runtime 通过。
+当前本地修复包括：测试在原 5s budget 中同时等待事件与实际 queue；CI 自建
+simulator 直接 bootout APNs，并从确切 service-not-found/uid 核验移除，省去前置
+查询和持久化 override。两条准备命令使用现有原生命令的 180s budget，配置值与
+实际耗时分别记录；doctor 的 5s/30s、单次 app launch/180s、稳定 PID/PNG 标准不变。
+APNs 已观察到 simulator certificate/reconnect log storm；该隔离不证明它是所有
+hosted 超时的唯一原因，也不覆盖推送通知验收。
 
-第三轮 `82a353c`：push run `37719062475` 全绿；PR run `37719065008` 只有 iOS smoke
-失败。PR 日志中的 `Rust target probe timed out` 未被 timeout-only 分类识别，导致首轮
-直接失败而未重探。本轮补齐该明确超时原因；新增回归先复现零次重试，修复后全部
-36 项 driver 测试通过，涵盖 simulator/device target、正负 selector、持续超时上限与
-缺 target/缺 rustup/非零退出/启动错误拒绝。沿用用户提交推送授权，待核验修复后的
-push/PR CI；旧 push 成功不能代替新 PR 验证，父任务与 GUI/真机状态不变。
-两套 iOS smoke 原始 JSON 已核验：PR match 没有重试，build/boot/cleanup 通过；push
-重试一次后完整 live doctor、Metal/install、PID=36244 和 1179×2556 PNG/hash、cleanup
-通过。原始证据和 source/merge revision 见移动 CI 切片，仍不是 GUI/首帧验收。
-
-第四轮 `a43b3c8` 已修复超时漏分类：push run `37721318579` 全绿，PR run
-`37721322431` 的 13 jobs 通过，iOS smoke 转为 `simctl launch` 180s 超时。两套
-live doctor 均一次重试后通过；push 的 PID=26376、1179×2556 PNG/hash/cleanup
-已核验；PR Metal/install 通过、launch 输出为空、cleanup 通过。PR 两分钟 diagnostics
-有 474956 events，其中 apsd 405664 events，反复 simulator certificate unsupported /
-reconnect；日志尚不证明启动超时的唯一因果。本轮仅为 CI 自建 simulator smoke 增加
-显式 APNs service disable/bootout/验证与 scope evidence，保持单次 launch/180s 和
-原进程/截图检查。40 项 driver 回归、Python compile、actionlint、diff checks 通过，
-真实服务停用和新 hosted 验证单独登记；不晋升 GUI/真机或父任务。
-最终 driver 在新建本地 iOS 26.2 simulator 的实际 user domain 停用/移除/验证与
-owned cleanup 已通过；文档检查通过，应用 launch 的修复效果仍待新 CI。
-
-第五轮 `f78aee2`：PR run `37724359228` 的 14 jobs 全绿；push run `37724354473`
-只有 iOS smoke 失败，卡在新增 `launchctl disable` 的 60s deadline，尚未进入 live
-doctor/launch，build/boot/owned cleanup 通过。服务只需在当前 boot 移除，持久化
-disable override 并非本次临时 simulator 的必要条件；本轮移除该写入及附带查询，
-仅保留精确 service/domain、bootout 与 absence 核验。41 项 driver 回归、Python
-compile、actionlint、diff checks 通过；直接 bootout 的本地实测和新 hosted 结果分别登记。
-直接 bootout 的最终 driver 已在新建本地 iOS 26.2 simulator 验证并清理通过。
-PR `37724359228` 的 raw service/doctor、1.49s launch、PID=20494、PNG/hash/cleanup
-也已核验；精简版完整 hosted 结果仍待新提交，两者不混作同一版本验收。
-
-同日按用户要求继续整合 PR #388：已切换现有 `codex/t01-android-x86-abi-evidence`
-分支，以 `49a6a3a` 为起点合入 `origin/main`=`2f85842`，
-三份路线文档冲突已解决，旧 `doctor-android-emulator` job/driver 由分层实现替代。
-原工作区有独立备份和 stash；用户已明确授权创建提交并推送到 PR 分支以触发 CI。
-两轮 hosted run/job/artifact 已按上文核验，新 timeout-only driver 修复仍待新 CI，PR 未合并。
-整合后默认并行完整 workspace test 通过（主二进制 489 passed / 12 ignored），
-23 个 Python 回归、actionlint、fmt、Python compile 和文档/diff 检查通过；
-不覆盖未运行的 hosted/设备 runtime 验收，历史默认并行失败记录仍保留。
+41 项 driver 回归通过；reconciliation 受控 100ms 延迟使旧测试失败、修复后通过，
+注入已撤销，production app channel 没有变更。fmt/clippy 通过；首次完整本地运行的
+三个历史 process-helper timing failures 已分别复验通过，默认并行 workspace 复验
+主二进制 489 passed / 12 ignored，全部 integration/protocol/xtask/doc tests 与 build
+均通过；原失败与复验日志分别保留。本次提交仍需对应的两套 CI/review/merge；此前各轮
+push/PR 单边成功不作为整体完成。
+`verified_present=false`、`gui_acceptance=not_run`，真实首帧、输入/语义、physical
+variants 和父任务计数保持不变。仅在新的整体路线请求中恢复 F01 原执行游标。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。

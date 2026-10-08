@@ -472,22 +472,24 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(recorder.summary["live_doctor"]["timeout_retries_used"], 1)
             self.assertEqual(recorder.summary["cleanup"]["status"], "pass")
 
-    def test_ios_push_service_is_disabled_only_inside_the_selected_simulator(self):
+    def test_ios_push_service_is_unloaded_only_inside_the_selected_simulator(self):
         module = self.load_driver("check-ios-simulator.py")
         recorder = self.push_service_recorder()
         result = module.disable_push_service(recorder, "owned-udid")
         for call in recorder.run.call_args_list:
             self.assertEqual(call.args[1][:5], ["xcrun", "simctl", "spawn", "owned-udid", "launchctl"])
+            self.assertEqual(call.kwargs["timeout"], 180)
         self.assertEqual(result, {"device": "owned-udid", "service": "com.apple.apsd", "domain": "user/502",
+                                  "configured_command_timeout_seconds": 180,
                                   "loaded": False, "lifetime": "current_boot", "push_notifications": "excluded_from_smoke"})
-        self.assertEqual([call.args[1][5] for call in recorder.run.call_args_list], ["print", "bootout", "print"])
+        self.assertEqual([call.args[1][5] for call in recorder.run.call_args_list], ["bootout", "print"])
         recorder.write.assert_called_once_with("simulator-services.json", result)
 
     def test_ios_push_service_requires_confirmed_removal(self):
         module = self.load_driver("check-ios-simulator.py")
         invalid = (
-            ("push-service-before", {"stdout": "system/com.apple.apsd = {"}),
-            ("push-service-before", {"stdout": "user/502/other-service = {"}),
+            ("push-service-after", {"returncode": 113, "stderr": 'Could not find service "com.apple.apsd" in domain for system'}),
+            ("push-service-after", {"returncode": 113, "stderr": 'Could not find service "com.apple.apsd" in domain for uid: unknown'}),
             ("push-service-after", {"returncode": 0, "stdout": "state = running", "stderr": ""}),
             ("push-service-after", {"returncode": 113, "error": "command exceeded 60s deadline"}),
             ("push-service-after", {"returncode": 1, "stderr": "permission denied"}),
@@ -512,13 +514,12 @@ class RuntimeTests(unittest.TestCase):
             module.disable_push_service(recorder, "owned-udid")
         recorder.write.assert_not_called()
         self.assertEqual([call.args[0] for call in recorder.run.call_args_list],
-                         ["push-service-before", "push-service-stop"])
+                         ["push-service-stop"])
 
     @staticmethod
     def push_service_recorder(overrides=None):
         responses = {
-            "push-service-before": {"stdout": "user/502/com.apple.apsd = {\n\tstate = running\n}"},
-            "push-service-after": {"returncode": 113, "stderr": 'Bad request.\nCould not find service "com.apple.apsd" in domain for user/502\n'},
+            "push-service-after": {"returncode": 113, "stderr": 'Bad request.\nCould not find service "com.apple.apsd" in domain for uid: 502\n'},
         }
         for label, response in (overrides or {}).items():
             responses[label] = {**responses.get(label, {}), **response}

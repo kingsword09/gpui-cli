@@ -38,13 +38,13 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | 用户指定 PR #388 CI 修复：`f78aee2` PR 全绿，push 卡在新增 persistent disable；APNs 隔离现收敛为当前 boot 的 bootout/absence 核验，41 项回归通过，继续真实服务和新 CI 核验。既有 doctor/runtime 证据保留，父状态不变 |
-| 首批候选 | 验证并发布临时 simulator 的最小 APNs 隔离，核验新 push/PR service/launch/PID/capture/cleanup；T01 unknown ABI/physical/AGP 边界仍待对应环境；仅在整体路线恢复时回到 F01 scene/present/semantics 原出口 |
+| 当前执行游标 | 用户指定 PR #388 CI 修复：`2cd4f00` PR 全绿、push 两处失败已分别定位；queue test 同步修复通过受控延迟且注入已撤销，服务准备收敛为直接 bootout/absence 两命令、180s 原生预算。41 项 driver 回归、fmt/clippy/默认并行完整 workspace/build 与文档检查通过，等待本次提交的新 CI |
+| 首批候选 | 完成本地验证后发布 queue test / 最小服务准备修复，核验新 push/PR 全部检查及 raw service/launch/PID/capture/cleanup；父状态不变，仅在整体路线请求恢复时回 F01 原出口 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
 
-### 2026-10-08 用户指定切片：分层移动 CI
+### 2026-10-08 用户指定切片：分层移动 CI 初始工作卡
 
 | 维度 | 本轮登记 |
 | --- | --- |
@@ -123,6 +123,41 @@ PR 原始证据已核验：service removal 后 doctor 无重试，launch 1.49s�
 1179×2556 PNG/hash 与 cleanup 通过。精简后的直接 bootout driver 又在新建本地
 iOS 26.2 simulator 验证当前 boot 服务移除及 cleanup 通过；41 项回归、Python compile、
 actionlint、design-doc/diff checks 通过。下一动作是发布并核验精简版两套 hosted CI。
+
+### 第六轮独立 workspace 测试竞态（`2cd4f00`）
+
+push run `37726135008` 的 macOS workspace job 在
+`current_app_channel_queues_accepted_asset_reconciliation` 失败，len=0、期望 1；
+矩阵 fail-fast 取消 Linux/Windows，不能算三个独立测试失败。移动 jobs 仍在运行。
+日志留存于 `artifacts/ci/37726135008/macos-check.log`。这是本次 CI 范围内独立可修的
+测试同步缺陷；移动 runtime 暂等待 hosted 结果，未更换父任务或扩大整体路线。
+
+| 维度 | 本轮出口 |
+| --- | --- |
+| 实现 / 原因 | app channel 先 emit journal event，再 push reconciliation queue；测试只等 event 后立即 drain queue，不能保证队列已发布。修复仅让测试等待实际 queue，保持事件和 payload 断言及原 5s wait budget |
+| 本地测试 | 临时 test-only 在 event/queue 间注入延迟，验证旧测试稳定失败、修复后通过；随后撤销注入，执行 fmt/clippy/完整 workspace test/build 与文档检查 |
+| CI | 先保留 `2cd4f00` 移动结果，避免取消还在运行的验证；发布测试修复后核验新的三平台与移动 jobs，不用单项重跑掩盖失败 |
+| 验收 / 依赖 | O02 的 O-07 L0 queue responsibility，仅测试同步；O02 仍依赖 F02。不是 O-06/O-07 的真实资源/GUI 验收，不晋升任何父任务 |
+| 非目标 / 恢复 | 不调整 app channel 的事件/队列语义、不扩大 timeout、不增加 runtime test hooks；此缺陷与 APNs 环境问题分别留证。测试出口后回看同一 PR 的移动等待结果，最终停在 review/merge 等待态 |
+
+### 第七轮服务准备预算与最小调用（`2cd4f00`）
+
+同一 push run 的 iOS smoke 在新增 service-before 只读查询上超过 60s，尚未
+卸载 APNs。该 60s 是前轮新加的 driver 准备预算，不属于 T-02 的 CLI 5s/30s 或
+应用单次 launch/180s 验收要求；此前 persistent disable 已有超时记录，不能继续
+把 60s 当作 hosted 原生命令的充分预算。
+本轮省去非必要的前置查询，直接通过 owned UDID 的 `user/foreground/com.apple.apsd`
+bootout，再从确切 service-not-found / uid 报告核验移除和实际域。两条准备命令采用
+现有原生命令的 180s budget，明确记录配置值，继续保留实际耗时/失败；不重试 launch，
+不放宽 doctor 或应用验收，不声明硬 wall-clock 上界。新增 parser/错误回归引用已取得的
+真实 stderr 形状；最终仍要求新 hosted runtime 通过。
+reconciliation 测试已在受控延迟下通过且注入已撤销；首次完整本地测试另遇三个历史
+process-helper 时序失败，分别复验并保留原失败，不把它们混成此次队列测试失败。
+先完成测试/准备命令这两个已证实 CI 缺口的本地出口，再发布、核验所有 jobs 与原始证据。
+本地出口已完成：41 项 Python 回归、fmt/clippy、默认并行完整 workspace 复验
+（主二进制 489 passed / 12 ignored，全部其他目标通过）、build 和文档/diff checks
+通过。三个原 process-helper 失败均保留原日志，定向与完整复验分别通过；production
+app channel 未变，临时注入已撤销。下一动作是本次提交的两套 CI 和原始 runtime 核验。
 
 ### 历史执行卡：F01 / P-01 iOS simulator native-install-failure
 

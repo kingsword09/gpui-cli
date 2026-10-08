@@ -274,19 +274,63 @@ PNG SHA-256=`4b8bb51d9bebd57c2196c84a1c87ffb88db7fe0658e36964a091708bbba171ad`�
 41 项回归、Python compile、actionlint、design-doc/diff 检查通过。新 hosted runtime
 仍待发布后的实际 run；不将此次本地服务验证称为完整 GPUI 应用验收。
 
+### 第六轮独立 workspace 测试竞态（`2cd4f00`）
+
+push run `37726135008` 的 macOS workspace job 在已有
+`current_app_channel_queues_accepted_asset_reconciliation` 失败（queue len=0，期望 1），
+fail-fast 取消 Linux/Windows；原始 job log 为
+`artifacts/ci/37726135008/macos-check.log`。这与 iOS runtime 分别核验，不能把被取消
+jobs 算作独立代码失败。代码事实是 `app_channel.rs` 先 emit journal event，再 push
+reconciliation queue；测试只等待 event 存在，可能过早 drain queue。
+
+临时 test-only 注入在 event/queue 间增加 100ms，旧测试稳定复现同一 len=0 失败；
+日志 `artifacts/ci/2cd4f00-asset-reconciliation-race/before.log`。修复仅在既有 5s
+wait budget 中积累实际 queue entries，同时保留 event 和 payload 断言。注入不进入
+最终提交；延迟变体、撤销注入后的完整 Rust 验证与新 CI 结果分别登记。
+此为 O02/O-07 的 L0 测试同步修复，不改变 runtime 语义或 F02/O02/GUI 验收状态。
+
+### 第七轮最小准备调用与原生预算（`2cd4f00`）
+
+两套 run 已结束：PR `37726138750` 的 14 jobs 全绿；push `37726135008` 为
+10 success / 2 failure / 2 cancelled，分别是前节 queue test race、iOS
+service-before 只读查询超过 60s（实测含回收 62.44s），以及 fail-fast 取消的两项。
+iOS build/boot/cleanup 通过；此 push 未卸载 APNs，也未进入该轮 app launch。
+原始服务失败证据为 `artifacts/ci/37726135008/ios-smoke-selected/`。
+
+PR 原始证据在 `artifacts/ci/37726138750/ios-smoke-selected/`，source 为 `2cd4f00`
+的测试合并提交 `6a4557f`、dirty=false，driver/workflow hashes 已匹配。
+APNs 已卸载、doctor 无重试，单次 launch 1.35s、PID=20035、1179×2556 PNG/hash 与
+cleanup 通过；PNG SHA-256=`7878213bf2be2e1bd180555e84805b26b7272bb7475c3eeed505b972fab3d78a`。
+不以单边成功覆盖另一 runner 上的失败。
+
+前轮新增的服务准备 60s 不是验收矩阵规定的 doctor 或 app deadline，已有不同准备
+命令超时的直接证据。本轮省去前置查询，直接 bootout 精确的 owned simulator service，
+再从实际 `Could not find service "com.apple.apsd" in domain for uid: ...` 结果验证
+移除并记录 domain。两条命令使用既有原生命令的 180s budget，并在 policy 中记录
+`configured_command_timeout_seconds`；实际耗时/错误继续保留，不声明硬 wall-clock 上界。
+不重试 launch，不更改 CLI doctor 5s/30s 或 app launch/180s、PID/capture 标准。
+
+41 项 Python 回归、compile/actionlint/diff checks 通过，覆盖真实 UID 输出形状、
+错误 service/domain、非零/timeout 和 cleanup；精确 bootout/absence argv 已由前轮
+本地及 hosted 原始调用验证，新两命令 driver 的完整 hosted 结果仍待新提交。
+reconciliation 修复在 100ms 注入下通过（`delayed-after.log`），注入随后已撤销；
+`app_channel.rs` 与提交基线无差异。fmt/clippy 通过。首次本地完整 workspace 的三个
+process-helper timing failures 保留在 `workspace.log`；三个定向复验均通过，默认
+并行完整复验和 build 结果在同目录单列，不能用定向结果替代完整结果。
+最终复验已完成：三个 helper 定向测试分别通过；默认并行完整 workspace 的主二进制
+489 passed / 12 ignored，全部 integration/protocol/xtask/doc tests 通过，build 通过。
+原失败为 `workspace.log`，完整复验为 `workspace-recheck.log`，另外保留 `clippy.log`、
+`build.log` 和三个 `*-recheck.log`；41 项 Python/compile/actionlint/design-doc/diff
+检查通过。新两命令准备流程的 hosted 证据仍须绑定对应新提交。
+
 ### 发布与后续验收
 
-`2eb7285`/`d9dc35b` 两轮 hosted 结果已如上核验；live iOS timeout-only 修复尚待新 run，GitHub PR 尚未合并。2026-10-08 已在
-现有 `codex/t01-android-x86-abi-evidence` 分支（整合起点=`49a6a3a`）本地合入
-`origin/main`=`2f85842`，三份路线文档冲突已解决。主线的 live
-diagnostics 测试修复及历史失败证据保留；旧 `doctor-android-emulator` job 和
-`scripts/doctor-android-evidence.py` 由新的分层 jobs/driver 替代，不再并行运行旧检查。
-原工作区另有本地备份和 stash，用户已明确授权提交推送；发布状态以 Git/GitHub 为准，
-下一动作是收集并核验本次提交对应的新 CI，不将授权或推送本身作为通过证据。
-Ubuntu x86_64 cold/live、x86_64 完整 APK、hosted ARM64 Mac cold/native build 已取得
-上述证据；live iOS 的最终 doctor/Metal/process/capture 仍须绑定新实际 run/job/artifact。
-不将本机 ARM64 APK 或 cold AVD 结果扩展为 x86 runtime 通过。
+PR #388 前述已核验 CI 基线为 `2cd4f00`，所有成功/失败分别绑定各自 source/run/artifact。
+本次提交包含 queue test 同步修复及最小 APNs 准备调用，本地验证已完成；下一动作是
+核验该提交对应的 push/PR 全部 checks 和原始 service/doctor/launch/PID/PNG/cleanup。
+初始整合基线 `2f85842` 已合入本 PR；旧 emulator-only job 已由分层 checks 替代。
 
-本地代码/回归/独立构建责任已登记，runtime 和父任务仍等待上述 CI 与真实变体。
-CI 恢复后的第一动作是逐层核对失败报告和实际 PID/ABI/capture/cleanup，再决定补 renderer
-ready/verified present、前台归属与输入/崩溃变体；不是将工作流“存在”标作 done。
+本轮仅修复用户指定 CI 范围，PR 未合并。35 个父任务计数不变；APNs 不在本 smoke
+范围，`verified_present=false`、`gui_acceptance=not_run`。真实首帧、前台归属、输入/
+语义、physical device、unknown ABI 与兼容边界继续按原责任矩阵验收；仅在新的整体
+路线请求中恢复 F01 scene/present/semantics 执行游标。

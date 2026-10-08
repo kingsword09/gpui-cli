@@ -1576,15 +1576,18 @@ fn current_app_channel_queues_accepted_asset_reconciliation() {
             removed: vec![],
         },
     );
+    // The journal event can become visible before the queue entry is delivered.
+    let mut reconciliations = Vec::new();
     wait_until(|| {
-        session
-            .store
-            .events(0, Duration::ZERO)
-            .events
-            .iter()
-            .any(|event| event.kind == Kind::AssetsReconciled)
+        reconciliations.extend(server.take_asset_reconciliations());
+        !reconciliations.is_empty()
+            && session
+                .store
+                .events(0, Duration::ZERO)
+                .events
+                .iter()
+                .any(|event| event.kind == Kind::AssetsReconciled)
     });
-    let reconciliations = server.take_asset_reconciliations();
     assert_eq!(reconciliations.len(), 1);
     assert_eq!(reconciliations[0].connection_id, 0);
     assert_eq!(reconciliations[0].missing, vec!["assets/logo.png"]);
