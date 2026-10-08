@@ -1,5 +1,7 @@
 /target/
 /artifacts/
+/*-evidence/
+/mobile-preflight/
 .zcode/
 .codex/
 .impeccable/

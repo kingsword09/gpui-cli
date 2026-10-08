@@ -1,11 +1,13 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-07（Asia/Shanghai）。执行基线：`f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）；相较
+更新日期：2026-10-08（Asia/Shanghai）。已合并实现基线：`f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）；相较
 历史实现核查 `852ddec` 和流程基线 `ac3db66`，已合并提交包含 T01 doctor、F01 baseline-driver、
 iOS-safe backtrace 模板修复、F01/P-01 native-install-failure 证据和 T01 doctor CLI host-smoke/target-selection、
 required nonzero/malformed-version responsibility 变体和三平台 host doctor artifacts；PR #389
 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 合并。
-当前分支为 `main`，工作区干净。T01/F01/P01 仍保持 `in_progress`；T01 host-smoke 已通过
+当前分支为 `codex/t01-android-x86-abi-evidence`，整合起点=`49a6a3a`；已本地合入
+`origin/main`=`2f85842` 并解决冲突，用户已授权提交推送，发布状态以 Git/GitHub 为准。
+本轮分层移动 CI 不继承历史全绿。T01/F01/P01 仍保持 `in_progress`；T01 host-smoke 已通过
 design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash merge；PR #384/#385/#386/#387
 分别 squash 为 `285893f`/`287c3c7`/`3772750`/`2a54083`；PR #389 squash 为 `f38d9df`；主线路线证据 run `37540497454` 全绿。
 
@@ -36,13 +38,133 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | T01 host responsibility 已收口到真实 GitHub Linux/macOS/Windows doctor artifacts；PR #387 修复 Windows coordinator test flake 并以 `2a54083` 合并，PR #389 修复 live diagnostics 异步发布等待并以 `f38d9df` 合并，主线 run `37540497454` 全绿。PR #388 的 x86_64 emulator ABI slice 已实现脚本/CI，但两套 run `37532395454`/`37532401654` 因 hosted emulator `sys.boot_completed` 长时间为空而取消，未取得 match/mismatch report；等待能完成 x86_64 AVD boot 的 runner 或真实设备。F01/P-01 仍需 scene readback/verified present/AccessKit semantics/action 与 P-02 T05/T06 联合对照。条件恢复前保持 `in_progress`，不晋升父状态。 |
-| 首批候选 | PR #388 保持 open，等待 x86_64 AVD boot 条件恢复后直接重跑；若接入真实 x86/unknown ABI AVD 或 physical device，恢复 T01 T-03；若 GPUI backend/AccessKit 提供 scene/present/semantics 能力，恢复 F01/P-01 联合出口 |
+| 当前执行游标 | 用户限定 PR #388 CI 排障有界出口已达到：`5d09ab3` push `37728230531` / PR `37728233406` 各 14 jobs 全绿，raw iOS runtime 已核验；41 项 driver 与完整 Rust 本地复验通过，注入已撤销。等待 review/merge，父状态不变 |
+| 首批候选 | PR #388 review/merge 后核对对应 main CI。当前用户范围结束；仅在新整体路线请求中恢复 F01 scene/present/semantics。T01 未覆盖 ABI/physical/兼容责任仍等待对应工具链/设备环境，不从 smoke 倒推父任务或依赖完成 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
 
-### 本轮执行卡：F01 / P-01 iOS simulator native-install-failure
+### 2026-10-08 用户指定切片：分层移动 CI 初始工作卡
+
+以下工作卡保留各轮领取时的缺口和切换理由；当前出口以本节上方游标及
+[移动 CI 切片的最终结果](../experiments/mobile-ci-layers-2026-10-08.md)为准。
+实现证据基线为 `5d09ab3`，后续文档同步不改变该基线。已重新核对 `origin/main`=`2f85842`；
+合并/主线 CI、完整 GUI/真机仍是独立等待项，本轮没有授权范围内的剩余实现任务。
+
+| 维度 | 本轮登记 |
+| --- | --- |
+| 基线 / 范围 | 初始 `HEAD` 与 `origin/main` 均为 `2f85842`；已复核 `f38d9df` 之后三份路线文档变更。现有 PR #388 分支以 `49a6a3a` 为起点合入该主线并解决冲突，用户已授权提交推送。本轮只落实用户指定的 Android/iOS 分层 CI，不启动整体路线循环 |
+| 实现缺口 | 已实现 Android/iOS cold doctor、Android live doctor 的 KVM preflight/boot deadline/失败报告、独立完整 Debug native build 与进程/capture/cleanup smoke；cold/live 均准备 required cargo-ndk，初始生成 Cargo.lock，合法 Gradle cache bypass 不阻断真实 APK 检查 |
+| 本地测试缺口 | 23 个 driver 回归通过，覆盖 failure-before-assert、ABI/phase/identity、PNG 校验/解压、timeout/秘密筛除、独立 build、manifest 目录根/cache bypass 与 failed-install cleanup；iOS/Android ARM64 cold doctor、完整 iOS native build 和 ARM64 APK 已通过。本地 iOS boot-first smoke 300s 等待 System App 超时但 owned simulator 删除通过；新 build-first runtime 仍待实际运行 |
+| CI 缺口 | `d9dc35b` 的 push/PR runs `37714516656`/`37714519942` overall=failure；仅 iOS smoke 的 boot 后工具 timeout 失败，其他 jobs success。push cold/live doctor reports/Android PNG 与 summary 已严格复核。新的 timeout-only 重探已获用户授权提交推送，须绑定新 workflow run/job/artifact，不继承旧主线全绿结果 |
+| GUI / 设备缺口 | process/capture smoke 不证明 scene readback、verified present、输入/语义、真实前台归属或 physical device；Metal probe 失败须留下 failure，不跳过后声称运行通过 |
+| acceptance / 依赖 | T01 的 T-01/T-03 cold inventory 与 live x86 ABI responsibility；T01 无硬前置。完整应用 smoke 是 F01/P01 的平台可行性证据设施，不晋升依赖 F01/T01 的 P01 或 M01/M-01/M-02 |
+| 非目标 | 不增加 XCTest/instrumentation 测试系统、不修改 GPUI renderer、不接公共 PR self-hosted runner、不降低原 live ABI 责任、不宣称 GUI/真机验收或父任务完成 |
+| 有界出口 | 本地实现、23 个 driver 回归、两端 cold doctor/独立 Debug native build 和失败/cleanup 证据登记已完成；PR #388 本地整合及文档冲突已解决，用户已授权提交推送，等待 review/merge/新 CI。发布后核对 raw doctor、native build、boot/runtime/capture/cleanup artifacts。x86 live、真实首帧/scene/输入/语义和 physical variants 不以本地 smoke 替代；不改 35 项计数 |
+
+PR #388 的历史取消保留，但不再据此认定 hosted Linux 不支持 emulator：日志中
+KVM 权限不足导致 `-accel off`，须先修复可配置权限并执行 acceleration preflight。
+分层实现与本地 PR 整合已完成，提交推送已获授权，下一动作是核对 hosted 各层证据；原 F01
+scene/present 游标暂因用户明确指定该切片而让位，退出后恢复其未完成项。
+
+同日首轮 CI 失败复核的有界出口：仅补齐已证实的宿主库、cold AVD metadata 根和
+iOS required tools，不修改 doctor ABI/required 策略或 renderer。27 项回归、actionlint、
+Python compile、文档/diff checks 和本地 ARM64 isolated cold match/mismatch 已通过；
+修复已获提交推送授权，须核对重跑的 x86 metadata/live 以及 iOS build/boot/runtime/cleanup。
+失败报告、当前代码、父任务状态和 GUI 缺口保持分离；不从 Android APK pass 推导 GUI pass。
+
+第二轮有界出口：`d9dc35b` bootstrap 各层已取得 hosted job/部分 raw evidence，唯独
+iOS smoke 在 build/boot 成功后多工具超时。每个 live iOS doctor 用例只允许两次、
+间隔 15 秒的明确 timeout-only 重探，逐次报告保留；缺工具/版本/target/selector 错误
+不重试，最终不通过仍失败。33 项回归、Python compile、actionlint、文档/diff 检查通过；
+本轮修复已获用户授权提交推送，尚未取得新 runtime pass。下一动作是新 CI 核验最终报告及真实 smoke，
+不是晋升 GUI/首帧/父任务。
+
+### 第三轮 CI 排障工作卡（`82a353c`）
+
+接续用户指定的 PR #388 CI 修复；已 fetch 并比较主线 `2f85842` 与审计基线
+`f38d9df`，期间仅路线文档同步。当前 head=`82a353c`；push run `37719062475`
+全绿，PR run `37719065008` 仅 iOS smoke 失败，其余 13 jobs 通过。
+
+| 维度 | 剩余缺口 / 本轮出口 |
+| --- | --- |
+| 实现 | PR 日志含 `ios.rust_target.simulator` 的 `Rust target probe timed out`，现有 timeout-only 白名单未覆盖该明确超时原因，首轮即失败；补齐该分类，保留缺工具/缺 target/版本/selector 等非超时拒绝 |
+| 本地测试 | 新增回归先复现零次重试；修复后 36 项通过，覆盖 Rust target 正负 selector 恢复、持续超时上限及非超时拒绝；Python compile、actionlint 和文档/diff checks 通过 |
+| CI | 失败/成功选定原始证据已下载核验：PR 确为零重试，push 重试一次后完整 doctor/Metal/install/PID=36244/1179×2556 PNG/hash/cleanup 通过；沿用提交推送授权，修复后须核对新 push/PR runs，不从旧 push 全绿推导 PR 通过 |
+| GUI / 设备 | 保留 `verified_present=false`、`gui_acceptance=not_run`；真实首帧、输入/语义、physical device 仍无验收 |
+| acceptance / 依赖 | T01 的 T-01/T-03 iOS live selector 与 required-only failure 责任，无硬前置；smoke 不关闭 F01/P01/M01 父任务或依赖 |
+| 非目标 | 不放宽 5s/30s CLI 预算、不扩大重试次数、不改 renderer、Android 或 required 策略；历史 probe 实测超预算不能称为硬截止通过 |
+| 有界出口 / 恢复 | 漏分类修复及有意义回归通过，提交推送，核验新 CI 和原始证据并同步状态；review/merge 与 GUI/真机责任继续独立登记。整体路线恢复后才返回 F01 scene/present/semantics |
+
+### 第四轮 CI 排障工作卡（`a43b3c8`）
+
+Rust target 超时漏分类已修复并推送。push run `37721318579` 的 14 jobs 全绿；
+PR run `37721322431` 的 13 jobs 通过，iOS smoke 转为 `simctl launch` 180s 超时。
+两套 live doctor 均在一次重试后通过；PR Metal/install 通过，launch 输出为空、owned
+UDID 清理通过。push 的 PID=26376、1179×2556 PNG/hash 与 cleanup 已核验。
+
+| 维度 | 剩余缺口 / 本轮出口 |
+| --- | --- |
+| 实现 | 原始两分钟 diagnostics 为 683057564 bytes / 474956 events，其中 apsd 405664 events，反复 simulator certificate unsupported / reconnect；没有应用 bundle/executable 记录。仅对 CI 自建 simulator 的 smoke 显式关闭 APNs 后台服务并记录验证结果，再实测是否消除启动失败；不声称日志已证明唯一因果，也不重试/吞掉应用启动失败 |
+| 本地测试 | 新建本地 iOS 26.2 simulator 的最终 driver 实跑通过：实际 user domain、disabled、bootout、service-not-found 与 owned UDID 删除均有原始证据；40 项 driver 回归和 Python compile/actionlint/design-doc/diff checks 通过。此本地服务探针不覆盖 GPUI 应用 launch |
+| CI | 新失败已绑定 run/job/artifact；修复后重新核验 push/PR live doctor、launch、稳定 PID、PNG/hash、cleanup，不将 push 单边成功算作整体验证 |
+| GUI / 设备 | 仍不声明 app-owned pixels、verified present、语义/输入或物理设备验收 |
+| acceptance / 依赖 | 同一用户指定移动 CI 切片，T01 无硬前置；启动 smoke 为 F01/P01 平台证据设施，不晋升父任务或解除硬依赖 |
+| 非目标 | 不扩大 timeout、不重试 launch、不吞非零退出/真实 crash；不修改宿主或既有 simulator 服务，不扩展 renderer、Android 或核心路线。此 smoke 不覆盖 APNs 推送能力 |
+| 有界出口 / 恢复 | 收集启动失败原始证据，完成针对性修复和回归，发布并核验两套 CI；如有外部环境阻塞，记录准确恢复条件，不伪造 runtime pass。review/merge 与完整 GUI/真机责任独立保留 |
+
+### 第五轮环境准备纠偏（`f78aee2`）
+
+push run `37724354473` 的 13 jobs 通过，iOS smoke 卡在新增的 `launchctl disable`
+60s deadline，尚未进入新 doctor/launch；PR run `37724359228` 的 14 jobs 全绿。
+持久化 disabled override 对本次只 boot 一次、结束即删除的 owned simulator 并非必要。
+本轮把 APNs 隔离收敛为 `bootout` 当前 service registration 加确切 absence 验证，
+不再写/读取持久化 disable 状态；报告只声明当前 boot 已卸载，不声明 persistent disable。
+保持原服务控制/应用 launch 的 deadline 与单次 launch，不重跑或吞掉应用失败。
+先补“不允许 bootout 失败仍通过”及 absence/域校验回归，再在新的本地 iOS 26.2
+simulator 验证直接 bootout 和 cleanup；后续须绑定新 push/PR 原始 runtime 证据。
+父任务、GUI/真机与 APNs 验收边界保持不变，失败实验不标作已稳定修复。
+PR 原始证据已核验：service removal 后 doctor 无重试，launch 1.49s，PID=20494、
+1179×2556 PNG/hash 与 cleanup 通过。精简后的直接 bootout driver 又在新建本地
+iOS 26.2 simulator 验证当前 boot 服务移除及 cleanup 通过；41 项回归、Python compile、
+actionlint、design-doc/diff checks 通过。下一动作是发布并核验精简版两套 hosted CI。
+
+### 第六轮独立 workspace 测试竞态（`2cd4f00`）
+
+push run `37726135008` 的 macOS workspace job 在
+`current_app_channel_queues_accepted_asset_reconciliation` 失败，len=0、期望 1；
+矩阵 fail-fast 取消 Linux/Windows，不能算三个独立测试失败。移动 jobs 仍在运行。
+日志留存于 `artifacts/ci/37726135008/macos-check.log`。这是本次 CI 范围内独立可修的
+测试同步缺陷；移动 runtime 暂等待 hosted 结果，未更换父任务或扩大整体路线。
+
+| 维度 | 本轮出口 |
+| --- | --- |
+| 实现 / 原因 | app channel 先 emit journal event，再 push reconciliation queue；测试只等 event 后立即 drain queue，不能保证队列已发布。修复仅让测试等待实际 queue，保持事件和 payload 断言及原 5s wait budget |
+| 本地测试 | 临时 test-only 在 event/queue 间注入延迟，验证旧测试稳定失败、修复后通过；随后撤销注入，执行 fmt/clippy/完整 workspace test/build 与文档检查 |
+| CI | 先保留 `2cd4f00` 移动结果，避免取消还在运行的验证；发布测试修复后核验新的三平台与移动 jobs，不用单项重跑掩盖失败 |
+| 验收 / 依赖 | O02 的 O-07 L0 queue responsibility，仅测试同步；O02 仍依赖 F02。不是 O-06/O-07 的真实资源/GUI 验收，不晋升任何父任务 |
+| 非目标 / 恢复 | 不调整 app channel 的事件/队列语义、不扩大 timeout、不增加 runtime test hooks；此缺陷与 APNs 环境问题分别留证。测试出口后回看同一 PR 的移动等待结果，最终停在 review/merge 等待态 |
+
+### 第七轮服务准备预算与最小调用（`2cd4f00`）
+
+同一 push run 的 iOS smoke 在新增 service-before 只读查询上超过 60s，尚未
+卸载 APNs。该 60s 是前轮新加的 driver 准备预算，不属于 T-02 的 CLI 5s/30s 或
+应用单次 launch/180s 验收要求；此前 persistent disable 已有超时记录，不能继续
+把 60s 当作 hosted 原生命令的充分预算。
+本轮省去非必要的前置查询，直接通过 owned UDID 的 `user/foreground/com.apple.apsd`
+bootout，再从确切 service-not-found / uid 报告核验移除和实际域。两条准备命令采用
+现有原生命令的 180s budget，明确记录配置值，继续保留实际耗时/失败；不重试 launch，
+不放宽 doctor 或应用验收，不声明硬 wall-clock 上界。新增 parser/错误回归引用已取得的
+真实 stderr 形状；最终仍要求新 hosted runtime 通过。
+reconciliation 测试已在受控延迟下通过且注入已撤销；首次完整本地测试另遇三个历史
+process-helper 时序失败，分别复验并保留原失败，不把它们混成此次队列测试失败。
+先完成测试/准备命令这两个已证实 CI 缺口的本地出口，再发布、核验所有 jobs 与原始证据。
+本地出口已完成：41 项 Python 回归、fmt/clippy、默认并行完整 workspace 复验
+（主二进制 489 passed / 12 ignored，全部其他目标通过）、build 和文档/diff checks
+通过。三个原 process-helper 失败均保留原日志，定向与完整复验分别通过；production
+app channel 未变，临时注入已撤销。下一动作是本次提交的两套 CI 和原始 runtime 核验。
+
+### 历史执行卡：F01 / P-01 iOS simulator native-install-failure
 
 | 维度 | 本轮登记 |
 | --- | --- |
@@ -66,7 +188,7 @@ design-doc、两套三平台 workspace/template/baseline-driver CI 并 squash me
 | 非目标 | 不自动安装工具链，不修改 SDK/许可/签名，不把 CI hosted runner 当作完整 native device 验收 |
 | 有界出口 | host-smoke、required nonzero/malformed-successful-version 与 GitHub Linux/macOS/Windows host evidence 已收口；PR #388 x86_64 emulator 两次 hosted boot 未完成，记录 `emulator_boot_unavailable`，未取得 match/mismatch JSON。T-03 的 x86/unknown ABI、physical device 和 AGP/Gradle 边界仍需对应环境；环境缺失时保持 required/unavailable 记录，不晋升 T01 |
 
-### 当前执行卡：F01 GUI/scene/present 与 P-02 联合对照
+### 等待整体路线恢复：F01 GUI/scene/present 与 P-02 联合对照
 
 | 维度 | 本轮登记 |
 | --- | --- |

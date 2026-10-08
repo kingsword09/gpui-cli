@@ -1,0 +1,367 @@
+# Android / iOS 分层 CI 切片
+
+更新日期：2026-10-08；本地命令的实际 UTC 时间另存于 `environment.json`。
+
+## 范围与基线
+
+用户指定落实移动 CI 建议；代码基线 `2f85842`，包含 `f38d9df` 的 live diagnostics
+修复及随后三份路线文档同步。PR #388 的 `49a6a3a` 是未合并的历史尝试，不继承其
+未取得的 live ABI pass。新驱动复用相同验收意图，不要求先启动设备才能检查 cold inventory。
+
+本地未提交运行以 `source.json` 的 revision、dirty、driver/workflow SHA-256 绑定；
+hosted CI 还记录 `GITHUB_SHA`、run ID 和 attempt。没有新 CI run 前不得继承旧主线全绿。
+
+## 实现责任
+
+| 检查 | 责任与边界 |
+| --- | --- |
+| `doctor-android-cold` | 真实 SDK/NDK/JDK、x86_64 AVD 文件及镜像存在性；AVD 不启动，match 为 exit 0，ABI mismatch 为 exit 1 且只允许 selected-device required failure |
+| `android-emulator (doctor)` | KVM 权限与 acceleration preflight；API 35/google_apis/x86_64 boot deadline 300s；`adb` 明确 serial、boot=1、实际 ABI；保留原 live match/mismatch 责任，不拿 cold 结果替代 |
+| `ios-simulator (doctor)` | ARM64 Mac、指定 Xcode/runtime；本轮自建 stopped UDID 的 required-pass 与不存在 UDID 的 selected-device-only failure；删除自建 simulator |
+| `android-native-build` / `ios-simulator (build)` | 独立完整 Debug native build，不以 emulator boot/Metal 为前置；初始依赖解析后保存 Cargo.lock；不能用 stub 打包或 cargo check 代替真实链接 |
+| `android-emulator (smoke)` | 完整且未替换为 stub 的 GPUI APK；指定 serial 安装/启动、包 PID 连续五秒不变、PNG 完整性/哈希、包 PID logcat、crash buffer 和 uninstall |
+| `ios-simulator (smoke)` | 链接 CoreGraphics 的宿主 Metal probe；完整 Rust+Xcode app、指定 UDID 安装/启动、PID+executable 连续五秒存活、PNG、PID native logs、shutdown/delete |
+| `mobile-evidence-driver` | 不需要 SDK/设备的报告、phase/identity/ABI、无关失败排除、原始失败报告、超时、秘密筛除、PNG 与 runtime selection 回归 |
+
+cold device 的 `state.kind` 必须为 stopped，live 必须为 running。Android serial 可以对应
+具名 AVD，但必须匹配报告的 `state.serial`，不能把另一设备的同 ABI 当作通过。
+负例必须只失败在所测试的 selected-device check，不能把缺 Rust target/JDK 等无关故障
+算作成功的 mismatch。命令失败/超时在抛错前持久化；秘密 canary 检测失败并裁剪输出。
+
+Android doctor 的 `android.cargo_ndk` 本来就是 required，因此 cold/live 两 job 均显式
+安装 cargo-ndk 4.1.2，不假设 hosted image 已预装。完整 APK 的 cache manifest 根是目录，
+不是 APK 文件名；driver 验证实际 Debug APK，manifest 存在时对照文件 SHA-256。
+全局 Gradle init 等输入导致合法 cache bypass 时仍可验证 APK，但明确记录
+`cache_manifest_available=false`，不把 native build pass 当作 cache acceptance。
+
+## 验收层级与非目标
+
+doctor 部分属于 T01 的 T-01/T-03 L1 responsibility；T01 无硬前置。完整应用 smoke 是
+F01/P01 平台可行性证据设施，不能提前晋升依赖 F01+T01 的 P01 或其他移动父任务。
+35 项父任务计数不变。
+
+宿主 Metal device 不是 Simulator renderer/首帧证据；应用进程仍存活不是 ready 信号。
+device screenshot 不保证目标应用前台或 app-owned pixels，因此 summary 明确记录
+`verified_present=false`、`gui_acceptance=not_run`，smoke 还记录
+`application_ready=not_instrumented`，iOS 的 `simulator_metal=not_instrumented`。
+M-01/M-02 完整责任仍需截图归属、输入、键盘/方向/生命周期、early native crash、ANR、
+进程重启/重用及 log attribution 变体；物理设备、unknown ABI、AGP/Gradle 边界也未关闭。
+
+不修改上游 renderer、签名/许可，不接入公共 PR self-hosted runner，不增加未执行的
+XCTest/instrumentation 用例，不用 artifact upload 成功或文档检查替代设备验收。
+完整 Release native build 与 M-08 profile/ABI 并发矩阵不在本次 Debug smoke 出口。
+
+## 本地与 CI 证据
+
+本轮本地验证与 hosted CI 结果分别登记，不能从工作流配置推断已通过。
+本机 Android 仅有 ARM64 system image，x86_64 live/KVM 责任由 Ubuntu CI 验证。
+本机 iOS 有 26.2 runtime，driver 只创建/删除本轮 UUID 命名的 isolated simulator；
+不 shutdown/delete all，不覆盖已有 Android 包。
+
+### 本地结果
+
+| 实际执行 | 结果 / 原始证据 |
+| --- | --- |
+| `python3 -m unittest discover -s scripts/tests -v` | 23 passed；报告/phase/identity/ABI、只有预期 required failure、原始报告先落盘、秘密泄漏裁剪、timeout、PNG CRC/解压、独立构建、failed-install cleanup、APK manifest 目录根和 cache bypass |
+| `actionlint .github/workflows/ci.yml` / Python compile | passed；只是工作流/语法检查，不是 hosted/native acceptance |
+| `cargo fmt --check` / workspace clippy `-D warnings` | passed |
+| `cargo build --locked` | passed；本地 CLI 构建，不是移动运行时或 hosted CI 验收 |
+| workspace test，默认并行 | 485 passed / 4 failed / 12 ignored；4 个既有 devserver/coordinator 时序测试在本机同时执行 native/boot 时失败；未改这些 Rust 测试或实现 |
+| `cargo test --workspace --locked -- --test-threads=1` | 全部通过；主二进制 489 passed / 12 ignored，integration/protocol/xtask/doc tests 均通过；原命令输出 `/tmp/gpui-mobile-workspace-serial.log`。串行重跑不是 hosted 默认并行 CI 的替代 |
+| PR #388 本地整合后 `cargo test --workspace --locked` | 默认并行完整 workspace 通过；主二进制 489 passed / 12 ignored，doctor/live/upgrade integrations、protocol/xtask/doc tests 均通过；日志 `/tmp/gpui-pr388-integration-tests.log`。23 个 Python 回归、Python compile、actionlint、fmt、design-doc 与 staged/unstaged diff checks 也通过；不覆盖 hosted 或设备 runtime |
+| iOS cold doctor | `T-03/ios-cold/attempt-03`：iOS 26.2 owned stopped UDID required-pass / 不存在 UDID selected-device-only fail，shutdown/delete 后确认 UDID 不存在 |
+| Android cold doctor | `T-03/android-cold-arm64/attempt-02`：API 35/google_apis_playstore/arm64-v8a AVD，match exit 0、x86_64 build ABI mismatch exit 1；本地 shell 删除本轮 AVD，原日志 `/tmp/gpui-mobile-avd-delete-02.log` |
+| 完整 iOS Debug native build | `P-01/ios-build/attempt-02`：cargo lock 初始解析、完整 Rust staticlib 和 Xcode 链接成功，manifest 留存，owned simulator 删除；未启动/截图，不是 runtime/Metal acceptance |
+| 完整 Android Debug native build | `P-01/android-build-arm64/attempt-01`：未修改为 stub 的 GPUI APK 构建成功，仅 `lib/arm64-v8a/libmobile_ci_probe_app.so`；APK SHA-256 `6012e0b5a875dc4f80a53c2a3d7441a5a17d107bcbc728d5f0ed7dcf8eaf0e66`，Cargo.lock、manifest、APK library list 和全部命令留存；没有 emulator runtime |
+| iOS 早期 boot-first smoke | `P-01/ios-smoke/attempt-01`：bootstatus 300s timeout，末状态 Waiting on System App；summary=fail、raw boot stdout/stderr 保留，owned UDID shutdown/delete 后确认不存在。之后才分离独立 build 并调整为 build-first；新 runtime 流程未实际完成 |
+| 宿主 Metal preflight | 本机 `xcrun swift -framework CoreGraphics ...` 返回 Apple M2；仅宿主能力，不是 Simulator renderer/首帧证据 |
+
+上表的相对证据根是 ignored `artifacts/acceptance/2f85842-dirty/`，每次 source/driver/workflow
+hash 以该 attempt 的 `source.json` 为准，不能将较早 driver 的 attempt 称作当前代码完整验收。
+Android cold attempt-01 的 match 通过，但负例还遇到 required Gradle 5s timeout，driver
+正确拒绝将其算作 mismatch pass；attempt-02 消除了该无关失败。iOS build attempt-01
+因 fresh fixture 没有 Cargo.lock 被 CLI 的 locked metadata 拒绝；已在两个 native driver
+加入初始锁文件解析和回归，而没有放松 CLI 的 locked 输入约束。
+
+当前实现新加入的锁文件留存、PNG/manifest 验证等部分已有 offline regression；较早
+local attempt 未记录的字段不补造。CI root evidence/preflight 目录加入 gitignore，避免它们
+污染 `source.dirty` 或进入 source package。
+
+### 等待与恢复条件
+
+### 首轮 hosted 结果与 bootstrap 修复（`2eb7285`）
+
+实际 push run `37711864318` / PR run `37711867631` 均已完成，overall=failure。
+两套三平台 workspace checks、templates、baseline/mobile driver 回归和完整 Android
+x86_64 Debug APK 构建通过；其余移动 jobs 失败，不能用这些局部通过晋升父任务。
+push APK 含 `lib/x86_64/libmobile_ci_probe_app.so`，SHA-256 为
+`e2283d092b9c4ac6851a1dd5cce0292ea90f8af9a1240d995fc0f536beaecb32`，
+原始 `source.json` 绑定 revision=`2eb7285`、dirty=false 和 driver/workflow hash。
+
+本轮有界缺口、修复与证据：
+
+- Android live 两 jobs 已通过 KVM 权限/加速预检（`KVM ... installed and usable`），
+  随后的 emulator version 命令因缺少 `libpulse.so.0` exit 127；未进入 emulator boot。
+  在预检之前显式安装 `libpulse0`，记录 `ldd`；实际 emulator version 必须成功后才启动。
+- Android cold 的 raw match report 只有 `android.selected_device` required/unknown：
+  选中 stopped AVD，但没有 arch/runtime/image metadata；无法确认 ABI。旧 artifact
+  没有 config.ini/实际默认 AVD 根，不能编造其确切路径。为创建器与 CLI 显式共用
+  `ANDROID_AVD_HOME` 和 `--path`，留存实际 config.ini/list 及环境根；不手写 ABI。
+- iOS doctor 的 required failures 是 `ios.xcodegen` unavailable 与
+  `ios.rust_target.device` 缺 `aarch64-apple-ios`；build/smoke 也因找不到 XcodeGen
+  失败。workflow 显式安装 XcodeGen 和 device/simulator 两个 Rust targets，
+  保留工具链 preflight；不把 device target 检查降为 optional。
+- 初始 run 的 raw logs/artifacts 已下载到 `/tmp/gpui-ci388-2eb7285/`；
+  ignored 留存根为 `artifacts/acceptance/2eb7285/ci/push-37711864318/` 和
+  `artifacts/acceptance/2eb7285/ci/pr-37711867631/`；
+  27 项离线回归包含 bootstrap 配置契约与 AVD 根记录，但不是 Linux 库/模拟器验收。
+- 本地使用真实 API 35/google_apis_playstore/arm64-v8a 镜像，以显式
+  `ANDROID_AVD_HOME`/`--path` 创建 isolated AVD，cold match/mismatch 通过且 owned
+  AVD 删除；实际 config.ini 与新版 environment roots 留存于
+  `/tmp/gpui-ci388-cold-root-evidence-1791423453/`。这不是 hosted x86/live 验收。
+
+本次仅修复已证实的 bootstrap/元数据可见性缺口；不修改 renderer、签名、doctor ABI
+策略，不使用 continue-on-error，不宣称 cold/live/GUI 已通过。修复重跑后须核验
+cold metadata/selected-device-only mismatch、iOS required tools 及实际 build/boot/process/
+capture/cleanup artifacts。新修复的本地验证与 hosted 重跑结果须分别登记。
+用户已授权提交推送此次修复；27 项回归、Python compile、actionlint 和文档/diff checks 通过，
+没有修改 Rust 实现或重跑完整 native build，不借本地工具齐备推断 runner 修复通过。
+
+### 第二轮 hosted 排障工作卡（`d9dc35b`）
+
+2026-10-08，push run `37714516656` / PR run `37714519942` 已完成且整体失败。
+两套 14 jobs 中只有 `ios-simulator (smoke)` 失败；Android cold/live doctor、完整
+x86_64 APK、Android process/capture smoke、iOS cold doctor 和完整 Simulator build
+及其他常规 jobs 均显示 success。job 成功不自动关闭 GUI/父任务责任。
+
+本轮有界出口是从失败 artifact 定位 iOS boot 后 live doctor 的实际 required failure，
+仅修复已证实的 driver/runtime 时序或代码缺陷，添加针对性离线回归，并保留失败报告
+与清理证据。不降低 required checks、不吞失败、不先假设 Metal/renderer 已坏；不改
+APK build 或其他已通过层。T01 无硬前置，smoke 仍不晋升 F01/P01/M01。
+
+两套失败日志均显示 `doctor match exit was 1, expected 0`。push artifact 已核验：
+完整 app build、bootstatus 和 owned UDID 清理均成功；boot 后的 live doctor 中
+`rust.rustc`、`rust.cargo`、`rust.rustup`、`ios.xcodebuild`、`ios.simctl` 为 required/
+unknown、`probe timed out`（约 5–8.5 秒），两个 required Rust targets 因 30 秒总
+deadline 未执行。宿主版本探测在 boot 前仅需约 0.07–0.47 秒；这与 boot 后调度
+压力一致，但报告不证明其底层原因。未进入 host Metal 或应用安装/启动，不可诊断为
+renderer/Metal 失败。PR raw report 也已核验：上述 required timeouts 之外还含
+`ios.xcodegen` timeout；`ios.simctl` 实测 duration=89922ms。两套 selected-device
+均为 running/pass，清理成功。报告只证明 deadline failure，不证明宿主调度压力的
+底层原因，也不证明配置的 5 秒/30 秒预算实现了硬截止。
+
+针对该明确边界，已仅在 iOS live doctor 的每个用例增加至多两次、间隔 15 秒的 timeout-only
+重探：必须是 schema/selector 身份正确、selected-device 状态符合用例、其余 required
+failure 全为明确 probe/total deadline 超时；非零工具、缺工具、版本/target/selector
+错误不重试。每次原始失败报告先持久化，不改 CLI 的 5 秒/30 秒预算；最终仍须完整
+通过严格验证，否则失败。cold/Android 默认不重试；此修复不代表 GUI/首帧验收。
+`doctor-retries.json` 保留失败报告引用/延迟；`doctor-result.json` 绑定最终通过严格验证
+的报告，summary.live_doctor 记录使用的 retry 数，初次失败报告不会被覆盖。未恢复
+时仍失败；额外工具退出/required failure 会直接停止，不把它算作 transient。
+
+33 项离线回归已通过，新增恢复后失败报告留存、重探耗尽、非 timeout/错身份不重探、
+负例 unrelated timeout 不算成功、默认/cold/Android 禁用重探、smoke 参数接线；
+Python compile、actionlint 和文档/diff 检查通过。用户已授权本轮修复提交推送，真实 live iOS
+重探恢复与后续 Metal/install/process/capture 仍待新 CI；没有修改 Rust probes/renderer。
+
+push artifacts 的 Android cold/live match/mismatch 和 iOS cold selector 报告已由
+同一严格 validator 重读通过；Android smoke 的 1080×1920 PNG 完整性/CRC/hash
+与 summary 一致，package PID=4162、uninstall=pass；独立 Android/iOS build=pass，
+所有 source revision=`d9dc35b`、dirty=false。仍不证明前台归属、app-owned pixels 或 GUI。
+原始 downloaded artifacts/logs/jobs 留存在 ignored
+`artifacts/acceptance/d9dc35b/ci/push-37714516656/` 与
+`artifacts/acceptance/d9dc35b/ci/pr-37714519942/`；PR 存储 iOS smoke raw artifact/
+jobs/logs，不补造尚未下载的其余 PR artifacts。
+
+### 第三轮 hosted 排障（`82a353c`）
+
+push run `37719062475` 的 14 jobs 全绿；PR run `37719065008` 的 14 jobs 仅
+`ios-simulator (smoke)` 失败。其日志含三个普通工具 timeout、
+`ios.rust_target.simulator` 的 `Rust target probe timed out` 和 device target 的
+total deadline。现有 classifier 只接受普通 probe 与 total deadline 两种原因，漏掉了
+Rust target 专用原因，因此错误标签仍是 `match`，没有进入重试。
+该 `unknown` 结果的 `installed=false` 不证明 target 缺失；确实缺失时 CLI 返回
+`fail` / `Rust target ... is not installed`，必须保持直接拒绝。
+
+本轮仅补齐明确 timeout 分类，不修改 5s/30s 预算、required 策略或两次重试上限。
+回归先复现正负 selector/simulator/device target 全部提前失败和零次重试；修复后
+36 项 driver 测试通过，涵盖恢复后严格验证、逐次原始报告保留、持续超时失败，以及
+缺 target/缺 rustup/非零退出/启动错误混合普通 timeout 时仍不重试。
+Python compile、actionlint、design-doc 与 diff checks 通过；这是本地证据，修复后
+hosted 结果须另行绑定新 run/job/artifact。T01/F01/P01 和 GUI/真机责任不晋升。
+本轮 `cargo fmt --check`、workspace clippy `-D warnings`、默认并行完整 workspace
+test（主二进制 489 passed / 12 ignored，integration/protocol/xtask/doc tests 通过）和
+`cargo build --locked` 通过；本地测试日志 `/tmp/gpui-ci388-rust-target-workspace.log`。
+
+两套 iOS smoke 的选定原始证据已下载到 ignored
+`artifacts/ci/37719065008/ios-smoke-selected/` 和
+`artifacts/ci/37719062475/ios-smoke-selected/`（JSON、boot/process 输出及成功 PNG，
+未下载完整 native diagnostics 日志）。PR source 为测试合并提交 `188d701`、dirty=false，
+build/boot/cleanup 通过，`commands.json` 确认仅一次 match；将其原始报告交给修复后的
+classifier 可进入有界重试。push source=`82a353c`、dirty=false，match 第一次超时、
+重试一次后通过，unknown UDID 只触发 selected-device failure；host Metal、安装、启动、
+PID=36244 的进程采样与 capture 后检查、owned UDID 清理均通过。1179×2556 PNG 的
+CRC/像素尺寸/hash 已重验，SHA-256=`62f0839a2d6bb6bf6c7eaa20b3cf856f6966bf38340eaf5687329a53d224e967`。
+该成功仍标记 `verified_present=false`、`gui_acceptance=not_run`；不能代替修复后 PR CI。
+
+### 第四轮 hosted 结果与 APNs 环境隔离（`a43b3c8`）
+
+push run `37721318579` 的 14 jobs 全绿；PR run `37721322431` 的 13 jobs 通过，
+只剩 iOS smoke 在单次 `simctl launch` 的 180s deadline 失败。两套 live doctor
+均一次重试后通过，最终 match / unknown-UDID-only failure 已重新严格验证。
+push source=`a43b3c8`、dirty=false、driver/workflow hashes 匹配；host Metal、install、
+PID=26376 的六次进程采样和 capture 后检查、owned UDID 清理均通过。
+1179×2556 PNG 重验通过，SHA-256=`bb92447470f75d3f37bc09f2443292abbb19550d89ecf9bfa204052e3e19d0b0`。
+原始证据及验证摘要在 ignored `artifacts/ci/37721318579/ios-smoke-selected/`。
+
+PR 的 build/boot/doctor/Metal/install 都通过；launch stdout/stderr 为空，最终删除
+owned UDID。原始证据在 `artifacts/ci/37721322431/ios-smoke-selected/`，包含完整
+`019-diagnostics.stdout`：最后两分钟共 683057564 bytes、474956 events，其中
+apsd 405664 events，反复 `Client is not supported` 的 simulator certificate 错误、
+刷新证书失败和重连；没有目标 bundle/executable 的日志。该观察支持隔离不相关推送
+后台活动的实验，但不证明它是 launch timeout 的唯一原因，不能把未返回 PID 当作成功。
+
+新 opt-in `--disable-push-service` 仅允许 smoke；workflow 只对该 mode 启用。
+driver 在自建 UDID boot 后，通过 `simctl spawn <owned-UDID> launchctl` 操作
+`user/foreground/com.apple.apsd`，从实际 service report 解析 user domain，验证 disabled
+状态，bootout 后要求确切 service-not-found 结果；任一步失败仍 fail 并清理 owned UDID。
+`simulator-services.json` 和 summary 明确记录 APNs 不在此 smoke 范围。宿主、其他
+simulator、cold doctor/build 和默认 local smoke 不受影响；不重试 launch、不放宽
+180s deadline，不修改应用/renderer 或稳定 PID/PNG 标准。
+
+40 项离线回归、Python compile、actionlint 和 diff checks 通过；新增变体覆盖仅在
+selected simulator 操作、服务仍在/无法确认停用/错误 domain/timeout/权限错误拒绝、
+flag 范围和失败 cleanup。本地隔离 iOS 26.2 的 `system` compatibility alias 已完成
+disable/bootout/验证并删除 owned UDID（`artifacts/ci/a43b3c8-apsd-local/`）；该 runtime
+明确提示使用 `user/foreground`，最终 driver 的实际服务路径与新 CI 仍需分别实测。
+最终 driver 也已在另一新建 iOS 26.2 simulator 实跑通过：实际解析 `user/501`，
+disabled 已确认、bootout 成功、print 返回 113/service-not-found，随后 shutdown/delete
+并确认 owned UDID 不存在；原始证据在 `artifacts/ci/a43b3c8-apsd-local-user-domain/`。
+该本地运行绑定 dirty source 和 driver hash，只验证服务/清理，没有重跑完整 GPUI 应用。
+最终 40 项回归、Python compile、actionlint、design-doc 与 diff checks 通过；本轮未改
+Rust 实现，完整 Rust 验证沿用上节 `a43b3c8` 前后的记录，新 hosted runtime 仍待核验。
+这些环境调整不晋升 GUI/首帧/输入/语义、APNs/真机或父任务。
+
+### 第五轮 hosted 结果与临时服务卸载（`f78aee2`）
+
+PR run `37724359228` 的 14 jobs 全绿；push run `37724354473` 的 13 jobs 通过，
+仅 iOS smoke 的 `push-service-disable` 60s timeout 失败，实测含回收耗时 84.60s。
+push build/boot/owned cleanup 通过；service-before 为 45.14s，尚未进入新 live
+doctor/launch，不能把这次 timeout 当作应用失败或 APNs 隔离已完成。
+push 选定原始证据在 `artifacts/ci/37724354473/ios-smoke-selected/`。
+
+本次临时 simulator 不会再次 boot，且退出后立即删除，不需要 persistent launchd
+disable override。driver 移除该状态写入和 `print-disabled` 查询，只保留实际 user
+domain/精确 service、`bootout` 和确切 service-not-found 验证。报告声明
+`loaded=false` / `lifetime=current_boot`，不再声明持久 disabled；服务控制 60s、
+应用单次 launch/180s 和 required/稳定 PID/PNG 标准保持不变。任何 bootout 或验证
+失败仍 fail 并清理 owned UDID。
+
+41 项 driver 回归、Python compile、actionlint、diff checks 通过；新增 bootout 失败
+拒绝发布成功报告，保留 scope/absence/域错误与 cleanup 变体。最终本地直接 bootout
+与修复后的 hosted runtime 需另行绑定证据，不能继承上一版服务准备的本地 pass。
+
+PR 原始证据已核验（`artifacts/ci/37724359228/ios-smoke-selected/`）：source 为
+`f78aee2` 的测试合并提交 `f1f43c5`、dirty=false，driver/workflow hashes 匹配。
+service-before/disable 分别 36.18s/56.45s，bootout/absence 验证分别 1.18s/1.33s；
+live doctor 无重试，单次 launch 1.49s，PID=20494、1179×2556 PNG 和 cleanup 通过。
+PNG SHA-256=`4b8bb51d9bebd57c2196c84a1c87ffb88db7fe0658e36964a091708bbba171ad`。
+这证明该次服务隔离后完整 smoke 通过，不证明所有 runner 上的唯一故障原因。
+
+精简后的最终 driver 已在另一个新建本地 iOS 26.2 simulator 实跑通过：直接 bootout
+8.49s，absence 验证 7.06s，并删除 owned UDID；原始证据在
+`artifacts/ci/f78aee2-apsd-local-bootout/`，报告为 `loaded=false/lifetime=current_boot`。
+41 项回归、Python compile、actionlint、design-doc/diff 检查通过。新 hosted runtime
+仍待发布后的实际 run；不将此次本地服务验证称为完整 GPUI 应用验收。
+
+### 第六轮独立 workspace 测试竞态（`2cd4f00`）
+
+push run `37726135008` 的 macOS workspace job 在已有
+`current_app_channel_queues_accepted_asset_reconciliation` 失败（queue len=0，期望 1），
+fail-fast 取消 Linux/Windows；原始 job log 为
+`artifacts/ci/37726135008/macos-check.log`。这与 iOS runtime 分别核验，不能把被取消
+jobs 算作独立代码失败。代码事实是 `app_channel.rs` 先 emit journal event，再 push
+reconciliation queue；测试只等待 event 存在，可能过早 drain queue。
+
+临时 test-only 注入在 event/queue 间增加 100ms，旧测试稳定复现同一 len=0 失败；
+日志 `artifacts/ci/2cd4f00-asset-reconciliation-race/before.log`。修复仅在既有 5s
+wait budget 中积累实际 queue entries，同时保留 event 和 payload 断言。注入不进入
+最终提交；延迟变体、撤销注入后的完整 Rust 验证与新 CI 结果分别登记。
+此为 O02/O-07 的 L0 测试同步修复，不改变 runtime 语义或 F02/O02/GUI 验收状态。
+
+### 第七轮最小准备调用与原生预算（`2cd4f00`）
+
+两套 run 已结束：PR `37726138750` 的 14 jobs 全绿；push `37726135008` 为
+10 success / 2 failure / 2 cancelled，分别是前节 queue test race、iOS
+service-before 只读查询超过 60s（实测含回收 62.44s），以及 fail-fast 取消的两项。
+iOS build/boot/cleanup 通过；此 push 未卸载 APNs，也未进入该轮 app launch。
+原始服务失败证据为 `artifacts/ci/37726135008/ios-smoke-selected/`。
+
+PR 原始证据在 `artifacts/ci/37726138750/ios-smoke-selected/`，source 为 `2cd4f00`
+的测试合并提交 `6a4557f`、dirty=false，driver/workflow hashes 已匹配。
+APNs 已卸载、doctor 无重试，单次 launch 1.35s、PID=20035、1179×2556 PNG/hash 与
+cleanup 通过；PNG SHA-256=`7878213bf2be2e1bd180555e84805b26b7272bb7475c3eeed505b972fab3d78a`。
+不以单边成功覆盖另一 runner 上的失败。
+
+前轮新增的服务准备 60s 不是验收矩阵规定的 doctor 或 app deadline，已有不同准备
+命令超时的直接证据。本轮省去前置查询，直接 bootout 精确的 owned simulator service，
+再从实际 `Could not find service "com.apple.apsd" in domain for uid: ...` 结果验证
+移除并记录 domain。两条命令使用既有原生命令的 180s budget，并在 policy 中记录
+`configured_command_timeout_seconds`；实际耗时/错误继续保留，不声明硬 wall-clock 上界。
+不重试 launch，不更改 CLI doctor 5s/30s 或 app launch/180s、PID/capture 标准。
+
+41 项 Python 回归、compile/actionlint/diff checks 通过，覆盖真实 UID 输出形状、
+错误 service/domain、非零/timeout 和 cleanup；精确 bootout/absence argv 已由前轮
+本地及 hosted 原始调用验证，新两命令 driver 的完整 hosted 结果仍待新提交。
+reconciliation 修复在 100ms 注入下通过（`delayed-after.log`），注入随后已撤销；
+`app_channel.rs` 与提交基线无差异。fmt/clippy 通过。首次本地完整 workspace 的三个
+process-helper timing failures 保留在 `workspace.log`；三个定向复验均通过，默认
+并行完整复验和 build 结果在同目录单列，不能用定向结果替代完整结果。
+最终复验已完成：三个 helper 定向测试分别通过；默认并行完整 workspace 的主二进制
+489 passed / 12 ignored，全部 integration/protocol/xtask/doc tests 通过，build 通过。
+原失败为 `workspace.log`，完整复验为 `workspace-recheck.log`，另外保留 `clippy.log`、
+`build.log` 和三个 `*-recheck.log`；41 项 Python/compile/actionlint/design-doc/diff
+检查通过。新两命令准备流程的 hosted 证据仍须绑定对应新提交。
+
+### 最终实现与 hosted 收口结果（`5d09ab3`）
+
+本轮用户限定的 CI 排障达到实现/本地/hosted 有界出口。`5d09ab3` 的两套 workflow
+均完成且各 14 jobs 全绿：三平台 workspace/host doctor、templates、baseline/mobile
+回归、Android cold/live doctor/native build/smoke、iOS cold/build/smoke 均通过。
+
+| 事件 / run | iOS smoke job | 原始 source revision | app PID / 单次 launch | doctor 重试 |
+| --- | --- | --- | --- | --- |
+| push [`37728230531`](https://github.com/kingsword09/gpui-cli/actions/runs/37728230531) | `113151166573` | `5d09ab3` | 34740 / 1.69s | 1 |
+| PR [`37728233406`](https://github.com/kingsword09/gpui-cli/actions/runs/37728233406) | `113151175662` | `ce076da`（`5d09ab3` 的测试合并提交） | 19352 / 1.25s | 0 |
+
+macOS workspace jobs `113151166567` / `113151175720` 均通过，覆盖此前失败的
+reconciliation test。两套 iOS raw JSON/选定命令输出/PNG 已下载到 ignored
+`artifacts/ci/37728230531/ios-smoke-selected/` 和
+`artifacts/ci/37728233406/ios-smoke-selected/`，各有 `audit.json` 验证摘要；完整日志
+仍保留在对应 GitHub artifact。已核验 dirty=false、source/merge parent、driver/workflow
+SHA-256、服务命令的 owned UDID、确切 absence/uid、doctor 正负例、launch PID、六次
+进程 identity 与 capture 后检查、PNG CRC/尺寸/hash，以及 owned UDID 删除结果。
+
+两份服务 policy 均为 `loaded=false`、`lifetime=current_boot`、
+`configured_command_timeout_seconds=180`。push bootout/确认分别 12.97s/16.06s；
+PR 分别 80.80s/3.36s。后者确实超过旧 60s，新的原生命令预算已在实际 runner 验证，
+并未扩大 CLI doctor 或 app launch 的验收窗口。两份截图均为 1179×2556：
+
+- push SHA-256：`c9f8dd4d0bf8cb1ee22547d16e1e460f7438165c0879b299e048adaf1063d472`。
+- PR SHA-256：`e9d111819fa2ada5f4dee158b96789dd58ab8823af9fc53c882cd7577106ccbe`。
+
+本地 41 项 Python 回归、fmt/clippy、默认并行完整 workspace 复验与 build 通过；
+queue test 受控 100ms 延迟下旧失败/新通过的对照和第一次完整本地 helper timing
+failures 均保留，注入已撤销，production app channel 未变。实现仅修正 timeout 分类、
+最小服务准备及测试同步，不把原始失败删除或记成成功。
+
+### 发布与后续验收
+
+PR #388 已发布上述实现，等待 review/merge；已重新 fetch，`origin/main` 仍为
+`2f85842`。实现/验收基线为 `5d09ab3`，后续纯文档同步不改变代码、测试和验收范围。
+合并后须再核对对应 main CI，不能把分支结果改称已合并主线证据。
+
+本轮仅关闭用户指定 CI 排障切片，35 个父任务计数不变；APNs 不在本 smoke 范围，
+`verified_present=false`、`gui_acceptance=not_run`。真实首帧、前台归属、输入/语义、
+physical device、未覆盖 ABI 与兼容边界继续按原责任矩阵验收；仅在新的整体路线请求
+中恢复 F01 scene/present/semantics 执行游标。

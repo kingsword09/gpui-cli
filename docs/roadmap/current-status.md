@@ -1,16 +1,43 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-07（Asia/Shanghai）。当前实现与审计核对基线为 `f38d9df`（PR #389 squash merge）；
+更新日期：2026-10-08（Asia/Shanghai）。当前已合并实现与审计核对基线为 `f38d9df`（PR #389 squash merge）；
 此前 `852ddec` 仍作为 PR #377 的历史代码审计基线保留。流程记录已更新至 `f38d9df`（PR #386–#389 后路线证据），其中包含 T01 doctor、F01 baseline-driver、
 Ubuntu `cc --version` 解析修复、iOS-safe backtrace 模板修复及 F01/P-01 native-install-failure
 证据、T01 doctor CLI host-smoke、target-selection、required nonzero probe、malformed
-successful-version probe 和三平台 host evidence。当前分支为 `main`，工作区干净；PR #382 已以 squash 合并为 `9e6ef64`，
+successful-version probe 和三平台 host evidence。以下是已合并主线历史记录，不含本轮未提交变化。PR #382 已以 squash 合并为 `9e6ef64`，
 PR #383 已以 squash 合并为 `757f05b`，PR #384 已以 squash 合并为 `285893f`，PR #385 已以
 squash 合并为 `287c3c7`，PR #386 已以 squash 合并为 `3772750`，PR #387 已以 squash 合并为
 `2a54083`，以及 PR #389 对 live diagnostics 异步发布等待的修复并 squash 为 `f38d9df`；主线 run
 `37540497454` 的三平台 workspace/template/baseline-driver CI 全绿，doctor-host artifacts 仍绑定
 PR #386 runs。T01/F01/P01
 父状态未晋升。
+
+本轮用户限定 PR #388 分层移动 CI 排障，有界实现/本地/hosted 出口已达到，等待
+review/merge。实现证据基线为 `5d09ab3`；已重新 fetch，`origin/main` 仍为 `2f85842`，
+相对已合并代码审计基线 `f38d9df` 仅有此前的文档同步。PR 尚未合并，不更新主线实现结论。
+
+`5d09ab3` 的 push run `37728230531` / PR run `37728233406` 各 14 jobs 全绿。
+三平台 workspace/host doctor、templates、driver、Android cold/live doctor、完整 native
+build 与两端 smoke 均通过。两套 iOS 原始 service/doctor/Metal/install/launch/PID/
+PNG/cleanup 已核验，source/driver/workflow hashes 匹配且 dirty=false；push PID=34740、
+launch 1.69s，PR PID=19352、launch 1.25s，截图均为 1179×2556。完整各轮失败、修复、
+哈希及原始证据见[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。
+
+修复包括 Rust target timeout 的漏分类、CI 自建 simulator 的 APNs 当前 boot 卸载，
+以及 reconciliation test 误把 journal event 当作 queue 已发布的竞态。服务准备仅有
+bootout/确切 absence 验证，配置 budget 为原生命令的 180s；本轮 PR bootout 实测
+80.80s，不能使用旧 60s 预算。doctor 的 5s/30s、单次 app launch/180s 和稳定 PID/PNG
+标准保持不变；APNs 推送通知不在此 smoke 范围，未声明所有宿主超时的唯一因果。
+
+41 项 driver 回归、fmt/clippy/build、默认并行完整 workspace 复验通过（主二进制
+489 passed / 12 ignored，全部其他目标通过）。queue test 在受控 100ms 延迟下完成
+失败/修复对照，注入已撤销，production app channel 未变。首次本地三个历史
+process-helper timing failures 和定向/完整复验分别留存，没有将重试配置等同于通过。
+
+本次只关闭用户指定 CI 排障切片，35 个父任务计数不变。`verified_present=false`、
+`gui_acceptance=not_run`；真实首帧、输入/语义、physical 和未覆盖 ABI/兼容变体仍按
+责任矩阵验收。下一动作是 PR #388 review/merge 后核对对应主线 CI；仅在新的整体
+路线请求中恢复 F01 scene/present/semantics 游标。后续纯文档同步不改变上述实现基线。
 
 本文接续 2026-09-28 对 `a6aa685` 的审计，替代其“当前进度”结论；旧报告保留为历史证据。
 任务状态以[实施清单](implementation-backlog.md)为准，完成标准以[验收矩阵](acceptance-matrix.md)为准。
@@ -756,15 +783,23 @@ cleanup-finalized report evidence 接线，
 
 ## 5.1 本轮接续与下一动作
 
-- 代码审计/实现基线：`f38d9df`；文档同步 PR #390 已 squash 合并，工作区干净；其主线 run `37543387556` 全绿。
+- 用户限定的 PR #388 CI 排障在 `5d09ab3` 达到实现/本地/hosted 出口：push
+  `37728230531` / PR `37728233406` 各 14 jobs 全绿，原始 iOS runtime 证据已核验。
+  PR 未合并；下一动作是 review/merge 后核对主线 CI，不晋升任何父状态。
+- PR #388 早期 hosted boot 取消/失败保留为历史证据。KVM、required cargo-ndk、
+  x86_64 cold/live ABI match/mismatch 已有真实 hosted 证据，不再作为当前环境阻塞。
+- smoke 的 `verified_present=false` / `gui_acceptance=not_run` 不晋升 M-01/M-02、F01/P01；
+  用户指定切片交接后，整体路线请求再恢复 F01 scene/present/semantics 的原游标。
+
+- 已合并代码审计/实现基线：`f38d9df`；文档同步 PR #390 已 squash 合并，其历史主线 run `37543387556` 全绿。本轮从 `2f85842` 接续，PR #388 的实现/CI 证据独立绑定 `5d09ab3`，不继承旧主线 CI。
 - 已关闭的 T01 responsibility：真实 CLI 的 required `cc` nonzero、`rustc` exit-0 畸形版本，以及
   GitHub Linux/macOS/Windows host doctor artifacts；本地 `doctor_cli` 4 passed，相关两套 workflow 全绿。
-- T01 剩余：真实 x86/unknown ABI 或 physical Android device、
+- T01 剩余：未覆盖的 ABI/device 变体（含 unknown ABI、physical Android device）、
   未建模 AGP/Gradle 兼容边界。恢复条件是可用的对应 runner/toolchain/device，不能以 shim 或 CI
   编译通过替代；T01 继续保持 `in_progress`。
-- 当前切换理由：PR #389 的 live diagnostics 时序修复已合并并通过主线 CI；T01 的本地 CLI responsibility 已完成，剩余变体需要外部环境；F01 无硬依赖且本机
-  仍可推进，切换到 F01 的 GUI/scene/present 与 P-02 联合对照收口。T01 外部环境恢复后回看其责任矩阵。
-- F01 下一动作：先核对既有 macOS attempt-05/06/07 与模板 CI 新基线，选择一个可重跑的 scene/present
+- 整体路线恢复时的候选理由：PR #389 的 live diagnostics 时序修复已合并并通过主线 CI；T01 的本地 CLI responsibility 已完成，剩余变体需要外部环境；F01 无硬依赖且本机
+  仍可推进其 GUI/scene/present 与 P-02 联合对照收口。T01 外部环境恢复后回看其责任矩阵。
+- 若恢复 F01：先核对既有 macOS attempt-05/06/07 与模板 CI 新基线，选择一个可重跑的 scene/present
   或语义证据缺口；保持 cancel/superseded/native-install-failure 已关闭，不把 `a11y_inactive` 或
   `presented_frame_id=null` 当作通过。
 

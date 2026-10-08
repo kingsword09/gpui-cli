@@ -1,14 +1,23 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-07，主分支 `f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-08，已合并代码基线 `f38d9df`（PR #389 squash merge；主线 run `37540497454` 全绿）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
 cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
 PR #382 又合并 T01 doctor CLI host-smoke integration test，PR #383 又覆盖 explicit/project-default/
 host-only target selection，PR #384/#385 又合并 required `cc` nonzero 与 malformed-successful-version
 CLI responsibility 变体，PR #386 又上传三平台 host doctor artifacts，PR #387 修复 Windows
-coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 为 `f38d9df`，主线 run `37540497454` 全绿；PR #388 的 x86_64 emulator job 因 hosted boot
-不可用保持未合并，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
+coordinator state publication 测试 deadline；PR #389 修复 live diagnostics 测试等待异步发布的时序边界并已 squash 为 `f38d9df`，主线 run `37540497454` 全绿；PR #388 早期 hosted boot 失败保留为历史证据，当前分层 CI 结果见下文，父任务计数不变；T01 仍缺 T-03 真实设备与兼容边界责任变体。
+
+2026-10-08 用户限定的 PR #388 移动 CI 排障在 `5d09ab3` 达到有界出口：push
+run `37728230531` / PR run `37728233406` 各 14 jobs 全绿，两套 iOS raw service/
+doctor/launch/PID/PNG/cleanup 已验证。实现包含分层 cold/live/native build/smoke、
+Rust target timeout 分类、当前 boot 的 APNs 卸载及 queue test 同步修复。服务准备
+采用两条原生命令/180s budget；doctor/app launch 标准保持，APNs 不在 smoke 范围。
+41 项 driver 回归、fmt/clippy/build、默认并行完整 workspace 复验通过（主二进制
+489 passed / 12 ignored）。受控竞态对照、原本地 helper timing failures 和复验分别
+保留在[移动 CI 切片](../experiments/mobile-ci-layers-2026-10-08.md)。PR 等待 review/merge；
+这些责任切片不晋升 O02/F02/T01/F01/P01 或 GUI/真机完成，35 项父状态/计数不变。
 执行流程调整基线：`1c0a4cb`（PR #379 文档流程调整），不改变上述状态计数。默认按[收口执行计划](closeout-plan.md)的自动选择/收口循环推进
 整体核心路线，不绑定固定任务 ID；一个任务完成后继续下一项。
 原设计基线：`6d091b6`（2026-09-21）；本文不是已完成功能列表。
@@ -121,6 +130,16 @@ CI、review/merge、跨平台 GUI/device 验收，以及 T05/T06 索引/缓存�
 
 ### T01 · Target-aware doctor
 
+本轮新增独立 cold/live doctor 驱动；本机真实 iOS 26.2 stopped UDID + unknown UDID、
+Android API 35 ARM64 AVD 的 ABI match/mismatch 已通过。Cold 不证明实际启动；Ubuntu
+x86_64 cold/live 已由 `d9dc35b` 的原始 CI artifacts 验证。`a43b3c8` 已补齐 Rust
+target timeout 分类，push/PR 两套 iOS live doctor match/unknown UDID 均通过；
+PR 剩余 launch timeout 与新 APNs 隔离属于 smoke 环境，不撤回这些已验证 doctor 结果。
+完整 Debug `.app`/APK 与平台
+process/capture smoke 是另外的构建/可行性证据设施，不抵消 T01 的 unknown ABI、physical
+device、AGP/Gradle 边界，也不关闭 P01/M01 的硬依赖。详见上述切片记录，T01 仍为
+`in_progress`。
+
 代码落点：`src/commands/doctor.rs`、`src/config.rs`、`src/device/inventory.rs`；拟议 `src/toolchain/{probe,report,requirements}.rs`。
 
 1. 抽取按目标解析的 requirements，不再把所有平台工具都作为 host 的硬要求。
@@ -148,8 +167,9 @@ Linux/macOS/Windows、desktop-template、android-template 和 baseline-driver CI
 又在 desktop-template CI 中加入 iOS simulator target check；PR #382/383 的两套 Linux/macOS/Windows
 workspace/template/baseline-driver workflow 也全绿，并以 `757f05b` squash 合并；PR #384/#385/#386
 分别 squash 为 `285893f`/`287c3c7`/`3772750`；PR #389 已 squash 为 `f38d9df`，主线 run `37540497454` 全绿。CI 的
-编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。真实 x86/未知 ABI
-设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
+编译/单测/clippy 通过不等于真实 Linux/Windows host doctor 工具矩阵验收。未合并 PR #388
+的 `d9dc35b` 已取得 Ubuntu x86_64 cold/live AVD ABI match/mismatch 责任证据；未知 ABI
+真实设备及 physical-device 选择、未建模 AGP/JDK 组合边界仍需确认，不能改为 `done`。
 
 若选中 T01：先复核 `probe::run_command` 的“成功退出即 Passed”与版本校验的区别，
 补畸形/不兼容版本回归及 expected/actual 规则，再完成 T-01/T-02/T-03 对应本地/原生证据。
@@ -234,6 +254,13 @@ PR 拆分：journal/恢复纯文件测试 → apply/锁/并发 → 实际旧模�
 验收 O-04/O-05；输出真实 UI 人为阻塞和恢复记录。回退：关闭 probe 则 UI=unavailable，不能退回“进程活着即健康”。
 
 ### O02 · 资源事务、删除和 ACK
+
+PR #388 CI 排障发现已有 L0 reconciliation test 只等 journal event，未等随后发布的
+queue entry。`2cd4f00` macOS CI 出现 len=0，临时 100ms test-only 延迟复现；本轮
+仅修正测试等待实际 queue 与事件，不改变资源协议/事务实现，也不关闭 O-06/O-07
+的真实 GUI/删除/重连责任或 F02 硬依赖。
+修复在相同受控延迟下通过，注入已撤销；默认并行完整 workspace 复验与 clippy/build
+通过，`5d09ab3` 两套三平台 CI 也已通过；不因测试修复晋升父状态。
 
 代码落点：`src/commands/live.rs`、`src/devserver/inputs.rs`、`protocol.rs`、`templates/app/src/lib.rs` 及新 runtime assets adapter。
 

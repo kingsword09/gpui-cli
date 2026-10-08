@@ -24,6 +24,87 @@ titles containing quotes, XML characters and backslashes to exercise template
 escaping. Android host packaging is separate from GPUI's Rust cross-compilation
 and device execution; it does not validate native runtime behavior.
 
+## Mobile CI evidence
+
+Mobile checks run independently of the existing template packaging checks:
+
+- `doctor-android-cold` creates a real x86_64 AVD and checks ABI match/mismatch
+  without booting it. `ios-simulator (doctor)` owns a fresh, stopped simulator and
+  checks valid/unknown UDID selection. These are toolchain/inventory evidence.
+- `android-emulator (doctor)` requires readable/writable KVM and a successful
+  acceleration preflight, then boots an API 35 x86_64 emulator with SwiftShader.
+  It records `adb` boot/ABI metadata and separate match/mismatch doctor reports.
+- `android-native-build` builds a real GPUI APK without an emulator;
+  `ios-simulator (build)` produces a linked Simulator `.app` without requiring
+  boot or Metal. Fresh fixtures resolve and retain their `Cargo.lock` before
+  the CLI's locked input discovery. Android cache bypass remains distinct from
+  build failure; APK selection does not require a reusable-cache manifest.
+- `android-emulator (smoke)` and `ios-simulator (smoke)` build unmodified GPUI
+  applications through the CLI, install and launch them, require a stable app
+  process for five seconds, save a device PNG and native logs, and clean up owned
+  state. iOS runs on ARM64 `macos-15`, Xcode 26.2 and an iOS 26.2 runtime; the host
+  Metal probe explicitly links CoreGraphics. A missing capability fails rather
+  than silently skipping the runtime check.
+
+Cold Android AVD creation and doctor share an explicit `ANDROID_AVD_HOME`, and
+the real `config.ini` is retained in preflight artifacts. Linux emulator jobs
+install `libpulse0` before invoking the emulator, including version/acceleration
+preflight. iOS jobs install XcodeGen and both `aarch64-apple-ios` and
+`aarch64-apple-ios-sim`; doctor requires the device target even when the selected
+device is a Simulator. These preparations do not replace the required checks.
+
+Only iOS smoke's live doctor may re-probe a case up to twice, 15 seconds apart,
+when its selected-device check is correct and every unrelated required failure
+is explicitly a probe timeout. Each failed report is retained separately;
+this includes Rust target probe timeouts, whose `unknown` result does not
+establish whether the target is installed.
+`doctor-result.json` identifies the final validated reports, and the smoke
+summary records recovery counts. Missing tools, invalid versions/targets and
+device identity errors fail without retries; persistent timeouts still fail.
+
+CI passes `--disable-push-service` only to iOS smoke. On its newly created
+simulator, the driver removes `com.apple.apsd` from the simulator's foreground
+user domain with `bootout`, verifies its absence, and records `simulator-services.json`.
+The scope is the current boot; no persistent launchd disable override is needed
+because the owned simulator is deleted after the run.
+Only `bootout` and the absence query are needed; their configured deadline is
+180 seconds, matching other native driver commands. The actual user domain is
+read from the service-not-found response. Each command's observed duration and
+failure remain recorded independently of that configured budget.
+This avoids the APNs certificate/reconnect log storm observed on the hosted iOS
+26.2 runtime. Service setup failures fail the job and still delete the owned
+simulator. Cold doctor/build and default local smoke keep their normal services;
+the CI smoke excludes push-notification behavior. App launch remains a single
+attempt with a 180-second deadline, followed by the same process/capture checks.
+
+The smoke summaries deliberately retain `verified_present=false`,
+`application_ready=not_instrumented` and `gui_acceptance=not_run`. Process
+survival and a device screenshot do not establish app-owned pixels, verified
+presentation, input/semantics, or physical-device acceptance. See
+[the mobile CI evidence scope](docs/experiments/mobile-ci-layers-2026-10-08.md).
+
+Run driver regressions without SDKs or devices:
+
+```bash
+python3 -m unittest discover -s scripts/tests -v
+```
+
+On a prepared ARM64 Mac, run an isolated cold doctor or simulator smoke:
+
+```bash
+python3 scripts/check-ios-simulator.py --gpui target/debug/gpui --mode doctor --runtime 26.2 --output /tmp/gpui-ios-cold-evidence
+python3 scripts/check-ios-simulator.py --gpui target/debug/gpui --mode smoke --runtime 26.2 --output /tmp/gpui-ios-smoke-evidence
+```
+
+Output directories must be new to prevent stale evidence from being mistaken
+for a current pass. The drivers never install SDKs or modify signing settings;
+toolchain installation is confined to the workflow setup steps. Each command,
+exit/timeout, source revision/dirty state, driver/workflow hashes and failure
+report is preserved before assertions. Only owned simulator UDIDs and the
+application installed by the Android smoke driver are cleaned up. CI artifacts
+are uploaded even on failure; a boot failure before the driver starts is
+diagnosed from preflight artifacts and the emulator action's job log.
+
 ## Design documentation
 
 Start with the [current status](docs/roadmap/current-status.md) and compare its
