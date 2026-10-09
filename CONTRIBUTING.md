@@ -107,6 +107,29 @@ diagnosed from preflight artifacts and the emulator action's job log.
 
 ## Design documentation
 
+The F01 `baseline-driver` artifact includes the current CLI, raw 10+30 mutation
+samples and real setup-build cold/warm groups. Its `legacy/` directory preserves
+the immutable `6d091b661d7ef82115e88cf142c7ff252b593864` source archive, rebuilt
+legacy CLI, original CLI lockfile, generated macOS/iOS/Android v1 scaffold,
+toolchain/commands and a SHA-256 inventory. It is a historical-source rebuild
+with the recorded toolchain, not a recovered historical release binary or an
+online compatibility result. Source extraction uses a temporary directory
+outside the current Cargo workspace; old source files are not edited.
+
+Reproduce the archive in a new output directory (Python 3.12 or later):
+
+```bash
+git fetch --no-tags --depth=1 origin 6d091b661d7ef82115e88cf142c7ff252b593864
+python3 scripts/archive-f01-baseline.py --output /tmp/gpui-f01-legacy --expected-producer "$(git rev-parse HEAD)" --expected-dirty false
+python3 scripts/archive-f01-baseline.py --output /tmp/gpui-f01-legacy --verify-only --expected-producer "$(git rev-parse HEAD)" --expected-dirty false
+```
+
+The expected dirty state must match the actual producer checkout. Creation
+rejects existing directories, preserves failed command logs, and never installs
+SDKs or modifies devices. Three legacy protocol unit tests and scaffold/hash
+verification do not establish generated application builds or live old/new
+compatibility; those remain separate F02 acceptance responsibilities.
+
 Start with the [current status](docs/roadmap/current-status.md) and compare its
 audited commit with your branch and `origin/main`. For an overall roadmap request,
 follow the [closeout plan](docs/roadmap/closeout-plan.md) selection loop: resume an

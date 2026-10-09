@@ -1,7 +1,10 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-08（Asia/Shanghai）。当前 `main`/`origin/main` 已到 `ea9f5d8`（PR #392
-squash merge）；PR #388 的 `8effdf9` 是前一实现基线，`f38d9df` 是 PR #389 的合并与审计基线，
+更新日期：2026-10-09（Asia/Shanghai）。本轮审查的主线基线为 `3db1202`（PR #393
+squash merge）；PR #394 的归档实现证据绑定 `3ff1d18`，发布/合并记录以该 PR 为准，接续时
+先 fetch 并比较主线与证据提交，不能把旧 artifact 改标为后续提交。PR #393 新增完整 baseline
+artifact 与真实 setup cold/warm 分组；`ea9f5d8` 是 PR #392
+的前一基线。PR #388 的 `8effdf9` 是前一移动实现基线，`f38d9df` 是 PR #389 的合并与审计基线，
 `852ddec` 仍保留为 PR #377 历史代码审计基线。PR #392 增加 F01/P-01 clock-offset L0 regression，
 没有改变 span runtime 行为。PR #388 的 `f38d9df..8effdf9` 13 个文件变化覆盖 CI、移动证据
 driver、文档和贡献说明；F01 的 GPUI scene runtime 未变。PR #388 push run
@@ -42,9 +45,23 @@ F01 保持 `in_progress`，先修正 cold/warm 分类并补回归/clean CI 证�
 capture helper timeout 和 PR 的 iOS launch/180s timeout 单独保留，两套 attempt 2 均已通过；
 这些 failure 不归因于 baseline job，也不靠放宽 deadline 规避。
 分类修复已通过 47 项 Python 回归及完整 dirty smoke（120 samples、1520 spans、3 个真实 cold
-setup builds）；修复提交的 clean CI 仍待核验。P-01 native-install 历史摘要也不能替代原始
-failed span：attempt-08 实际 blocked_before_install，需补 live supervisor 重跑。见
+setup builds）；`5cfc419` 的 PR/push runs `37863074479` / `37863069334` 各 14 jobs 全绿，
+两套 clean artifact 已下载并按独立 expected SHA 核验通过，随后 squash 为 `3db1202`。
+PR/push 分别有 1539/1540 spans、1002/1028 commands，各 120 mutation samples、40 failures/
+recoveries、6 setup builds / 3 cold，CLI SHA-256 均为
+`b9d1518250c83be2f5f7891412a7f9a7359522c990a586413376c4ee896e0156`。见
 [本轮父责任复核](../experiments/F01-baseline-ci-2026-10-09.md)。
+新 owned iOS simulator attempt-14 已取得 failed `device.install` 与 failed
+parent build 的真实闭合 spans，并独立验证无 launch、session/lease/device cleanup；原实验
+错误断言导致的 fail 摘要原样保留。当前用户指定有界切片是完成旧 CLI/v1 材料归档：
+固定 `6d091b6` 的 archive driver/校验/CI 接线已经本地实现，不修改旧源码，归档的是真实源码
+在所记录工具链下重建的旧 binary，不冒充历史 release binary。PR #394 的修复提交 `3ff1d18`
+已通过 PR/push runs `37908915133` / `37908909359` 各 14 jobs；两套完整 raw artifact 已按独立
+expected producer SHA 和 dirty=false 下载核验，均含 121 个旧材料文件，原源码/lockfile/v1
+runtime 与三端 scaffold 校验通过。首轮 119/121 文件的隐藏材料漏传失败保留，修复不放宽
+deadline；59 项 Python 回归通过，原本地并行 workspace 5 项失败不以串行成功覆盖。
+本有界归档验收出口已取得，发布记录见 PR #394；本轮到此交接，不自动开展其他任务。
+F01 仍为 `in_progress`，不宣称 F02 在线兼容或完整 P-02 通过。
 
 基础 CLI/Live 已有实现，macOS 窗口观察有限可用；场景、输入、check、视觉基线和本地 matrix
 已接入代码。单场景 desktop check 和 matrix check 均已接入严格冻结输入路径；matrix admission
@@ -453,7 +470,7 @@ T06 保持 `in_progress`。
 
 | ID | 状态 | 已实现 / 剩余边界 |
 | --- | --- | --- |
-| F01 | in_progress | 三种严格 fixture、单调 supervisor spans、有界日志、headless driver 和 macOS arm64 每 fixture 10 warmup + 30 measurement 已有；P-01 cancel/superseded/native-install-failure 有本机证据；2026-10-08 在 `8effdf9` release 复跑 4096×8192-byte full-scan oracle，10 warmup + 30 measured pairs，P50/P95=167.20/171.18 ms，manifest mismatch 与 wrong-revision acceptance 均为 0，raw JSON hash=`346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`。P-01 clock-offset L0 regression 已在 PR #392 merge，PR CI 与 push attempt 2 全绿。当前分支接入 baseline-driver CI artifact；macOS arm64 dirty smoke 的 120 samples、40 failure/recovery pairs、1520 spans、993 commands 已通过逐样本 verifier，raw evidence 在 ignored `artifacts/acceptance/ea9f5d8/F01/macos-arm64/attempt-12/`。剩余：PR/push CI 与干净 hosted artifact 核验，随后复核 F01 task-local P-01/P-02 出口。默认并行 workspace 有 4 个 process/helper timing failures，逐项复跑通过并保留原失败。单机结果不晋升完整 P-02；T05/T06 分别负责 index/cache，scene/present/semantics 归 P01 observer 的 O-10/O-11。 |
+| F01 | in_progress | 三种严格 fixture、单调 spans、有界日志及完整 10+30 baseline 已有；PR #393 已 squash 为 `3db1202`，两套 raw clean artifact 和正确 cold/warm 分类通过。P-01 cancel/superseded、clock-offset L0 和 attempt-14 本机 iOS live failed-install span 已核验；实验脚本错误断言的 fail 原样保留。大输入 `8effdf9` release 的 4096×8192-byte、10+30 full-scan oracle P50/P95=167.20/171.18 ms、正确性计数为 0，raw hash=`346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`。当前用户指定旧 CLI/v1 材料归档：实现及本地 smoke 已有，仍待该切片 CI、raw legacy artifact、review/merge，随后才能重审父责任。未宣称完整 P-02 或跨平台 GUI；T05/T06 分别负责 index/cache，scene/present/semantics 归 P01。 |
 | T01 | in_progress | target-aware JSON doctor、required/optional、版本与 SDK 规则、CLI host-smoke 和 Linux/macOS/Windows host artifacts 已通过。PR #388 (`8effdf9`) 两套 CI 各 14 jobs 全绿；raw Android API 35 x86_64 AVD doctor 在 x86_64 build ABI 下 pass、在 arm64-v8a 下预期 fail。剩余：unknown-ABI physical device/真实 Android 设备选择和完整兼容边界；本机 `adb devices -l` 无设备，未以 emulator smoke 宣称 physical 通过。 |
 | P01 | in_progress | 有真实 macOS PoC；cancel/superseded/native-install-failure 变体已有隔离窗口、span、iOS simulator build/install-failure、cleanup/lease/device 证据，`7336d74` 复跑确认 window capture metadata 与 semantics `a11y_inactive`；scene readback、verified present、完整语义/action、完整设备证据和父任务 CI/review 仍有限 |
 | T02 | in_progress | 模板 manifest、嵌入内容摘要、增平台保护；真实历史内容的稳定取得仍不贯通 |
@@ -800,11 +817,12 @@ cleanup-finalized report evidence 接线，
   或语义证据缺口；保持 cancel/superseded/native-install-failure 已关闭，不把 `a11y_inactive` 或
   `presented_frame_id=null` 当作通过。
 
-## 5.2 最新接续（2026-10-08）
+## 5.2 最新接续（2026-10-09）
 
 - PR #388 已 squash 为 `8effdf9`，两套 run `37729846375` / `37729843264` 各 14 jobs 全绿；raw x86_64 AVD doctor 关闭该 ABI 的真实 emulator match/mismatch 子例。旧 boot 失败继续保留为历史实验，不再是当前恢复条件。
 - PR #392 已 squash 为 `ea9f5d8`；P-01 clock-offset L0 regression 的 PR run 与 push attempt 2 均全绿。push attempt 1 的 macOS `cc --version` 5.194s timeout 保留为历史失败，attempt 2 确认没有复现。
-- F01 当前游标为 baseline-driver CI artifact：分支已加入完整 10+30 执行、source/dirty 和 workflow/driver/verifier/CLI hashes、逐样本结果/恢复/span/命令校验及 always-upload。dirty macOS smoke 为 120 samples、1520 spans、993 commands，原始证据在 ignored `artifacts/acceptance/ea9f5d8/F01/macos-arm64/attempt-12/`；本机只作实现验证。下一步开 PR，核对 clean hosted artifact 与两个 workflow，再重审 task-local P-01/P-02 并自动选择下一候选。
+- PR #393 已 squash 为 `3db1202`；两套修复 CI 全绿且实际 clean artifact 核验通过，source/binary/样本/startup groups 均匹配；新 iOS live failed-install span 和 cleanup 也已独立核验。
+- 当前有界游标为旧 CLI/v1 材料归档；完成本地 archive driver、回归和 CI 接线后，开单一 PR 核验两个 workflow 与 raw legacy artifact 再 squash。用户本次只要求先完成该项，不自动扩张其他父任务或修改计数；之后 F01 的父责任复核为整体路线恢复点。
 - T01 仍缺 unknown-ABI physical device；本机当前无 adb 设备。F01 后按依赖回看 T01；若仍无可用 physical/unknown-ABI 环境，明确等待条件并停止在无可执行候选状态，不降低 required 标准。
 - F01/P01/T01 均保持 `in_progress`；当前状态没有把 P01 的 O-10/O-11 observer 缺口转嫁给 F01 的 P-02 responsibility。
 
