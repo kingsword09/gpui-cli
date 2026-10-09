@@ -38,9 +38,75 @@ jobs:
 
   baseline-driver:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - run: python3 scripts/live-baseline.py --self-test
+      - name: Build the baseline CLI
+        run: cargo build --locked --bin gpui
+      - name: Record source identity and preserve the CLI binary
+        env:
+          F01_BASELINE_DIR: artifacts/acceptance/${{ github.sha }}/F01/linux-amd64/attempt-${{ github.run_attempt }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p "$F01_BASELINE_DIR/bin"
+          cp target/debug/gpui "$F01_BASELINE_DIR/bin/gpui"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          root = Path.cwd()
+          baseline_dir = Path(os.environ["F01_BASELINE_DIR"])
+          revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if revision != os.environ["EXPECTED_SHA"]:
+              raise SystemExit(f"checkout revision {revision} differs from event SHA")
+          dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], text=True).strip())
+          binary = baseline_dir / "bin" / "gpui"
+          version = subprocess.check_output([str(binary), "--version"], text=True).strip()
+          source = {
+              "schema_version": 1,
+              "revision": revision,
+              "dirty": dirty,
+              "workflow_sha256": hashlib.sha256((root / ".github/workflows/ci.yml").read_bytes()).hexdigest(),
+              "driver_sha256": hashlib.sha256((root / "scripts/live-baseline.py").read_bytes()).hexdigest(),
+              "verifier_sha256": hashlib.sha256((root / "scripts/verify-live-baseline.py").read_bytes()).hexdigest(),
+              "cli_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+              "cli_version": version,
+          }
+          (baseline_dir / "source.json").write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+          PY
+      - name: Run the full F01 baseline
+        env:
+          F01_BASELINE_DIR: artifacts/acceptance/${{ github.sha }}/F01/linux-amd64/attempt-${{ github.run_attempt }}
+        run: |
+          python3 scripts/live-baseline.py \
+            --gpui "$F01_BASELINE_DIR/bin/gpui" \
+            --output "$F01_BASELINE_DIR" \
+            --warmup 10 \
+            --measurements 30 \
+            --offline
+      - name: Verify baseline sample and artifact contract
+        env:
+          F01_BASELINE_DIR: artifacts/acceptance/${{ github.sha }}/F01/linux-amd64/attempt-${{ github.run_attempt }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: >-
+          python3 scripts/verify-live-baseline.py
+          --output "$F01_BASELINE_DIR"
+          --expected-commit "$EXPECTED_SHA"
+          --expected-dirty false
+      - name: Upload the F01 baseline and CLI binary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f01-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/acceptance/${{ github.sha }}/F01/linux-amd64/attempt-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 14
 
   mobile-evidence-driver:
     runs-on: ubuntu-24.04

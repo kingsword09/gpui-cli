@@ -120,16 +120,18 @@ def duration_ms(record: dict[str, Any]) -> float | None:
     return duration / 1_000_000
 
 
-def summarize_groups(samples: list[dict[str, Any]], field: str) -> dict[str, Any]:
+def summarize_groups(
+    samples: list[dict[str, Any]], field: str, duration_field: str = "driver_elapsed_ms"
+) -> dict[str, Any]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for sample in samples:
         grouped[str(sample.get(field, "unknown"))].append(sample)
     result: dict[str, Any] = {}
     for name, entries in sorted(grouped.items()):
         durations = [
-            float(entry["driver_elapsed_ms"])
+            float(entry[duration_field])
             for entry in entries
-            if isinstance(entry.get("driver_elapsed_ms"), (int, float))
+            if isinstance(entry.get(duration_field), (int, float))
         ]
         result[name] = {
             "samples": len(entries),
@@ -137,7 +139,7 @@ def summarize_groups(samples: list[dict[str, Any]], field: str) -> dict[str, Any
                 (outcome, sum(1 for entry in entries if entry.get("outcome") == outcome))
                 for outcome in {entry.get("outcome", "unknown") for entry in entries}
             )),
-            "driver_elapsed_ms": {
+            duration_field: {
                 "p50": percentile(durations, 0.50),
                 "p95": percentile(durations, 0.95),
                 "min": min(durations) if durations else None,
@@ -145,6 +147,25 @@ def summarize_groups(samples: list[dict[str, Any]], field: str) -> dict[str, Any
             },
         }
     return result
+
+
+def summarize_startup_builds(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in spans:
+        if record.get("phase") == "setup" and record.get("name") == "build":
+            grouped[record["case"]].append(record)
+    builds = []
+    for case, records in sorted(grouped.items()):
+        for ordinal, record in enumerate(sorted(records, key=lambda span: span["started_at_ns"])):
+            builds.append({
+                "case": case,
+                "build_id": record["build_id"],
+                "span_id": record["span_id"],
+                "cache_kind": "startup_cold" if ordinal == 0 else "incremental_warm",
+                "outcome": record["status"],
+                "build_duration_ms": duration_ms(record),
+            })
+    return builds
 
 
 def summarize_stages(samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -210,7 +231,7 @@ def environment_report(args: argparse.Namespace, gpui: Path) -> dict[str, Any]:
         "cache_policy": {
             "startup": "startup_cold",
             "subsequent": "incremental_warm",
-            "note": "The driver labels the first supervisor build separately; it does not purge a global Cargo cache.",
+            "note": "Only the first setup build in each fresh project is startup_cold. Mutation samples follow a successful startup and are incremental_warm; no global Cargo or filesystem cache is purged.",
         },
         "limitations": [
             "headless Cargo fixtures do not prove GPUI scene, frame, or GPU behavior",
@@ -498,8 +519,6 @@ def run_case(
                 sample, sample_spans = run_sample(
                     session, case_id, definition["mutation"], phase, ordinal
                 )
-                if phase == "warmup":
-                    sample["cache_kind"] = "startup_cold" if ordinal == 0 else "incremental_warm"
                 samples.append(sample)
                 spans.extend(sample_spans)
     finally:
@@ -525,6 +544,7 @@ def run_baseline(args: argparse.Namespace) -> None:
             spans.extend(case_spans)
 
     environment = environment_report(args, gpui)
+    startup_builds = summarize_startup_builds(spans)
     summary = {
         "schema_version": 1,
         "generated_at": utc_now(),
@@ -536,6 +556,7 @@ def run_baseline(args: argparse.Namespace) -> None:
             "superseded_samples_retained": True,
         },
         "samples": samples,
+        "startup_builds": startup_builds,
         "counts": {
             "all": len(samples),
             "warmup": sum(1 for sample in samples if sample["phase"] == "warmup"),
@@ -543,6 +564,10 @@ def run_baseline(args: argparse.Namespace) -> None:
             "spans": len(spans),
         },
         "groups": {
+            "startup_builds": {
+                "cache_kind": summarize_groups(startup_builds, "cache_kind", "build_duration_ms"),
+                "outcome": summarize_groups(startup_builds, "outcome", "build_duration_ms"),
+            },
             "measurements": {
                 "case": summarize_groups(
                     [sample for sample in samples if sample["phase"] == "measure"], "case"
