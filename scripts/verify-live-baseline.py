@@ -29,6 +29,36 @@ def read_ndjson(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def verify_startup_builds(summary: dict[str, Any], spans: list[dict[str, Any]]) -> int:
+    startup_builds = summary.get("startup_builds")
+    if not isinstance(startup_builds, list):
+        raise ValueError("startup build evidence is missing")
+    expected = []
+    for case in sorted(EXPECTED_CASES):
+        records = [
+            span for span in spans
+            if span.get("case") == case and span.get("phase") == "setup"
+            and span.get("name") == "build"
+        ]
+        if not records or any(not isinstance(span.get("started_at_ns"), int) for span in records):
+            raise ValueError(f"{case} is missing timed startup build spans")
+        for ordinal, span in enumerate(sorted(records, key=lambda record: record["started_at_ns"])):
+            duration = span.get("duration_ns")
+            if not isinstance(duration, int) or duration < 0:
+                raise ValueError("startup build duration is invalid")
+            expected.append({
+                "case": case,
+                "build_id": span.get("build_id"),
+                "span_id": span.get("span_id"),
+                "cache_kind": "startup_cold" if ordinal == 0 else "incremental_warm",
+                "outcome": span.get("status"),
+                "build_duration_ms": duration / 1_000_000,
+            })
+    if startup_builds != expected:
+        raise ValueError("startup build classification differs from the raw setup spans")
+    return len(expected)
+
+
 def verify(output: Path, expected_commit: str, expected_dirty: bool) -> dict[str, Any]:
     source = read_json(output / "source.json")
     environment = read_json(output / "environment.json")
@@ -86,6 +116,8 @@ def verify(output: Path, expected_commit: str, expected_dirty: bool) -> dict[str
         phase = sample.get("phase")
         if case not in EXPECTED_CASES or phase not in {"warmup", "measure"}:
             raise ValueError("baseline contains an unknown case or phase")
+        if sample.get("cache_kind") != "incremental_warm":
+            raise ValueError("mutation samples after startup must be incremental_warm")
         sample_id = sample.get("sample_id")
         if not isinstance(sample_id, str) or not sample_id or sample_id in sample_ids:
             raise ValueError("baseline sample IDs must be present and unique")
@@ -135,6 +167,7 @@ def verify(output: Path, expected_commit: str, expected_dirty: bool) -> dict[str
         if phase != "setup" and sample_id not in sample_ids:
             raise ValueError("span refers to an unknown sample")
         sample_spans.setdefault(sample_id, []).append(span)
+    startup_build_count = verify_startup_builds(summary, spans)
     for sample in samples:
         sample_id = sample["sample_id"]
         associated = sample_spans.get(sample_id, [])
@@ -183,6 +216,8 @@ def verify(output: Path, expected_commit: str, expected_dirty: bool) -> dict[str
         "spans": len(spans),
         "commands": len(commands),
         "failure_samples": failure_samples,
+        "startup_builds": startup_build_count,
+        "startup_cold_builds": len(EXPECTED_CASES),
         "cases": {case: counts for case, counts in sorted(per_case.items())},
         "cli_sha256": binary_hash,
     }

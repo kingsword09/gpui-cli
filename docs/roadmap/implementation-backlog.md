@@ -109,6 +109,16 @@ attempt 1 的 macOS `cc --version` 5.194s timeout 和 fail-fast cancel 保留为
 
 ### F01 · 基线指标与固定夹具
 
+2026-10-09 PR #393 接续：`c241362` 的两套 clean hosted artifact 已通过原样本/span/hash
+verifier，但实际 `b3` 的首个 warmup 被误标为 cold；需将真实 setup builds 独立分组、保留
+startup superseded/failure，全部 mutation 样本标为 incremental warm，并补分类回归和修复后的
+CI artifact。首轮 macOS capture helper / iOS launch 超时已保留，两套定向 attempt 2 均已通过。
+这仍是 F01/P-02 原实现报告真实性缺口，不改变父状态和 35 项计数。
+分类修复已通过 47 项 Python 回归和完整本地 dirty smoke；CI 仍需修复提交的 clean artifact。
+父责任复核还发现 P-01 native-install 的历史 live attempt-08 为 blocked_before_install，修复后
+standalone install/cleanup 摘要未保存对应 supervisor failed span，必须补跑后才可关闭该 span
+责任，详见[本轮复核](../experiments/F01-baseline-ci-2026-10-09.md)。
+
 代码落点：现有 `src/commands/live.rs`、`src/devserver/session.rs`、`output.rs`、`tests/`；拟议 `tests/fixtures/`、`src/devserver/timing.rs`。
 
 1. 保存基线 CLI/v1 模板测试材料及 commit/工具链摘要；大二进制存 CI artifact，不提交进仓库。

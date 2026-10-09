@@ -35,6 +35,17 @@ fail-fast 取消一个矩阵 job；保留该失败后，attempt 2 的 14 jobs �
 
 ## 1. 当前结论
 
+2026-10-09 接续核验：PR #393 的 `c241362` 两套 hosted baseline artifact 已实际下载并通过
+原 verifier（120 samples、40 failures/recoveries、1540 spans、`dirty=false`），但父责任复核
+发现 warmup 首样本被错误标为 `startup_cold`，其实际 build 为 `b3`，真实 `b1` 在 setup spans。
+F01 保持 `in_progress`，先修正 cold/warm 分类并补回归/clean CI 证据。首轮 push 的 macOS
+capture helper timeout 和 PR 的 iOS launch/180s timeout 单独保留，两套 attempt 2 均已通过；
+这些 failure 不归因于 baseline job，也不靠放宽 deadline 规避。
+分类修复已通过 47 项 Python 回归及完整 dirty smoke（120 samples、1520 spans、3 个真实 cold
+setup builds）；修复提交的 clean CI 仍待核验。P-01 native-install 历史摘要也不能替代原始
+failed span：attempt-08 实际 blocked_before_install，需补 live supervisor 重跑。见
+[本轮父责任复核](../experiments/F01-baseline-ci-2026-10-09.md)。
+
 基础 CLI/Live 已有实现，macOS 窗口观察有限可用；场景、输入、check、视觉基线和本地 matrix
 已接入代码。单场景 desktop check 和 matrix check 均已接入严格冻结输入路径；matrix admission
 前创建的 workspace snapshot 由所有 cell 复用，per-cell runtime context 也已进入 MatrixReport。

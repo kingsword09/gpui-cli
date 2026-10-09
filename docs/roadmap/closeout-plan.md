@@ -46,12 +46,33 @@ PR #388 push run
 
 ### 当前工作卡：F01 baseline-driver CI artifact
 
+2026-10-09 接续 PR #393（`c241362`）：两套 hosted baseline artifact 已下载并通过原 verifier，
+push revision 为 `c241362381cd9b98d285f91c7f2fd51254aa07a4`，PR merge revision 为
+`ac48f9930042d9ab1beccac705f52941d95a6aed`；各 120 samples、40 failures/recoveries、1540 spans，
+CLI SHA-256=`b9d1518250c83be2f5f7891412a7f9a7359522c990a586413376c4ee896e0156`。
+首轮 push 的 macOS capture helper deadline 和 PR 的 iOS launch/180s timeout 已保留于
+ignored `artifacts/acceptance/c241362/F01/ci-review/`，两套仅失败 job 的 attempt 2 已通过；
+原 head 的 PR 状态为 CLEAN，但分类修复提交仍须重跑 CI。
+
+父责任复核发现可复现的报告错误：`counter-warmup-000` 已是 `b3`，但 driver 把它标为
+`startup_cold`；真正首次构建 `b1` 在 setup spans，且可能 superseded。修复前不关闭 F01。
+本轮实现出口为保留真实 setup build 的 cold/warm 与失败终态分组、将全部 mutation samples
+标为 incremental warm，并让 verifier 拒绝错误 cold 分类；10+30 样本数不改变。
+本地已通过 47 项 Python 回归和完整 120 样本报告（1520 spans、7 setup builds / 3 cold）；
+CI 需在修复提交上重新核验两套 clean artifact。
+依赖仍为无硬前置，验收为 F01/P-01/P-02 原实现责任；不扩张 T05/T06 cache 支持，不重试或
+放宽 app launch，不宣称 scene/present/semantics 或完整 P-02 通过。完成该有界修复后返回
+PR #393 的检查与 squash，再补 P-01 live native-install failure 的原始 failed span；历史
+attempt-08 实际 blocked_before_install，修复后的 standalone install/cleanup 摘要不替代
+supervisor 阶段计时。详细缺口、复现与分层证据见
+[本轮复核](../experiments/F01-baseline-ci-2026-10-09.md)。
+
 | 维度 | 本轮开始时的差距 / 出口 |
 | --- | --- |
 | 实现 | 当前分支将 `baseline-driver` 扩为构建 CLI、记录 revision/dirty 与 workflow/driver/verifier/CLI hashes，运行 3 个固定 fixture 各 10 warmup + 30 measurements，逐样本校验结果、恢复、span 和命令，并在 job 失败时仍上传 report 与 CLI binary（14 天） |
 | 本地测试 | macOS arm64 dirty smoke 已完整运行并通过新 verifier：120 samples、30 warmups、90 measurements、40 compile-failure samples、40 successful recoveries、1520 spans、993 commands；CLI SHA-256=`8c9a8cd20e0ac38f9fc2741bdb52c7db1a86e4bcfd5508f2c14a5eeec8fc2e86`，原始目录 `artifacts/acceptance/ea9f5d8/F01/macos-arm64/attempt-12/`。`cargo build --locked --bin gpui`、Python compile、driver self-test、actionlint、design-doc 和 diff checks 通过。既有大输入 release oracle 为 4096×8192 bytes、10 warmup + 30 paired，P50/P95=167.20/171.18 ms，correctness 计数为 0，raw JSON 在 `artifacts/acceptance/8effdf9/F01/macos-arm64/attempt-11/large-input-release-benchmark.json` |
 | CI | 本切片 PR 尚待运行；必须核验 PR/push 两套 workflow 的 baseline job、下载实际 artifact 并检查 source revision、`dirty=false`、三个 fixture 的 10/30 数量、失败/恢复、span/commands 与 CLI hash。PR #392 的 P-01 skew CI 已由 run `37755266052` 和 push attempt 2 通过；attempt 1 的 host-only timeout 保留为历史失败 |
-| GUI / 设备 | P-01 的 macOS cancel/superseded 与 iOS simulator native-install-failure 已有本机证据。scene readback、verified present 和完整语义属于 P01/O-10/O-11 observer work；PR #388 mobile process/capture smoke 未通过这些验收 |
+| GUI / 设备 | P-01 的 macOS cancel/superseded 有原始本机 span；iOS simulator standalone native-install failure 和 cleanup 摘要已通过，但对应 live supervisor 的 failed install span 尚缺，必须补跑。scene readback、verified present 和完整语义属于 P01/O-10/O-11 observer work；PR #388 mobile process/capture smoke 未通过这些验收 |
 | acceptance / 依赖 | F01 无硬前置；P-01 需要 clock-skew L0 与既有 L2 故障样本。共享 P-02 中 F01 负责原实现基线，T05/T06 各自负责 index/cache 比较；完整 P-02 仍未通过 |
 | 非目标 | 不在 F01 中伪造 GPUI scene/present/accessibility provider，也不把 oracle/index 局部对照写成 T05/T06 或完整 P-02 完成 |
 | 有界出口 | 为本切片开单一 PR，核验 PR/push jobs 和实际 artifact 的 source/dirty/样本数/summary/hash；随后重审 F01 task-local P-01/P-02 责任并自动选择下一项。CI job 通过但 artifact 缺失时不能把 F01 改成 `done` |
