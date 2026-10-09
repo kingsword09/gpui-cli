@@ -40,7 +40,7 @@ PR #388 push run
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | 用户指定有界 F01 旧 CLI/v1 材料归档：PR #393 已在 raw artifact 核验后 squash 为 `3db1202`；新 archive driver 和 CI 接线已本地实现，等待新切片验证、PR CI/raw legacy artifact 和 squash。完成此项后交接，不自动扩张其他任务 |
+| 当前执行游标 | 用户指定有界 F01 旧 CLI/v1 材料归档的实现、CI 和 raw artifact 出口已验证，发布记录见 PR #394；本轮完成发布后交接，不自动扩张其他任务。证据绑定 `3ff1d18`，后续文档/合并不能改标 producer |
 | 首批候选 | F01 无硬前置；其 P-02 责任只包括固定夹具和原实现基线。T05 负责索引对照、T06 负责缓存对照，完整 P-02 不作为 F01 的反向依赖。T01 x86_64 emulator match/mismatch 已由 PR #388 hosted artifact 覆盖；unknown-ABI physical device 仍未覆盖 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
@@ -81,11 +81,11 @@ clean artifact 已按独立 expected SHA 下载核验，PR #393 squash 为 `3db1
 | --- | --- |
 | 实现 | 保存原设计 immutable commit `6d091b6` 的旧 CLI、完整 source、v1 generated scaffold、Cargo.lock/toolchain/文件 hashes；由 CI artifact 发布，二进制不进 Git |
 | 本地 | 完整 archive/verifier smoke、58 项 Python 回归、fmt/actionlint/design-doc/clippy/build 和串行 workspace 通过；默认并行 workspace 的 5 项失败原样保留且逐项重跑通过，详细分层结果见本轮实验记录 |
-| CI | PR #394 首轮 baseline job 成功，但下载 PR run `37907132119` 后发现上传漏掉 `project/.gitignore` 与 `project/mobile/android/.cargo/config.toml`，119/121 文件使独立 verifier 失败。先为本 artifact 显式保留隐藏文件并补 workflow 回归，再核验修复提交的两套 clean legacy artifact 和完整 jobs；原失败不覆盖 |
+| CI | `3ff1d18` 的 PR/push runs `37908915133` / `37908909359` 各 14 jobs 全绿，两套实际下载 artifact 的 current/legacy verifier 均通过，121 个旧材料文件齐全。首轮两套 119/121 文件漏传失败与 PR 13 jobs 成功/ios smoke 被后续提交取消的记录保留；修复后为 59 项 Python 回归 |
 | 原生 | attempt-14 的 device.install failed span、parent build failed、无 launch、session/lease/device cleanup 已独立通过；不需要重新操作其他设备 |
 | 依赖 / 验收 | F01 无硬前置，补任务第 1 项的基线 CLI/v1 模板材料；P-01/P-02 的 F01 责任与 T05/T06、F02 在线兼容严格分离 |
 | 非目标 | 不修改旧版本源码、不声明旧 CLI 与新 supervisor 的兼容通过、不扩张缓存、scene/present/semantics 或 physical-device 支持 |
-| 出口 / 恢复 | 本次只完成旧材料可复验归档及必要 CI/review/merge，父计数不变；整体路线以后恢复时先逐条审查 F01，T01 等 unknown-ABI physical 环境，F01 完成后 T02 依赖才满足 |
+| 出口 / 恢复 | 归档切片验收出口已取得，PR #394 记录发布/合并，最终文档提交另按 checks 验证；父计数不变。本轮到此交接。整体路线恢复的精确下一动作是 fetch 主线、比较本轮证据提交，再逐条审查 F01 task-local P-01/P-02 与 backlog，不从归档成功推定父任务完成；T01 等 unknown-ABI physical 环境，T02 仍须 F01 完整依赖满足后领取 |
 
 以下保留 PR #393 领取时的历史缺口表，不是当前等待状态：
 

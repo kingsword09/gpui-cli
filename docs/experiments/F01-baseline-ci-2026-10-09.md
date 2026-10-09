@@ -155,3 +155,37 @@ expected PR checkout=`89d9134b4c3edce4749ae66567bc8c789674ae5f` 来自独立 PR 
 原 ZIP、artifact metadata、独立 expected identity 和当前 baseline verification 保留于
 `artifacts/ci/37907132119/`；待修复提交的两套完整 clean artifact 与全部 jobs 重新核验，
 不重写首轮失败，也不放宽任何运行时 deadline。
+
+### 修复提交的分层出口证据
+
+修复提交为 `3ff1d1834e7fe8ae51805d133723498b4f8a8ef4`。59 项 Python 回归（12 项归档测试）、
+actionlint、design-doc 和 diff checks 通过；本切片仍无 Rust 实现或 Cargo dependency 改动。
+首轮 push artifact 也已实际下载，确认相同两个隐藏文件缺失；两套 inventory failure、ZIP 和
+verifier stderr 保留。首轮 PR run 最终 13 jobs 成功，ios smoke 在新提交后 cancelled，
+不是 14 jobs 全绿，也不将 cancelled 解释为应用 failure。
+
+修复后 PR run [`37908915133`](https://github.com/kingsword09/gpui-cli/actions/runs/37908915133)
+和 push run [`37908909359`](https://github.com/kingsword09/gpui-cli/actions/runs/37908909359)
+各 14 jobs 全绿。实际下载 ZIP 完整性与 current/legacy 两套 verifier 均通过；expected PR
+producer 来自独立 PR API，push producer 来自 run metadata，不取 artifact 自报值。
+
+| 证据 | PR | push |
+| --- | --- | --- |
+| producer / dirty | `0bf257dcc49b0796197d813c0bd52b55fdc40a6c` / false | `3ff1d1834e7fe8ae51805d133723498b4f8a8ef4` / false |
+| current samples / failures / recoveries | 120 / 40 / 40 | 120 / 40 / 40 |
+| current spans / commands / setup builds / cold | 1540 / 1018 / 6 / 3 | 1540 / 1020 / 6 / 3 |
+| legacy material files / protocol | 121 / v1 | 121 / v1 |
+| legacy CLI SHA-256 | `9f847b5efac0f32ac522b8f336d210ca13c0a4ae198e884bd6208ca02d26c16a` | `81f02a3d4e7d980082f4e2093156ff95da6ecefe7c6a7855faf3f0feade20a15` |
+| source tar SHA-256 | `b353f85cdf6faf4de0bba0c0cdc2b30582c9850bbbe9df386f4b43840d9d46a7` | `b353f85cdf6faf4de0bba0c0cdc2b30582c9850bbbe9df386f4b43840d9d46a7` |
+
+两套 legacy commands 均 exit 0，旧协议 3 unit tests 通过；原 source archive、CLI lockfile、
+v1 runtime bytes、隐藏文件及三端 scaffold 已独立对照。记录的 Linux toolchain 为 Rust/Cargo
+1.99.0。current CLI SHA-256 均为 `b9d1518250c83be2f5f7891412a7f9a7359522c990a586413376c4ee896e0156`。
+原始 ZIP、artifact/run metadata、expected identity、manifest、原命令/log 和两套独立 verifier
+输出在 ignored `artifacts/ci/<run>/`；legacy verifier 输出与 job 内保留副本逐字节一致。
+
+这关闭有界归档切片的实现、本地和 CI/raw artifact 出口；PR #394 保存发布/合并事实，
+最终文档提交的 checks 独立确认。此处证据绑定上述 producer，不冒充后续文档或 squash 提交；
+后续仅文档差异经审查后可沿用实现证据，不能跳过最终 head 的发布检查。
+不恢复历史 release binary，不执行 generated app build/launch、在线兼容或新 GUI/device 验收。
+本轮按用户范围到此交接；F01 保持 `in_progress`，35 项计数仍为 1 / 22 / 12。

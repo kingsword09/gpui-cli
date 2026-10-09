@@ -1,7 +1,9 @@
 # 主分支进度与接续记录
 
-更新日期：2026-10-09（Asia/Shanghai）。当前 `main`/`origin/main` 已到 `3db1202`（PR #393
-squash merge），新增完整 baseline artifact 与真实 setup cold/warm 分组；`ea9f5d8` 是 PR #392
+更新日期：2026-10-09（Asia/Shanghai）。本轮审查的主线基线为 `3db1202`（PR #393
+squash merge）；PR #394 的归档实现证据绑定 `3ff1d18`，发布/合并记录以该 PR 为准，接续时
+先 fetch 并比较主线与证据提交，不能把旧 artifact 改标为后续提交。PR #393 新增完整 baseline
+artifact 与真实 setup cold/warm 分组；`ea9f5d8` 是 PR #392
 的前一基线。PR #388 的 `8effdf9` 是前一移动实现基线，`f38d9df` 是 PR #389 的合并与审计基线，
 `852ddec` 仍保留为 PR #377 历史代码审计基线。PR #392 增加 F01/P-01 clock-offset L0 regression，
 没有改变 span runtime 行为。PR #388 的 `f38d9df..8effdf9` 13 个文件变化覆盖 CI、移动证据
@@ -53,11 +55,13 @@ recoveries、6 setup builds / 3 cold，CLI SHA-256 均为
 parent build 的真实闭合 spans，并独立验证无 launch、session/lease/device cleanup；原实验
 错误断言导致的 fail 摘要原样保留。当前用户指定有界切片是完成旧 CLI/v1 材料归档：
 固定 `6d091b6` 的 archive driver/校验/CI 接线已经本地实现，不修改旧源码，归档的是真实源码
-在所记录工具链下重建的旧 binary，不冒充历史 release binary。仍待该切片 CI、raw artifact
-核验和 review/merge；F01 不晋升，不宣称 F02 在线兼容或完整 P-02 通过。
-PR #394 首轮 baseline job 成功，但实际下载的 PR artifact 只有 119/121 个旧材料文件，缺少
-`.gitignore` 和 Android `.cargo/config.toml`，独立 verifier 失败。已补 artifact 隐藏文件上传
-配置与确定失败的 workflow 回归；须在修复提交上重跑两套 clean artifact，不能将 job 绿灯当作归档通过。
+在所记录工具链下重建的旧 binary，不冒充历史 release binary。PR #394 的修复提交 `3ff1d18`
+已通过 PR/push runs `37908915133` / `37908909359` 各 14 jobs；两套完整 raw artifact 已按独立
+expected producer SHA 和 dirty=false 下载核验，均含 121 个旧材料文件，原源码/lockfile/v1
+runtime 与三端 scaffold 校验通过。首轮 119/121 文件的隐藏材料漏传失败保留，修复不放宽
+deadline；59 项 Python 回归通过，原本地并行 workspace 5 项失败不以串行成功覆盖。
+本有界归档验收出口已取得，发布记录见 PR #394；本轮到此交接，不自动开展其他任务。
+F01 仍为 `in_progress`，不宣称 F02 在线兼容或完整 P-02 通过。
 
 基础 CLI/Live 已有实现，macOS 窗口观察有限可用；场景、输入、check、视觉基线和本地 matrix
 已接入代码。单场景 desktop check 和 matrix check 均已接入严格冻结输入路径；matrix admission

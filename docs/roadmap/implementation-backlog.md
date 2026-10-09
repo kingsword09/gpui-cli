@@ -125,10 +125,13 @@ parent spans 和 session/lease/device cleanup 已独立核验，原实验脚本�
 immutable baseline `6d091b6` 的旧 binary/source/template hashes。F01 继续 `in_progress`。
 用户现指定先完成这一有界归档切片。`archive-f01-baseline.py` 保存 immutable source、旧 binary、
 原 CLI lockfile、三端 generated v1 scaffold、工具链、commands 和 hashes；本地真实归档已通过，
-CI 接入原 baseline artifact 的 `legacy/`。仍待新切片 CI、raw artifact 与 review/merge，
+CI 接入原 baseline artifact 的 `legacy/`。归档验收出口已取得，发布记录见 PR #394，
 本切片不修改旧源码、不做在线兼容和 GUI/device，不自动晋升 F01。
 PR #394 首轮 PR raw artifact 漏传 `.gitignore` 与 Android `.cargo/config.toml`，
-独立验证为 119/121 文件失败；已显式保留隐藏材料并补 workflow 回归，等待修复提交复验。
+独立验证为 119/121 文件失败；修复提交 `3ff1d18` 显式保留隐藏材料并补 workflow 回归。
+PR/push runs `37908915133` / `37908909359` 各 14 jobs 全绿，实际下载的两套 clean artifact
+均通过独立 current/legacy verifier，121 个旧材料文件齐全；证据 producer 不改标为文档或
+squash 提交。完成的是第 1 项材料归档，不将其等同 F01/P-01/P-02 全部收口。
 
 代码落点：现有 `src/commands/live.rs`、`src/devserver/session.rs`、`output.rs`、`tests/`；拟议 `tests/fixtures/`、`src/devserver/timing.rs`。
 
@@ -166,7 +169,7 @@ P-02 原实现基线，不表示 index/cache 全量比较完成。新增
 `device_clock_offset_does_not_change_supervisor_span_time` 定向测试及串行 workspace 验证已通过；
 默认并行 workspace 的 4 个 process/helper timing failures 已分别重跑通过并保留原失败。PR CI
 已由 run `37755266052` 和 push attempt 2 通过。baseline-driver artifact CI 已由 PR #393 核验；
-当前只等待旧材料归档切片的 CI/review/merge。
+旧材料归档切片的实现/CI/raw artifact 出口已核验，发布记录见 PR #394。
 P01 observer 的 scene/present/semantics 属于 O-10/O-11，不计入 F01 的 P-02 责任。
 
 ### T01 · Target-aware doctor
