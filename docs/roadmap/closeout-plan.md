@@ -81,7 +81,7 @@ clean artifact 已按独立 expected SHA 下载核验，PR #393 squash 为 `3db1
 | --- | --- |
 | 实现 | 保存原设计 immutable commit `6d091b6` 的旧 CLI、完整 source、v1 generated scaffold、Cargo.lock/toolchain/文件 hashes；由 CI artifact 发布，二进制不进 Git |
 | 本地 | 完整 archive/verifier smoke、58 项 Python 回归、fmt/actionlint/design-doc/clippy/build 和串行 workspace 通过；默认并行 workspace 的 5 项失败原样保留且逐项重跑通过，详细分层结果见本轮实验记录 |
-| CI | PR #393 已核验并 squash；归档接线以独立下一 PR 核验两套 clean legacy artifact 和完整 jobs，保留失败和原命令 |
+| CI | PR #394 首轮 baseline job 成功，但下载 PR run `37907132119` 后发现上传漏掉 `project/.gitignore` 与 `project/mobile/android/.cargo/config.toml`，119/121 文件使独立 verifier 失败。先为本 artifact 显式保留隐藏文件并补 workflow 回归，再核验修复提交的两套 clean legacy artifact 和完整 jobs；原失败不覆盖 |
 | 原生 | attempt-14 的 device.install failed span、parent build failed、无 launch、session/lease/device cleanup 已独立通过；不需要重新操作其他设备 |
 | 依赖 / 验收 | F01 无硬前置，补任务第 1 项的基线 CLI/v1 模板材料；P-01/P-02 的 F01 责任与 T05/T06、F02 在线兼容严格分离 |
 | 非目标 | 不修改旧版本源码、不声明旧 CLI 与新 supervisor 的兼容通过、不扩张缓存、scene/present/semantics 或 physical-device 支持 |

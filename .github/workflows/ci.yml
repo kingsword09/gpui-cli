@@ -116,6 +116,7 @@ jobs:
         with:
           name: f01-baseline-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/acceptance/${{ github.sha }}/F01/linux-amd64/attempt-${{ github.run_attempt }}/
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 

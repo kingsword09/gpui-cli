@@ -55,6 +55,9 @@ parent build 的真实闭合 spans，并独立验证无 launch、session/lease/d
 固定 `6d091b6` 的 archive driver/校验/CI 接线已经本地实现，不修改旧源码，归档的是真实源码
 在所记录工具链下重建的旧 binary，不冒充历史 release binary。仍待该切片 CI、raw artifact
 核验和 review/merge；F01 不晋升，不宣称 F02 在线兼容或完整 P-02 通过。
+PR #394 首轮 baseline job 成功，但实际下载的 PR artifact 只有 119/121 个旧材料文件，缺少
+`.gitignore` 和 Android `.cargo/config.toml`，独立 verifier 失败。已补 artifact 隐藏文件上传
+配置与确定失败的 workflow 回归；须在修复提交上重跑两套 clean artifact，不能将 job 绿灯当作归档通过。
 
 基础 CLI/Live 已有实现，macOS 窗口观察有限可用；场景、输入、check、视觉基线和本地 matrix
 已接入代码。单场景 desktop check 和 matrix check 均已接入严格冻结输入路径；matrix admission

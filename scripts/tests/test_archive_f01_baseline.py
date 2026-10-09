@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import tarfile
 import tempfile
 import unittest
@@ -51,6 +52,12 @@ class ArchiveBaselineTests(unittest.TestCase):
             (output / "bin/gpui").write_bytes(b"binary")
             (output / "manifest.json").write_text("metadata")
             self.assertEqual(set(driver.material_hashes(output)), {"project/.gitignore", "bin/gpui"})
+
+    def test_ci_upload_preserves_hidden_scaffold_files(self):
+        workflow = (driver.ROOT / ".github/workflows/ci.yml").read_text()
+        job = re.search(r"^  baseline-driver:\n(.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)", workflow, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(job)
+        self.assertRegex(job[1], r"(?m)^          include-hidden-files: true$")
 
     def test_inventory_rejects_symlinked_materials(self):
         with tempfile.TemporaryDirectory() as temporary:

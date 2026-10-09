@@ -127,6 +127,8 @@ immutable baseline `6d091b6` 的旧 binary/source/template hashes。F01 继续 `
 原 CLI lockfile、三端 generated v1 scaffold、工具链、commands 和 hashes；本地真实归档已通过，
 CI 接入原 baseline artifact 的 `legacy/`。仍待新切片 CI、raw artifact 与 review/merge，
 本切片不修改旧源码、不做在线兼容和 GUI/device，不自动晋升 F01。
+PR #394 首轮 PR raw artifact 漏传 `.gitignore` 与 Android `.cargo/config.toml`，
+独立验证为 119/121 文件失败；已显式保留隐藏材料并补 workflow 回归，等待修复提交复验。
 
 代码落点：现有 `src/commands/live.rs`、`src/devserver/session.rs`、`output.rs`、`tests/`；拟议 `tests/fixtures/`、`src/devserver/timing.rs`。
 

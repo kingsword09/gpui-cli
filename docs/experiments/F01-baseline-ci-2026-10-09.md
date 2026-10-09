@@ -134,3 +134,24 @@ Clippy 和普通 build 通过；默认并行 workspace 为 485 passed / 5 failed
 ignored `artifacts/acceptance/3db1202/F01/archive-closeout/`，不把串行成功冒充并行稳定性。
 本切片未修改任何 Rust 实现或 Cargo dependencies；CI 仍按原默认并行标准运行。
 F01 保持 `in_progress`，35 项计数不变；这次仅以归档切片的分层证据闭合为出口。
+
+### 首轮 hosted artifact 漏传隐藏材料
+
+干净本机归档 `artifacts/acceptance/c6c8564/F01/macos-arm64/legacy-clean-01/` 已通过，
+producer=`c6c8564b3775f7895396510d78a5703b2f750b22`、dirty=false，121 个材料文件。
+PR #394 首轮 push run `37907124415` 的 14 jobs 全绿；PR run `37907132119` 的 baseline job
+也成功，但实际下载并完成 ZIP CRC 核验后，独立 legacy verifier 失败。
+expected PR checkout=`89d9134b4c3edce4749ae66567bc8c789674ae5f` 来自独立 PR API，
+不是取 artifact 自报 revision。当前 baseline verifier 仍通过：120 samples、40 failures/recoveries、
+1540 spans、1007 commands、6 setup builds / 3 cold、dirty=false。
+
+旧材料 manifest 记录 121 个文件，下载产物仅 119 个；缺失 `project/.gitignore` 和
+`project/mobile/android/.cargo/config.toml`，无 extra 或 changed 文件。
+上传 step 未显式保留隐藏文件，job 内 verifier 在上传之前运行，不能发现发布产物丢失。
+修复仅为既有 F01 artifact 设置 `include-hidden-files: true`，范围仍限于该 evidence root；
+隐藏材料是历史 scaffold 的 ignore/target 配置，不上传整个 checkout 或用户配置。
+新增 workflow 回归在修复前确定失败，原日志为 ignored
+`artifacts/acceptance/3db1202/F01/archive-closeout/hidden-upload-before-fix.log`。
+原 ZIP、artifact metadata、独立 expected identity 和当前 baseline verification 保留于
+`artifacts/ci/37907132119/`；待修复提交的两套完整 clean artifact 与全部 jobs 重新核验，
+不重写首轮失败，也不放宽任何运行时 deadline。
