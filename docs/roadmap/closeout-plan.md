@@ -1,6 +1,8 @@
 # 整体路线推进、收口与 Agent 接续
 
-更新日期：2026-10-08（Asia/Shanghai）。当前 `main`/`origin/main`=`ea9f5d8`（PR #392 squash）；
+更新日期：2026-10-09（Asia/Shanghai）。当前 `main`/`origin/main`=`3db1202`（PR #393 squash）；
+前一基线 `ea9f5d8` 是 PR #392。PR #393 的完整 baseline artifact/cold-warm 修复及两套 raw
+clean artifact 已核验，35 个父任务状态/计数未变。
 前一基线 `8effdf9` 是 PR #388 的分层移动 CI 合并，`f38d9df` 是 PR #389 的合并与审计基线。
 PR #392 新增 F01/P-01 clock-offset L0 regression，不改变 span runtime 行为。PR #388 相对
 `f38d9df` 的 13 个文件变化覆盖 CI、driver、文档和贡献说明；F01 GPUI scene runtime 未变。
@@ -38,13 +40,13 @@ PR #388 push run
 | 字段 | 当前值 |
 | --- | --- |
 | 整体范围 | G0–G4 核心工作包，按依赖与收口优先持续推进 |
-| 当前执行游标 | F01 baseline-driver CI artifact：当前分支已接入完整 10+30 baseline、source manifest、样本/span verifier 和 always-upload artifact；PR #392 的 P-01 skew L0 已 squash 合并，本切片待 PR CI 与干净 hosted artifact 核验 |
+| 当前执行游标 | 用户指定有界 F01 旧 CLI/v1 材料归档：PR #393 已在 raw artifact 核验后 squash 为 `3db1202`；新 archive driver 和 CI 接线已本地实现，等待新切片验证、PR CI/raw legacy artifact 和 squash。完成此项后交接，不自动扩张其他任务 |
 | 首批候选 | F01 无硬前置；其 P-02 责任只包括固定夹具和原实现基线。T05 负责索引对照、T06 负责缓存对照，完整 P-02 不作为 F01 的反向依赖。T01 x86_64 emulator match/mismatch 已由 PR #388 hosted artifact 覆盖；unknown-ABI physical device 仍未覆盖 |
 | 选题原则 | 可恢复的游标优先；否则按第 3 节规则选择，不能将示例任务当作永久主线 |
 | 正式状态 | 仍为 1 done、22 in_progress、12 planned；选择或切换游标不等于晋升 |
 | 不作为默认替代 | 用 T05/T06 优化、预热、API marker 或移动证据字段扩张绕开早期任务；它们依赖/范围满足后仍可按队列选择 |
 
-### 当前工作卡：F01 baseline-driver CI artifact
+### 历史工作卡：F01 baseline-driver CI artifact（PR #393 已合并）
 
 2026-10-09 接续 PR #393（`c241362`）：两套 hosted baseline artifact 已下载并通过原 verifier，
 push revision 为 `c241362381cd9b98d285f91c7f2fd51254aa07a4`，PR merge revision 为
@@ -66,6 +68,26 @@ PR #393 的检查与 squash，再补 P-01 live native-install failure 的原始 
 attempt-08 实际 blocked_before_install，修复后的 standalone install/cleanup 摘要不替代
 supervisor 阶段计时。详细缺口、复现与分层证据见
 [本轮复核](../experiments/F01-baseline-ci-2026-10-09.md)。
+
+### 当前有界工作卡：F01 旧 CLI/v1 材料归档
+
+`5cfc419` 的 PR run `37863074479` 和 push run `37863069334` 各 14 jobs 已全绿，
+clean artifact 已按独立 expected SHA 下载核验，PR #393 squash 为 `3db1202`；native-install
+本机 span 已在 attempt-14 独立核验通过。用户指定先完成本归档切片，而非继续其他父任务。
+原实验脚本因错误地要求 error 字符串含 exit 73 而 fail，原结果保留，不能覆盖为 pass。
+修正的是证据解释，不改变运行时退出标准；实际 stage、父子 span、命令和 cleanup 见独立核验。
+
+| 维度 | 剩余项 / 有界出口 |
+| --- | --- |
+| 实现 | 保存原设计 immutable commit `6d091b6` 的旧 CLI、完整 source、v1 generated scaffold、Cargo.lock/toolchain/文件 hashes；由 CI artifact 发布，二进制不进 Git |
+| 本地 | 完整 archive/verifier smoke、58 项 Python 回归、fmt/actionlint/design-doc/clippy/build 和串行 workspace 通过；默认并行 workspace 的 5 项失败原样保留且逐项重跑通过，详细分层结果见本轮实验记录 |
+| CI | PR #393 已核验并 squash；归档接线以独立下一 PR 核验两套 clean legacy artifact 和完整 jobs，保留失败和原命令 |
+| 原生 | attempt-14 的 device.install failed span、parent build failed、无 launch、session/lease/device cleanup 已独立通过；不需要重新操作其他设备 |
+| 依赖 / 验收 | F01 无硬前置，补任务第 1 项的基线 CLI/v1 模板材料；P-01/P-02 的 F01 责任与 T05/T06、F02 在线兼容严格分离 |
+| 非目标 | 不修改旧版本源码、不声明旧 CLI 与新 supervisor 的兼容通过、不扩张缓存、scene/present/semantics 或 physical-device 支持 |
+| 出口 / 恢复 | 本次只完成旧材料可复验归档及必要 CI/review/merge，父计数不变；整体路线以后恢复时先逐条审查 F01，T01 等 unknown-ABI physical 环境，F01 完成后 T02 依赖才满足 |
+
+以下保留 PR #393 领取时的历史缺口表，不是当前等待状态：
 
 | 维度 | 本轮开始时的差距 / 出口 |
 | --- | --- |

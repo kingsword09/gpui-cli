@@ -1,6 +1,6 @@
 # 实施清单：从 D1 到可验证的跨平台开发闭环
 
-状态核查：2026-10-08，已合并代码基线 `ea9f5d8`（PR #392 squash merge）。35 项中 1 done、22 in_progress、12 planned；
+状态核查：2026-10-09，已合并代码基线 `3db1202`（PR #393 squash merge）。35 项中 1 done、22 in_progress、12 planned；
 完整代码事实、旧审计问题与验证范围见[当前进度与接续记录](current-status.md)。PR #380 的
 T01 doctor/F01 baseline-driver 实现及 CI 已合并；PR #381 又合并了 F01/P-01 macOS
 cancel/superseded/native-install-failure 局部验收和 iOS-safe backtrace compatibility snapshot。
@@ -114,10 +114,19 @@ verifier，但实际 `b3` 的首个 warmup 被误标为 cold；需将真实 setu
 startup superseded/failure，全部 mutation 样本标为 incremental warm，并补分类回归和修复后的
 CI artifact。首轮 macOS capture helper / iOS launch 超时已保留，两套定向 attempt 2 均已通过。
 这仍是 F01/P-02 原实现报告真实性缺口，不改变父状态和 35 项计数。
-分类修复已通过 47 项 Python 回归和完整本地 dirty smoke；CI 仍需修复提交的 clean artifact。
+分类修复已通过 47 项 Python 回归和完整本地 dirty smoke；两套修复 CI 和 raw clean artifact
+已核验并随 PR #393 squash 为 `3db1202`。
 父责任复核还发现 P-01 native-install 的历史 live attempt-08 为 blocked_before_install，修复后
 standalone install/cleanup 摘要未保存对应 supervisor failed span，必须补跑后才可关闭该 span
 责任，详见[本轮复核](../experiments/F01-baseline-ci-2026-10-09.md)。
+随后 `5cfc419` 两套 CI 各 14 jobs 全绿；owned iOS simulator attempt-14 的 failed install/
+parent spans 和 session/lease/device cleanup 已独立核验，原实验脚本错误断言的 fail 保留。
+剩余父责任为旧 CLI/v1 scaffold 材料归档：当前 artifact 保存的是当前 CLI，不能替代原设计
+immutable baseline `6d091b6` 的旧 binary/source/template hashes。F01 继续 `in_progress`。
+用户现指定先完成这一有界归档切片。`archive-f01-baseline.py` 保存 immutable source、旧 binary、
+原 CLI lockfile、三端 generated v1 scaffold、工具链、commands 和 hashes；本地真实归档已通过，
+CI 接入原 baseline artifact 的 `legacy/`。仍待新切片 CI、raw artifact 与 review/merge，
+本切片不修改旧源码、不做在线兼容和 GUI/device，不自动晋升 F01。
 
 代码落点：现有 `src/commands/live.rs`、`src/devserver/session.rs`、`output.rs`、`tests/`；拟议 `tests/fixtures/`、`src/devserver/timing.rs`。
 
@@ -143,7 +152,7 @@ baseline-driver 的已有 PR/CI 已合并。PR #392 已合入 `ea9f5d8`，clock-
 source/dirty/hash manifest、逐样本 outcome/recovery/span/command 校验和 always-upload。
 macOS arm64 dirty smoke 的 120 个样本、1520 spans 和 993 commands 已本地验证，记录于 ignored
 `artifacts/acceptance/ea9f5d8/F01/macos-arm64/attempt-12/`；干净 hosted CI artifact 与 PR
-检查仍待运行。P01 的 scene/present/semantics 属于 O-10/O-11，不作为 F01 的 P-02 责任；
+检查现已由 PR #393 两套 raw artifact 核验关闭。P01 的 scene/present/semantics 属于 O-10/O-11，不作为 F01 的 P-02 责任；
 不能将单机窗口或性能结果写成跨平台结论。
 
 2026-10-08 在干净提交 `8effdf9` 上补跑了大输入 full-scan oracle：4096 个 8192-byte 文件、
@@ -154,7 +163,8 @@ SHA-256=`346f28ad319a1fa4b3453995b0523b52480d1820681c1f69ebfa865127d03c23`。这
 P-02 原实现基线，不表示 index/cache 全量比较完成。新增
 `device_clock_offset_does_not_change_supervisor_span_time` 定向测试及串行 workspace 验证已通过；
 默认并行 workspace 的 4 个 process/helper timing failures 已分别重跑通过并保留原失败。PR CI
-已由 run `37755266052` 和 push attempt 2 通过。当前分支的 baseline-driver artifact CI 仍待核验。
+已由 run `37755266052` 和 push attempt 2 通过。baseline-driver artifact CI 已由 PR #393 核验；
+当前只等待旧材料归档切片的 CI/review/merge。
 P01 observer 的 scene/present/semantics 属于 O-10/O-11，不计入 F01 的 P-02 责任。
 
 ### T01 · Target-aware doctor

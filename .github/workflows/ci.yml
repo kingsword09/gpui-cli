@@ -99,6 +99,17 @@ jobs:
           --output "$F01_BASELINE_DIR"
           --expected-commit "$EXPECTED_SHA"
           --expected-dirty false
+      - name: Preserve immutable legacy CLI and v1 scaffold materials
+        env:
+          F01_BASELINE_DIR: artifacts/acceptance/${{ github.sha }}/F01/linux-amd64/attempt-${{ github.run_attempt }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin 6d091b661d7ef82115e88cf142c7ff252b593864
+          python3 scripts/archive-f01-baseline.py \
+            --output "$F01_BASELINE_DIR/legacy" \
+            --expected-producer "$EXPECTED_SHA" \
+            --expected-dirty false > "$F01_BASELINE_DIR/legacy-verification.json"
+          cat "$F01_BASELINE_DIR/legacy-verification.json"
       - name: Upload the F01 baseline and CLI binary
         if: always()
         uses: actions/upload-artifact@v4
